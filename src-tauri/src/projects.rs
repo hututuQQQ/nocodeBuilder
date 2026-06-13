@@ -1,0 +1,835 @@
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::{
+    env, fs,
+    path::{Component, Path, PathBuf},
+    process::Command,
+};
+
+const FRAMEWORK: &str = "vite-react";
+const WORKSPACE_DIR_NAME: &str = "AIBuilderProjects";
+const METADATA_DIR: &str = ".aibuilder";
+const METADATA_FILE: &str = "project.json";
+const SKIPPED_DIRS: [&str; 4] = [METADATA_DIR, "node_modules", "dist", ".git"];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectInfo {
+    id: String,
+    name: String,
+    path: String,
+    framework: String,
+    created_at: String,
+    updated_at: String,
+    last_opened_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileTree {
+    name: String,
+    path: String,
+    kind: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    children: Vec<FileTree>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFileInput {
+    path: String,
+    content: String,
+}
+
+#[tauri::command]
+pub fn create_project(project_name: String) -> Result<ProjectInfo, String> {
+    let name = normalize_project_name(&project_name)?;
+    let workspace = ensure_workspace_dir()?;
+    let id = unique_project_id(&workspace, &slugify_project_name(&name))?;
+    let project_dir = workspace.join(&id);
+
+    fs::create_dir_all(&project_dir).map_err(|error| {
+        format!(
+            "project: failed to create project directory '{}': {error}",
+            project_dir.display()
+        )
+    })?;
+
+    write_template_files(&project_dir, &id, &name)?;
+
+    let now = current_timestamp();
+    let project_dir = project_dir
+        .canonicalize()
+        .map_err(|error| format!("project: failed to resolve project directory: {error}"))?;
+    ensure_child_path(&workspace, &project_dir)?;
+
+    let info = ProjectInfo {
+        id,
+        name,
+        path: project_dir.to_string_lossy().to_string(),
+        framework: FRAMEWORK.to_string(),
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        last_opened_at: now,
+    };
+
+    write_metadata(&project_dir, &info)?;
+    Ok(info)
+}
+
+#[tauri::command]
+pub fn list_projects() -> Result<Vec<ProjectInfo>, String> {
+    let workspace = ensure_workspace_dir()?;
+    let entries = fs::read_dir(&workspace).map_err(|error| {
+        format!(
+            "project: failed to read workspace '{}': {error}",
+            workspace.display()
+        )
+    })?;
+    let mut projects = Vec::new();
+
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("project: failed to read workspace entry: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("project: failed to inspect workspace entry: {error}"))?;
+
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        if let Ok(project_dir) = entry.path().canonicalize() {
+            if ensure_child_path(&workspace, &project_dir).is_err() {
+                continue;
+            }
+
+            if let Ok(info) = read_metadata(&project_dir) {
+                projects.push(info);
+            }
+        }
+    }
+
+    projects.sort_by(|left, right| {
+        right
+            .last_opened_at
+            .cmp(&left.last_opened_at)
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    Ok(projects)
+}
+
+#[tauri::command]
+pub fn list_files(project_id: String) -> Result<FileTree, String> {
+    let project_dir = resolve_project_dir(&project_id)?;
+    let info = read_metadata(&project_dir)?;
+
+    build_file_tree(&project_dir, &project_dir, &info.name)
+}
+
+#[tauri::command]
+pub fn read_file(project_id: String, path: String) -> Result<String, String> {
+    let project_dir = resolve_project_dir(&project_id)?;
+    let file_path = resolve_existing_file_path(&project_dir, &path)?;
+
+    fs::read_to_string(&file_path).map_err(|error| {
+        format!(
+            "project: failed to read file '{}': {error}",
+            path_to_slash(&file_path)
+        )
+    })
+}
+
+#[tauri::command]
+pub fn write_file(project_id: String, path: String, content: String) -> Result<(), String> {
+    write_files(project_id, vec![ProjectFileInput { path, content }])
+}
+
+#[tauri::command]
+pub fn write_files(project_id: String, files: Vec<ProjectFileInput>) -> Result<(), String> {
+    let project_dir = resolve_project_dir(&project_id)?;
+
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    let mut targets = Vec::with_capacity(files.len());
+
+    for file in &files {
+        let target = prepare_write_target(&project_dir, &file.path)?;
+        targets.push(target);
+    }
+
+    for (file, target) in files.iter().zip(targets.iter()) {
+        fs::write(target, &file.content)
+            .map_err(|error| format!("project: failed to write file '{}': {error}", file.path))?;
+    }
+
+    touch_project_metadata(&project_dir, true, false)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn open_project_folder(project_id: String) -> Result<(), String> {
+    let project_dir = resolve_project_dir(&project_id)?;
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("explorer");
+        command.arg(&project_dir);
+        command
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(&project_dir);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(&project_dir);
+        command
+    };
+
+    command.spawn().map_err(|error| {
+        format!(
+            "project: failed to open project folder '{}': {error}",
+            project_dir.display()
+        )
+    })?;
+
+    touch_project_metadata(&project_dir, false, true)?;
+    Ok(())
+}
+
+fn normalize_project_name(project_name: &str) -> Result<String, String> {
+    let name = project_name.trim();
+
+    if name.is_empty() {
+        return Err("project: project name is required".to_string());
+    }
+
+    Ok(name.to_string())
+}
+
+fn workspace_dir() -> Result<PathBuf, String> {
+    let home = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .ok_or_else(|| "project: failed to resolve user home directory".to_string())?;
+
+    Ok(PathBuf::from(home).join(WORKSPACE_DIR_NAME))
+}
+
+fn ensure_workspace_dir() -> Result<PathBuf, String> {
+    let workspace = workspace_dir()?;
+
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "project: failed to create workspace '{}': {error}",
+            workspace.display()
+        )
+    })?;
+
+    workspace
+        .canonicalize()
+        .map_err(|error| format!("project: failed to resolve workspace directory: {error}"))
+}
+
+pub(crate) fn resolve_project_dir(project_id: &str) -> Result<PathBuf, String> {
+    validate_project_id(project_id)?;
+
+    let workspace = ensure_workspace_dir()?;
+    let project_dir = workspace.join(project_id);
+    let project_dir = project_dir
+        .canonicalize()
+        .map_err(|_| format!("project: project '{project_id}' was not found"))?;
+
+    ensure_child_path(&workspace, &project_dir)?;
+    read_metadata(&project_dir)?;
+
+    Ok(project_dir)
+}
+
+fn validate_project_id(project_id: &str) -> Result<(), String> {
+    if project_id.is_empty()
+        || !project_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err("project: invalid project id".to_string());
+    }
+
+    Ok(())
+}
+
+fn ensure_child_path(parent: &Path, child: &Path) -> Result<(), String> {
+    if !child.starts_with(parent) {
+        return Err("project: path escaped the workspace".to_string());
+    }
+
+    Ok(())
+}
+
+fn slugify_project_name(project_name: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_was_dash = false;
+
+    for character in project_name.chars().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character);
+            previous_was_dash = false;
+        } else if !previous_was_dash && !slug.is_empty() {
+            slug.push('-');
+            previous_was_dash = true;
+        }
+    }
+
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+
+    if slug.is_empty() {
+        format!("project-{}", Utc::now().timestamp())
+    } else {
+        slug
+    }
+}
+
+fn unique_project_id(workspace: &Path, base_id: &str) -> Result<String, String> {
+    let mut candidate = base_id.to_string();
+    let mut suffix = 2;
+
+    while workspace.join(&candidate).exists() {
+        candidate = format!("{base_id}-{suffix}");
+        suffix += 1;
+
+        if suffix > 10_000 {
+            return Err("project: failed to create a unique project id".to_string());
+        }
+    }
+
+    Ok(candidate)
+}
+
+fn current_timestamp() -> String {
+    Utc::now().to_rfc3339()
+}
+
+fn metadata_path(project_dir: &Path) -> PathBuf {
+    project_dir.join(METADATA_DIR).join(METADATA_FILE)
+}
+
+fn read_metadata(project_dir: &Path) -> Result<ProjectInfo, String> {
+    let metadata_path = metadata_path(project_dir);
+    let content = fs::read_to_string(&metadata_path).map_err(|error| {
+        format!(
+            "project: failed to read project metadata '{}': {error}",
+            metadata_path.display()
+        )
+    })?;
+    let mut info = serde_json::from_str::<ProjectInfo>(&content)
+        .map_err(|error| format!("project: failed to parse project metadata: {error}"))?;
+
+    info.path = project_dir.to_string_lossy().to_string();
+    info.framework = FRAMEWORK.to_string();
+
+    Ok(info)
+}
+
+fn write_metadata(project_dir: &Path, info: &ProjectInfo) -> Result<(), String> {
+    let metadata_dir = project_dir.join(METADATA_DIR);
+    fs::create_dir_all(&metadata_dir).map_err(|error| {
+        format!(
+            "project: failed to create metadata directory '{}': {error}",
+            metadata_dir.display()
+        )
+    })?;
+
+    let metadata_path = metadata_path(project_dir);
+    let content = serde_json::to_string_pretty(info)
+        .map_err(|error| format!("project: failed to serialize project metadata: {error}"))?;
+
+    fs::write(&metadata_path, content).map_err(|error| {
+        format!(
+            "project: failed to write project metadata '{}': {error}",
+            metadata_path.display()
+        )
+    })
+}
+
+fn touch_project_metadata(
+    project_dir: &Path,
+    update_modified: bool,
+    update_last_opened: bool,
+) -> Result<(), String> {
+    let mut info = read_metadata(project_dir)?;
+    let now = current_timestamp();
+
+    if update_modified {
+        info.updated_at = now.clone();
+    }
+
+    if update_last_opened {
+        info.last_opened_at = now;
+    }
+
+    write_metadata(project_dir, &info)
+}
+
+fn validate_relative_path(path: &str) -> Result<PathBuf, String> {
+    let path = path.trim();
+
+    if path.is_empty() {
+        return Err("project: file path is required".to_string());
+    }
+
+    let raw_path = Path::new(path);
+
+    if raw_path.is_absolute() {
+        return Err("project: absolute paths are not allowed".to_string());
+    }
+
+    let mut normalized = PathBuf::new();
+
+    for component in raw_path.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
+                return Err("project: path traversal is not allowed".to_string());
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err("project: file path is required".to_string());
+    }
+
+    if normalized
+        .components()
+        .next()
+        .is_some_and(|component| component.as_os_str() == std::ffi::OsStr::new(METADATA_DIR))
+    {
+        return Err("project: writing project metadata is not allowed".to_string());
+    }
+
+    Ok(normalized)
+}
+
+fn resolve_existing_file_path(project_dir: &Path, path: &str) -> Result<PathBuf, String> {
+    let relative_path = validate_relative_path(path)?;
+    let target = project_dir.join(relative_path);
+    let target = target
+        .canonicalize()
+        .map_err(|_| format!("project: file '{path}' was not found"))?;
+
+    ensure_child_path(project_dir, &target)?;
+
+    if !target.is_file() {
+        return Err(format!("project: '{path}' is not a file"));
+    }
+
+    Ok(target)
+}
+
+fn prepare_write_target(project_dir: &Path, path: &str) -> Result<PathBuf, String> {
+    let relative_path = validate_relative_path(path)?;
+    let target = project_dir.join(relative_path);
+    let parent = target
+        .parent()
+        .ok_or_else(|| "project: invalid file path".to_string())?;
+
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "project: failed to create parent directory '{}': {error}",
+            parent.display()
+        )
+    })?;
+
+    let parent = parent
+        .canonicalize()
+        .map_err(|error| format!("project: failed to resolve parent directory: {error}"))?;
+    ensure_child_path(project_dir, &parent)?;
+
+    if target.exists() {
+        let resolved_target = target
+            .canonicalize()
+            .map_err(|error| format!("project: failed to resolve target file: {error}"))?;
+        ensure_child_path(project_dir, &resolved_target)?;
+
+        if resolved_target.is_dir() {
+            return Err(format!("project: '{path}' is a directory"));
+        }
+    }
+
+    Ok(target)
+}
+
+fn write_template_files(
+    project_dir: &Path,
+    project_id: &str,
+    project_name: &str,
+) -> Result<(), String> {
+    for file in vite_react_template(project_id, project_name)? {
+        let target = prepare_write_target(project_dir, &file.path)?;
+        fs::write(&target, file.content).map_err(|error| {
+            format!(
+                "project: failed to write template file '{}': {error}",
+                file.path
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+fn build_file_tree(root: &Path, current: &Path, root_name: &str) -> Result<FileTree, String> {
+    let metadata = fs::metadata(current).map_err(|error| {
+        format!(
+            "project: failed to inspect file tree path '{}': {error}",
+            current.display()
+        )
+    })?;
+    let relative_path = current
+        .strip_prefix(root)
+        .map_err(|_| "project: file tree escaped project root".to_string())?;
+    let path = path_to_slash(relative_path);
+    let name = if relative_path.as_os_str().is_empty() {
+        root_name.to_string()
+    } else {
+        current
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    if metadata.is_file() {
+        return Ok(FileTree {
+            name,
+            path,
+            kind: "file".to_string(),
+            children: Vec::new(),
+        });
+    }
+
+    let mut children = Vec::new();
+
+    for entry in fs::read_dir(current).map_err(|error| {
+        format!(
+            "project: failed to read directory '{}': {error}",
+            current.display()
+        )
+    })? {
+        let entry =
+            entry.map_err(|error| format!("project: failed to read directory entry: {error}"))?;
+        let file_name = entry.file_name().to_string_lossy().to_string();
+
+        if SKIPPED_DIRS.contains(&file_name.as_str()) {
+            continue;
+        }
+
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("project: failed to inspect directory entry: {error}"))?;
+
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        if file_type.is_dir() || file_type.is_file() {
+            children.push(build_file_tree(root, &entry.path(), root_name)?);
+        }
+    }
+
+    children.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+
+    Ok(FileTree {
+        name,
+        path,
+        kind: "directory".to_string(),
+        children,
+    })
+}
+
+fn path_to_slash(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn vite_react_template(
+    project_id: &str,
+    project_name: &str,
+) -> Result<Vec<ProjectFileInput>, String> {
+    let project_name_literal = serde_json::to_string(project_name)
+        .map_err(|error| format!("project: failed to encode project name: {error}"))?;
+    let package_json = json!({
+        "name": project_id,
+        "private": true,
+        "version": "0.1.0",
+        "type": "module",
+        "scripts": {
+            "dev": "vite",
+            "build": "tsc -b && vite build",
+            "preview": "vite preview"
+        },
+        "dependencies": {
+            "lucide-react": "^1.17.0",
+            "react": "^19.1.0",
+            "react-dom": "^19.1.0"
+        },
+        "devDependencies": {
+            "@types/react": "^19.1.8",
+            "@types/react-dom": "^19.1.6",
+            "@vitejs/plugin-react": "^4.6.0",
+            "autoprefixer": "^10.4.21",
+            "postcss": "^8.5.6",
+            "tailwindcss": "^3.4.17",
+            "typescript": "~5.8.3",
+            "vite": "^7.0.4"
+        }
+    });
+    let package_json = serde_json::to_string_pretty(&package_json)
+        .map_err(|error| format!("project: failed to create package.json: {error}"))?;
+
+    Ok(vec![
+        ProjectFileInput {
+            path: "package.json".to_string(),
+            content: format!("{package_json}\n"),
+        },
+        ProjectFileInput {
+            path: "index.html".to_string(),
+            content: r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vite React App</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+"#
+            .to_string(),
+        },
+        ProjectFileInput {
+            path: "vite.config.ts".to_string(),
+            content: r#"import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  plugins: [react()],
+});
+"#
+            .to_string(),
+        },
+        ProjectFileInput {
+            path: "tsconfig.json".to_string(),
+            content: r#"{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "module": "ESNext",
+    "moduleResolution": "Node",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx"
+  },
+  "include": ["src"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}
+"#
+            .to_string(),
+        },
+        ProjectFileInput {
+            path: "tsconfig.node.json".to_string(),
+            content: r#"{
+  "compilerOptions": {
+    "composite": true,
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "skipLibCheck": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "noEmit": true
+  },
+  "include": ["vite.config.ts"]
+}
+"#
+            .to_string(),
+        },
+        ProjectFileInput {
+            path: "tailwind.config.js".to_string(),
+            content: r#"/** @type {import('tailwindcss').Config} */
+export default {
+  content: ["./index.html", "./src/**/*.{ts,tsx}"],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+};
+"#
+            .to_string(),
+        },
+        ProjectFileInput {
+            path: "postcss.config.js".to_string(),
+            content: r#"export default {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+};
+"#
+            .to_string(),
+        },
+        ProjectFileInput {
+            path: "src/main.tsx".to_string(),
+            content: r#"import React from "react";
+import ReactDOM from "react-dom/client";
+import App from "./App";
+import "./index.css";
+
+ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+);
+"#
+            .to_string(),
+        },
+        ProjectFileInput {
+            path: "src/App.tsx".to_string(),
+            content: format!(
+                r#"import {{ ArrowRight, Sparkles }} from "lucide-react";
+
+const highlights = ["Vite", "React", "TypeScript", "Tailwind CSS"];
+const projectName = {project_name_literal};
+
+export default function App() {{
+  return (
+    <main className="min-h-screen bg-zinc-950 text-zinc-50">
+      <section className="mx-auto flex min-h-screen w-full max-w-5xl flex-col justify-center px-6 py-16">
+        <div className="mb-8 flex items-center gap-3">
+          <div className="grid size-11 place-items-center rounded-lg border border-teal-300/30 bg-teal-300/10 text-teal-200">
+            <Sparkles size={{22}} aria-hidden="true" />
+          </div>
+          <div>
+            <p className="text-sm uppercase tracking-[0.22em] text-teal-200">
+              AI Builder Project
+            </p>
+            <h1 className="text-4xl font-semibold tracking-tight text-white">
+              {{projectName}}
+            </h1>
+          </div>
+        </div>
+
+        <div className="max-w-2xl">
+          <p className="text-lg leading-8 text-zinc-300">
+            A clean frontend starter generated locally by AI Web Builder.
+          </p>
+          <div className="mt-8 flex flex-wrap gap-3">
+            {{highlights.map((item) => (
+              <span
+                className="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-300"
+                key={{item}}
+              >
+                {{item}}
+              </span>
+            ))}}
+          </div>
+        </div>
+
+        <a
+          className="mt-10 inline-flex w-fit items-center gap-2 rounded-md border border-teal-300/30 bg-teal-300/10 px-4 py-3 text-sm font-medium text-teal-100 transition hover:border-teal-200/60 hover:bg-teal-300/15"
+          href="https://vite.dev"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Start building
+          <ArrowRight size={{16}} aria-hidden="true" />
+        </a>
+      </section>
+    </main>
+  );
+}}
+"#,
+                project_name_literal = project_name_literal
+            ),
+        },
+        ProjectFileInput {
+            path: "src/index.css".to_string(),
+            content: r#"@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #f4f4f5;
+  background: #09090b;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+}
+"#
+            .to_string(),
+        },
+    ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_absolute_and_parent_paths() {
+        let absolute_path = if cfg!(windows) {
+            "C:/outside.tsx"
+        } else {
+            "/outside.tsx"
+        };
+
+        assert!(validate_relative_path("../outside.tsx").is_err());
+        assert!(validate_relative_path("src/../../outside.tsx").is_err());
+        assert!(validate_relative_path(absolute_path).is_err());
+    }
+
+    #[test]
+    fn rejects_metadata_writes() {
+        assert!(validate_relative_path(".aibuilder/project.json").is_err());
+    }
+
+    #[test]
+    fn slugifies_project_names() {
+        assert_eq!(slugify_project_name("Pet Care Site"), "pet-care-site");
+        assert_eq!(slugify_project_name("  CRM__Dashboard!! "), "crm-dashboard");
+    }
+}
