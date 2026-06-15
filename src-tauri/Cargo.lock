@@ -22,6 +22,7 @@ name = "ai-web-builder"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures-util",
  "reqwest",
  "serde",
  "serde_json",

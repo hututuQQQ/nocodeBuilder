@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { ChatMessage, DeepSeekClientConfig } from "./types";
 
 type DeepSeekErrorCode =
@@ -29,10 +30,21 @@ type NativeChatCompletionResponse = {
   body: string;
 };
 
+type DeepSeekStreamEvent = {
+  requestId: string;
+  delta: string;
+  done: boolean;
+  timestamp: string;
+};
+
 type RawChatCompletionResponse = {
   ok: boolean;
   status: number;
   body: string;
+};
+
+type ChatJsonOptions = {
+  onDelta?: (delta: string) => void;
 };
 
 export class DeepSeekClientError extends Error {
@@ -64,8 +76,11 @@ export class DeepSeekClient {
     };
   }
 
-  async chatJson<T>(messages: ChatMessage[]): Promise<T> {
-    return this.requestJson<T>(messages);
+  async chatJson<T>(
+    messages: ChatMessage[],
+    options: ChatJsonOptions = {},
+  ): Promise<T> {
+    return this.requestJson<T>(messages, undefined, options);
   }
 
   async testConnection(): Promise<boolean> {
@@ -85,10 +100,12 @@ export class DeepSeekClient {
   private async requestJson<T>(
     messages: ChatMessage[],
     maxTokens?: number,
+    options: ChatJsonOptions = {},
   ): Promise<T> {
     const content = await this.createChatCompletion(
       this.withJsonInstruction(messages),
       maxTokens,
+      options,
     );
 
     return parseAssistantJson<T>(content);
@@ -97,6 +114,7 @@ export class DeepSeekClient {
   private async createChatCompletion(
     messages: ChatMessage[],
     maxTokens?: number,
+    options: ChatJsonOptions = {},
   ): Promise<string> {
     if (!this.config.apiKey) {
       throw new DeepSeekClientError(
@@ -113,7 +131,7 @@ export class DeepSeekClient {
       model: this.config.model,
       messages,
       response_format: { type: "json_object" },
-      stream: false,
+      stream: Boolean(options.onDelta),
       temperature: 0,
       thinking: { type: "disabled" },
     };
@@ -122,7 +140,7 @@ export class DeepSeekClient {
       body.max_tokens = maxTokens;
     }
 
-    const response = await this.sendChatCompletion(body);
+    const response = await this.sendChatCompletion(body, options);
     const parsedResponse = parseApiResponse(response.body, response.ok);
 
     if (!response.ok) {
@@ -143,9 +161,18 @@ export class DeepSeekClient {
 
   private async sendChatCompletion(
     body: Record<string, unknown>,
+    options: ChatJsonOptions,
   ): Promise<RawChatCompletionResponse> {
     if (isTauriRuntime()) {
+      if (options.onDelta) {
+        return this.invokeNativeChatCompletionStream(body, options.onDelta);
+      }
+
       return this.invokeNativeChatCompletion(body);
+    }
+
+    if (options.onDelta) {
+      return this.fetchChatCompletionStream(body, options.onDelta);
     }
 
     return this.fetchChatCompletion(body);
@@ -176,6 +203,51 @@ export class DeepSeekClient {
     }
   }
 
+  private async invokeNativeChatCompletionStream(
+    body: Record<string, unknown>,
+    onDelta: (delta: string) => void,
+  ): Promise<RawChatCompletionResponse> {
+    const requestId = `deepseek-${Date.now()}-${Math.random()
+      .toString(16)
+      .slice(2)}`;
+    const unlisten = await listen<DeepSeekStreamEvent>(
+      "deepseek-stream",
+      (event) => {
+        if (event.payload.requestId !== requestId || event.payload.done) {
+          return;
+        }
+
+        if (event.payload.delta) {
+          onDelta(event.payload.delta);
+        }
+      },
+    );
+
+    try {
+      const response = await invoke<NativeChatCompletionResponse>(
+        "deepseek_chat_completion_stream",
+        {
+          request: {
+            apiKey: this.config.apiKey,
+            body,
+            requestId,
+            url: this.getChatCompletionsUrl(),
+          },
+        },
+      );
+
+      return {
+        body: response.body,
+        ok: response.status >= 200 && response.status < 300,
+        status: response.status,
+      };
+    } catch (error) {
+      throw createNetworkError(error);
+    } finally {
+      unlisten();
+    }
+  }
+
   private async fetchChatCompletion(
     body: Record<string, unknown>,
   ): Promise<RawChatCompletionResponse> {
@@ -196,6 +268,90 @@ export class DeepSeekClient {
       return {
         body: await response.text(),
         ok: response.ok,
+        status: response.status,
+      };
+    } catch (error) {
+      throw createNetworkError(error);
+    } finally {
+      globalThis.clearTimeout(timeoutId);
+    }
+  }
+
+  private async fetchChatCompletionStream(
+    body: Record<string, unknown>,
+    onDelta: (delta: string) => void,
+  ): Promise<RawChatCompletionResponse> {
+    const controller = new AbortController();
+    const timeoutId = globalThis.setTimeout(() => controller.abort(), 120000);
+
+    try {
+      const response = await fetch(this.getChatCompletionsUrl(), {
+        body: JSON.stringify({
+          ...body,
+          stream: true,
+        }),
+        headers: {
+          Authorization: `Bearer ${this.config.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        method: "POST",
+        signal: controller.signal,
+      });
+
+      if (!response.ok || !response.body) {
+        return {
+          body: await response.text(),
+          ok: response.ok,
+          status: response.status,
+        };
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let assistantContent = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+
+        while (true) {
+          const boundary = findSseBoundary(buffer);
+
+          if (!boundary) {
+            break;
+          }
+
+          const eventText = buffer.slice(0, boundary.index);
+          buffer = buffer.slice(boundary.index + boundary.length);
+          const delta = readSseDelta(eventText);
+
+          if (delta) {
+            assistantContent += delta;
+            onDelta(delta);
+          }
+        }
+      }
+
+      if (buffer.trim()) {
+        const delta = readSseDelta(buffer);
+
+        if (delta) {
+          assistantContent += delta;
+          onDelta(delta);
+        }
+      }
+
+      return {
+        body: JSON.stringify({
+          choices: [{ message: { content: assistantContent } }],
+        }),
+        ok: true,
         status: response.status,
       };
     } catch (error) {
@@ -339,6 +495,56 @@ function createHttpError(
 
 function readAssistantContent(response: ChatCompletionResponse) {
   return response.choices?.[0]?.message?.content?.trim() ?? "";
+}
+
+function findSseBoundary(buffer: string) {
+  const crlfIndex = buffer.indexOf("\r\n\r\n");
+
+  if (crlfIndex >= 0) {
+    return { index: crlfIndex, length: 4 };
+  }
+
+  const lfIndex = buffer.indexOf("\n\n");
+
+  if (lfIndex >= 0) {
+    return { index: lfIndex, length: 2 };
+  }
+
+  return null;
+}
+
+function readSseDelta(eventText: string) {
+  let content = "";
+
+  for (const line of eventText.split(/\r?\n/)) {
+    const trimmed = line.trim();
+
+    if (!trimmed.startsWith("data:")) {
+      continue;
+    }
+
+    const data = trimmed.slice("data:".length).trim();
+
+    if (!data || data === "[DONE]") {
+      continue;
+    }
+
+    try {
+      const parsed = JSON.parse(data) as {
+        choices?: Array<{
+          delta?: {
+            content?: string | null;
+          };
+        }>;
+      };
+
+      content += parsed.choices?.[0]?.delta?.content ?? "";
+    } catch {
+      continue;
+    }
+  }
+
+  return content;
 }
 
 function parseAssistantJson<T>(content: string): T {

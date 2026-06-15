@@ -1,5 +1,5 @@
 import { FormEvent, useState } from "react";
-import { Loader2, SendHorizontal } from "lucide-react";
+import { Loader2, SendHorizontal, Undo2 } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
 import {
   DEEPSEEK_MODEL_OPTIONS,
@@ -19,9 +19,19 @@ export function ChatPanel({
 }: ChatPanelProps) {
   const [draft, setDraft] = useState("");
   const [modelError, setModelError] = useState<string | null>(null);
+  const changeHistory = useAppStore((state) => state.changeHistory);
   const chatMessages = useAppStore((state) => state.chatMessages);
+  const currentProject = useAppStore((state) => state.currentProject);
+  const isGeneratingProject = useAppStore((state) => state.isGeneratingProject);
   const isModifyingProject = useAppStore((state) => state.isModifyingProject);
+  const isRollingBack = useAppStore((state) => state.isRollingBack);
+  const rollbackLastChange = useAppStore((state) => state.rollbackLastChange);
   const sendMessage = useAppStore((state) => state.sendMessage);
+  const isBusy = isGeneratingProject || isModifyingProject || isRollingBack;
+  const canRollback =
+    Boolean(currentProject) &&
+    changeHistory.some((change) => change.projectId === currentProject?.id) &&
+    !isBusy;
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -48,7 +58,22 @@ export function ChatPanel({
           <h2 className="text-sm font-semibold text-zinc-100">Chat</h2>
           <p className="text-xs text-zinc-500">Frontend vibe coding workspace</p>
         </div>
-        <div className="flex min-w-0 flex-col items-end gap-1">
+        <div className="flex min-w-0 items-center gap-3">
+          <button
+            aria-label="Rollback last agent change"
+            className="grid size-9 shrink-0 place-items-center rounded-md border border-zinc-800 text-zinc-500 transition hover:border-amber-400/40 hover:text-amber-200 disabled:cursor-not-allowed disabled:text-zinc-700"
+            disabled={!canRollback}
+            onClick={() => void rollbackLastChange()}
+            title="Rollback last agent change"
+            type="button"
+          >
+            {isRollingBack ? (
+              <Loader2 size={15} className="animate-spin" aria-hidden="true" />
+            ) : (
+              <Undo2 size={15} aria-hidden="true" />
+            )}
+          </button>
+          <div className="flex min-w-0 flex-col items-end gap-1">
           <div
             aria-label="DeepSeek model"
             className="grid grid-cols-2 rounded-md border border-zinc-800 bg-zinc-950 p-1"
@@ -65,7 +90,7 @@ export function ChatPanel({
                       ? "bg-blue-500/15 text-blue-100 ring-1 ring-blue-400/35"
                       : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
                   }`}
-                  disabled={isSavingModel || isModifyingProject}
+                  disabled={isSavingModel || isBusy}
                   key={option.value}
                   onClick={() => void handleChangeModel(option.value)}
                   title={`${option.value}: ${option.description}`}
@@ -90,16 +115,19 @@ export function ChatPanel({
           <span className="max-w-[260px] truncate text-[11px] text-zinc-600">
             {modelError ?? activeModel}
           </span>
+          </div>
         </div>
       </header>
 
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
         {chatMessages.map((message) => (
           <article
-            className={`max-w-[86%] rounded-md border px-4 py-3 text-sm leading-6 ${
+            className={`max-w-[86%] whitespace-pre-wrap rounded-md border px-4 py-3 text-sm leading-6 ${
               message.role === "user"
                 ? "ml-auto border-teal-400/30 bg-teal-400/10 text-teal-50"
-                : "border-zinc-800 bg-zinc-900/70 text-zinc-300"
+                : message.isStreaming
+                  ? "border-blue-400/30 bg-blue-400/10 text-blue-100"
+                  : "border-zinc-800 bg-zinc-900/70 text-zinc-300"
             }`}
             key={message.id}
           >
@@ -117,22 +145,22 @@ export function ChatPanel({
       >
         <textarea
           className="h-20 min-h-20 flex-1 resize-none rounded-md border border-zinc-800 bg-zinc-900 px-3 py-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/10"
-          disabled={isModifyingProject}
+          disabled={isBusy}
           onChange={(event) => setDraft(event.currentTarget.value)}
           placeholder="Tell the builder what to change..."
           value={draft}
         />
         <button
           className="flex h-20 w-24 shrink-0 items-center justify-center gap-2 rounded-md border border-teal-400/30 bg-teal-400/10 text-sm font-medium text-teal-100 transition hover:border-teal-300/60 hover:bg-teal-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
-          disabled={!draft.trim() || isModifyingProject}
+          disabled={!draft.trim() || isBusy}
           type="submit"
         >
-          {isModifyingProject ? (
+          {isBusy ? (
             <Loader2 size={16} className="animate-spin" aria-hidden="true" />
           ) : (
             <SendHorizontal size={16} aria-hidden="true" />
           )}
-          {isModifyingProject ? "Writing" : "Send"}
+          {isBusy ? "Writing" : "Send"}
         </button>
       </form>
     </main>

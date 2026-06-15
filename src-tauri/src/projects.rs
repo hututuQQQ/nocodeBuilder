@@ -1,17 +1,16 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::{
     env, fs,
     path::{Component, Path, PathBuf},
     process::Command,
 };
 
-const FRAMEWORK: &str = "vite-react";
+const FRAMEWORK: &str = "next-app-router";
 const WORKSPACE_DIR_NAME: &str = "AIBuilderProjects";
 const METADATA_DIR: &str = ".aibuilder";
 const METADATA_FILE: &str = "project.json";
-const SKIPPED_DIRS: [&str; 4] = [METADATA_DIR, "node_modules", "dist", ".git"];
+const SKIPPED_DIRS: [&str; 5] = [METADATA_DIR, "node_modules", "dist", ".next", ".git"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,8 +54,6 @@ pub fn create_project(project_name: String) -> Result<ProjectInfo, String> {
             project_dir.display()
         )
     })?;
-
-    write_template_files(&project_dir, &id, &name)?;
 
     let now = current_timestamp();
     let project_dir = project_dir
@@ -166,6 +163,34 @@ pub fn write_files(project_id: String, files: Vec<ProjectFileInput>) -> Result<(
     for (file, target) in files.iter().zip(targets.iter()) {
         fs::write(target, &file.content)
             .map_err(|error| format!("project: failed to write file '{}': {error}", file.path))?;
+    }
+
+    touch_project_metadata(&project_dir, true, false)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_files(project_id: String, paths: Vec<String>) -> Result<(), String> {
+    let project_dir = resolve_project_dir(&project_id)?;
+
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    let mut targets = Vec::with_capacity(paths.len());
+
+    for path in &paths {
+        let target = resolve_optional_file_path(&project_dir, path)?;
+        targets.push(target);
+    }
+
+    for target in targets.iter().flatten() {
+        fs::remove_file(target).map_err(|error| {
+            format!(
+                "project: failed to delete file '{}': {error}",
+                path_to_slash(target)
+            )
+        })?;
     }
 
     touch_project_metadata(&project_dir, true, false)?;
@@ -438,6 +463,26 @@ fn resolve_existing_file_path(project_dir: &Path, path: &str) -> Result<PathBuf,
     Ok(target)
 }
 
+fn resolve_optional_file_path(project_dir: &Path, path: &str) -> Result<Option<PathBuf>, String> {
+    let relative_path = validate_relative_path(path)?;
+    let target = project_dir.join(relative_path);
+
+    if !target.exists() {
+        return Ok(None);
+    }
+
+    let target = target
+        .canonicalize()
+        .map_err(|error| format!("project: failed to resolve file '{path}': {error}"))?;
+    ensure_child_path(project_dir, &target)?;
+
+    if !target.is_file() {
+        return Err(format!("project: '{path}' is not a file"));
+    }
+
+    Ok(Some(target))
+}
+
 fn prepare_write_target(project_dir: &Path, path: &str) -> Result<PathBuf, String> {
     let relative_path = validate_relative_path(path)?;
     let target = project_dir.join(relative_path);
@@ -469,24 +514,6 @@ fn prepare_write_target(project_dir: &Path, path: &str) -> Result<PathBuf, Strin
     }
 
     Ok(target)
-}
-
-fn write_template_files(
-    project_dir: &Path,
-    project_id: &str,
-    project_name: &str,
-) -> Result<(), String> {
-    for file in vite_react_template(project_id, project_name)? {
-        let target = prepare_write_target(project_dir, &file.path)?;
-        fs::write(&target, file.content).map_err(|error| {
-            format!(
-                "project: failed to write template file '{}': {error}",
-                file.path
-            )
-        })?;
-    }
-
-    Ok(())
 }
 
 fn build_file_tree(root: &Path, current: &Path, root_name: &str) -> Result<FileTree, String> {
@@ -564,245 +591,6 @@ fn build_file_tree(root: &Path, current: &Path, root_name: &str) -> Result<FileT
 
 fn path_to_slash(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
-}
-
-fn vite_react_template(
-    project_id: &str,
-    project_name: &str,
-) -> Result<Vec<ProjectFileInput>, String> {
-    let project_name_literal = serde_json::to_string(project_name)
-        .map_err(|error| format!("project: failed to encode project name: {error}"))?;
-    let package_json = json!({
-        "name": project_id,
-        "private": true,
-        "version": "0.1.0",
-        "type": "module",
-        "scripts": {
-            "dev": "vite",
-            "build": "tsc -b && vite build",
-            "preview": "vite preview"
-        },
-        "dependencies": {
-            "lucide-react": "^1.17.0",
-            "react": "^19.1.0",
-            "react-dom": "^19.1.0"
-        },
-        "devDependencies": {
-            "@types/react": "^19.1.8",
-            "@types/react-dom": "^19.1.6",
-            "@vitejs/plugin-react": "^4.6.0",
-            "autoprefixer": "^10.4.21",
-            "postcss": "^8.5.6",
-            "tailwindcss": "^3.4.17",
-            "typescript": "~5.8.3",
-            "vite": "^7.0.4"
-        }
-    });
-    let package_json = serde_json::to_string_pretty(&package_json)
-        .map_err(|error| format!("project: failed to create package.json: {error}"))?;
-
-    Ok(vec![
-        ProjectFileInput {
-            path: "package.json".to_string(),
-            content: format!("{package_json}\n"),
-        },
-        ProjectFileInput {
-            path: "index.html".to_string(),
-            content: r#"<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Vite React App</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
-</html>
-"#
-            .to_string(),
-        },
-        ProjectFileInput {
-            path: "vite.config.ts".to_string(),
-            content: r#"import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
-
-export default defineConfig({
-  plugins: [react()],
-});
-"#
-            .to_string(),
-        },
-        ProjectFileInput {
-            path: "tsconfig.json".to_string(),
-            content: r#"{
-  "compilerOptions": {
-    "target": "ES2020",
-    "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
-    "allowJs": false,
-    "skipLibCheck": true,
-    "esModuleInterop": true,
-    "allowSyntheticDefaultImports": true,
-    "strict": true,
-    "forceConsistentCasingInFileNames": true,
-    "module": "ESNext",
-    "moduleResolution": "Node",
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "noEmit": true,
-    "jsx": "react-jsx"
-  },
-  "include": ["src"],
-  "references": [{ "path": "./tsconfig.node.json" }]
-}
-"#
-            .to_string(),
-        },
-        ProjectFileInput {
-            path: "tsconfig.node.json".to_string(),
-            content: r#"{
-  "compilerOptions": {
-    "composite": true,
-    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
-    "skipLibCheck": true,
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "allowSyntheticDefaultImports": true,
-    "strict": true,
-    "noEmit": true
-  },
-  "include": ["vite.config.ts"]
-}
-"#
-            .to_string(),
-        },
-        ProjectFileInput {
-            path: "tailwind.config.js".to_string(),
-            content: r#"/** @type {import('tailwindcss').Config} */
-export default {
-  content: ["./index.html", "./src/**/*.{ts,tsx}"],
-  theme: {
-    extend: {},
-  },
-  plugins: [],
-};
-"#
-            .to_string(),
-        },
-        ProjectFileInput {
-            path: "postcss.config.js".to_string(),
-            content: r#"export default {
-  plugins: {
-    tailwindcss: {},
-    autoprefixer: {},
-  },
-};
-"#
-            .to_string(),
-        },
-        ProjectFileInput {
-            path: "src/main.tsx".to_string(),
-            content: r#"import React from "react";
-import ReactDOM from "react-dom/client";
-import App from "./App";
-import "./index.css";
-
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
-"#
-            .to_string(),
-        },
-        ProjectFileInput {
-            path: "src/App.tsx".to_string(),
-            content: format!(
-                r#"import {{ ArrowRight, Sparkles }} from "lucide-react";
-
-const highlights = ["Vite", "React", "TypeScript", "Tailwind CSS"];
-const projectName = {project_name_literal};
-
-export default function App() {{
-  return (
-    <main className="min-h-screen bg-zinc-950 text-zinc-50">
-      <section className="mx-auto flex min-h-screen w-full max-w-5xl flex-col justify-center px-6 py-16">
-        <div className="mb-8 flex items-center gap-3">
-          <div className="grid size-11 place-items-center rounded-lg border border-teal-300/30 bg-teal-300/10 text-teal-200">
-            <Sparkles size={{22}} aria-hidden="true" />
-          </div>
-          <div>
-            <p className="text-sm uppercase tracking-[0.22em] text-teal-200">
-              AI Builder Project
-            </p>
-            <h1 className="text-4xl font-semibold tracking-tight text-white">
-              {{projectName}}
-            </h1>
-          </div>
-        </div>
-
-        <div className="max-w-2xl">
-          <p className="text-lg leading-8 text-zinc-300">
-            A clean frontend starter generated locally by AI Web Builder.
-          </p>
-          <div className="mt-8 flex flex-wrap gap-3">
-            {{highlights.map((item) => (
-              <span
-                className="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-300"
-                key={{item}}
-              >
-                {{item}}
-              </span>
-            ))}}
-          </div>
-        </div>
-
-        <a
-          className="mt-10 inline-flex w-fit items-center gap-2 rounded-md border border-teal-300/30 bg-teal-300/10 px-4 py-3 text-sm font-medium text-teal-100 transition hover:border-teal-200/60 hover:bg-teal-300/15"
-          href="https://vite.dev"
-          target="_blank"
-          rel="noreferrer"
-        >
-          Start building
-          <ArrowRight size={{16}} aria-hidden="true" />
-        </a>
-      </section>
-    </main>
-  );
-}}
-"#,
-                project_name_literal = project_name_literal
-            ),
-        },
-        ProjectFileInput {
-            path: "src/index.css".to_string(),
-            content: r#"@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-:root {
-  color: #f4f4f5;
-  background: #09090b;
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    sans-serif;
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
-body {
-  min-width: 320px;
-  min-height: 100vh;
-  margin: 0;
-}
-"#
-            .to_string(),
-        },
-    ])
 }
 
 #[cfg(test)]
