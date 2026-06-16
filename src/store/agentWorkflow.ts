@@ -6,6 +6,7 @@ import {
   requestAgentStep,
   requestProjectGeneration,
 } from "../agent/projectModifier";
+import { buildDynamicAgentContext } from "../agent/project/memory";
 import { keyStore } from "../services/keyStore";
 import {
   getProjectErrorMessage,
@@ -25,16 +26,18 @@ import {
 } from "./agentUi";
 import { writeAgentFiles } from "./agentFileChanges";
 import {
+  createAgentRunState,
   ensureCurrentProject,
   executeAgentTool,
+  executeAgentToolBatch,
   formatAgentToolLabel,
   getPreferredProjectCommand,
   runAgentCommandObservation,
 } from "./agentToolExecutor";
 import type { StoreAccess } from "./storeAccess";
 
-const MAX_AGENT_STEPS = 6;
-const MAX_AGENT_REPAIR_ATTEMPTS = 1;
+const MAX_AGENT_STEPS = 10;
+const MAX_AGENT_REPAIR_ATTEMPTS = 2;
 
 export async function generateInitialProject(
   store: StoreAccess,
@@ -132,6 +135,7 @@ export async function modifyCurrentProject(
   );
   const statusLines: string[] = [];
   const observations: AgentObservation[] = [];
+  const runState = createAgentRunState();
   let didChangeFiles = false;
   let repairAttempts = 0;
   let buildVerified = false;
@@ -224,7 +228,13 @@ export async function modifyCurrentProject(
 
       const step = await requestAgentStep({
         config,
-        context: buildAgentStepContext(store, project, observations),
+        context: buildAgentStepContext(
+          store,
+          project,
+          observations,
+          runState,
+          userRequest,
+        ),
         onDelta: activeStream.onDelta,
         userRequest,
       });
@@ -261,29 +271,43 @@ export async function modifyCurrentProject(
         return;
       }
 
-      updateAgentStatus(
-        activeStream,
-        statusLines,
-        `Tool: ${formatAgentToolLabel(step)}.`,
-      );
+      updateAgentStatus(activeStream, statusLines, `Tool: ${formatAgentStepLabel(step)}.`);
 
-      const result = await executeAgentTool(
-        store,
-        project,
-        step,
-        observations.length + 1,
-      );
-      observations.push(result.observation);
-      appendTerminalLog(
-        store,
-        `[agent:${result.observation.ok ? "ok" : "error"}] ${result.observation.summary}`,
-      );
+      const results =
+        step.type === "tool_calls"
+          ? await executeAgentToolBatch(
+              store,
+              project,
+              step,
+              observations.length + 1,
+              runState,
+            )
+          : [
+              await executeAgentTool(
+                store,
+                project,
+                step,
+                observations.length + 1,
+                runState,
+              ),
+            ];
 
-      if (result.didChangeFiles) {
+      for (const result of results) {
+        observations.push(result.observation);
+        appendTerminalLog(
+          store,
+          `[agent:${result.observation.ok ? "ok" : "error"}] ${result.observation.summary}`,
+        );
+      }
+
+      const stepChangedFiles = results.some((result) => result.didChangeFiles);
+      const stepChangedPackage = results.some((result) => result.didChangePackage);
+
+      if (stepChangedFiles) {
         didChangeFiles = true;
         buildVerified = false;
 
-        if (result.didChangePackage) {
+        if (stepChangedPackage) {
           const installObservation = await runAgentCommandObservation(
             store,
             project,
@@ -323,7 +347,7 @@ export async function modifyCurrentProject(
           updateAgentStatus(
             activeStream,
             statusLines,
-            "Build failed. Asking the agent for one focused repair.",
+            `Build failed. Asking the agent for focused repair ${repairAttempts}/${MAX_AGENT_REPAIR_ATTEMPTS}.`,
           );
         } else {
           const content = [
@@ -331,7 +355,7 @@ export async function modifyCurrentProject(
             "",
             buildObservation.summary,
             "",
-            "The last file change is available in rollback history.",
+            "Review the changed files in the file panel before continuing.",
           ].join("\n");
 
           store.set((state) => ({
@@ -356,7 +380,7 @@ export async function modifyCurrentProject(
           "I stopped after reaching the agent step limit.",
           "",
           didChangeFiles
-            ? "Some project files were changed. Rollback is available from the chat toolbar."
+            ? "Some project files were changed."
             : "No project files were changed.",
         ].join("\n"),
         false,
@@ -387,24 +411,49 @@ function buildAgentStepContext(
   store: StoreAccess,
   project: ProjectInfo,
   observations: AgentObservation[],
+  runState: ReturnType<typeof createAgentRunState>,
+  userRequest: string,
 ) {
   const state = store.get();
+  const recentMessages = state.chatMessages
+    .filter((message) => message.id !== "welcome" && !message.isStreaming)
+    .slice(-8)
+    .map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+    }));
+  const dynamicContext = buildDynamicAgentContext({
+    changeHistory: state.changeHistory,
+    fileTree: state.fileTree,
+    observations,
+    project,
+    readFiles: Array.from(runState.readFiles.values()),
+    recentMessages,
+    userRequest,
+  });
 
   return {
     devServerStatus: state.devServerStatus,
     fileTree: state.fileTree ? formatProjectFileTree(state.fileTree) : null,
-    observations,
+    memory: dynamicContext.memory,
+    observations: dynamicContext.observations,
     previewUrl: state.previewUrl,
     projectName: project.name,
-    recentMessages: state.chatMessages
-      .filter((message) => message.id !== "welcome" && !message.isStreaming)
-      .slice(-8)
-      .map((message) => ({
-        id: message.id,
-        role: message.role,
-        content: message.content,
-      })),
+    recentMessages,
+    taskLedger: dynamicContext.taskLedger,
+    workingSummary: dynamicContext.workingSummary,
   };
+}
+
+function formatAgentStepLabel(
+  step: Extract<AgentStepResponse, { type: "tool_call" | "tool_calls" }>,
+) {
+  if (step.type === "tool_calls") {
+    return `tool_calls ${step.calls.map((call) => call.tool).join(", ")}`;
+  }
+
+  return formatAgentToolLabel(step);
 }
 
 function formatAgentFinishMessage(
@@ -417,10 +466,6 @@ function formatAgentFinishMessage(
     lines.push("", `Verification: ${step.verification}`);
   } else if (result.buildVerified) {
     lines.push("", "Verification: npm run build passed.");
-  }
-
-  if (result.didChangeFiles) {
-    lines.push("", "Rollback is available from the chat toolbar.");
   }
 
   return lines.join("\n");

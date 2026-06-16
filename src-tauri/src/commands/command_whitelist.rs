@@ -21,6 +21,21 @@ pub fn parse_allowed_command(command: &str) -> Result<AllowedCommand, String> {
             package_manager: "npm",
             args: &["run", "build"],
         }),
+        "npm run lint" => Ok(AllowedCommand {
+            label: "npm run lint",
+            package_manager: "npm",
+            args: &["run", "lint"],
+        }),
+        "npm run test" => Ok(AllowedCommand {
+            label: "npm run test",
+            package_manager: "npm",
+            args: &["run", "test"],
+        }),
+        "npm test" => Ok(AllowedCommand {
+            label: "npm test",
+            package_manager: "npm",
+            args: &["test"],
+        }),
         "pnpm install" => Ok(AllowedCommand {
             label: "pnpm install",
             package_manager: "pnpm",
@@ -36,8 +51,18 @@ pub fn parse_allowed_command(command: &str) -> Result<AllowedCommand, String> {
             package_manager: "pnpm",
             args: &["build"],
         }),
+        "pnpm lint" => Ok(AllowedCommand {
+            label: "pnpm lint",
+            package_manager: "pnpm",
+            args: &["lint"],
+        }),
+        "pnpm test" => Ok(AllowedCommand {
+            label: "pnpm test",
+            package_manager: "pnpm",
+            args: &["test"],
+        }),
         _ => Err(format!(
-            "command: '{normalized}' is not allowed. Allowed commands: npm install, npm run dev, npm run build, pnpm install, pnpm dev, pnpm build"
+            "command: '{normalized}' is not allowed. Allowed commands: npm install, npm run dev, npm run build, npm run lint, npm run test, npm test, pnpm install, pnpm dev, pnpm build, pnpm lint, pnpm test"
         )),
     }
 }

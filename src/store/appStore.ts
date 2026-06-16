@@ -20,7 +20,6 @@ import { createCommandActions } from "./commandStoreActions";
 import { createDeploymentActions } from "./deploymentStoreActions";
 import { createPreviewActions } from "./previewStoreActions";
 import { createProjectActions } from "./projectStoreActions";
-import { createRollbackActions } from "./rollbackStoreActions";
 
 export type { ChatMessage } from "./chatMessages";
 export type { ChangeRecord, FileChangeSummary } from "./changeHistory";
@@ -47,7 +46,6 @@ export type AppState = {
   isGeneratingProject: boolean;
   isLoadingFiles: boolean;
   isReadingFile: boolean;
-  isRollingBack: boolean;
   isRunningCommand: boolean;
   isStartingDevServer: boolean;
   isDeploying: boolean;
@@ -68,7 +66,6 @@ export type AppState = {
   openPreviewInBrowser: (url?: string) => Promise<void>;
   readProjectFile: (path: string) => Promise<void>;
   refreshPreview: () => void;
-  rollbackLastChange: () => Promise<void>;
   runProjectCommand: (
     projectId: string,
     command: string,
@@ -109,7 +106,6 @@ const initialState = {
   isGeneratingProject: false,
   isLoadingFiles: false,
   isReadingFile: false,
-  isRollingBack: false,
   isRunningCommand: false,
   isStartingDevServer: false,
   isDeploying: false,
@@ -127,7 +123,6 @@ const initialState = {
   | "openPreviewInBrowser"
   | "readProjectFile"
   | "refreshPreview"
-  | "rollbackLastChange"
   | "runProjectCommand"
   | "selectProject"
   | "sendMessage"
@@ -144,7 +139,6 @@ export const useAppStore = create<AppState>((set, get) => {
     ...createDeploymentActions(store),
     ...createPreviewActions(store),
     ...createProjectActions(store),
-    ...createRollbackActions(store),
     ...createChatActions(store),
   };
 });

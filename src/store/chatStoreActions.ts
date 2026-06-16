@@ -7,6 +7,8 @@ import type { StoreAccess } from "./storeAccess";
 type ChatActions = Pick<AppState, "sendMessage">;
 
 export function createChatActions({ get, set }: StoreAccess): ChatActions {
+  const store = { get, set };
+
   return {
     sendMessage: (content) => {
       const message = content.trim();
@@ -17,8 +19,7 @@ export function createChatActions({ get, set }: StoreAccess): ChatActions {
 
       if (
         get().isModifyingProject ||
-        get().isGeneratingProject ||
-        get().isRollingBack
+        get().isGeneratingProject
       ) {
         set((state) => ({
           chatMessages: [
@@ -40,7 +41,7 @@ export function createChatActions({ get, set }: StoreAccess): ChatActions {
         terminalLogs: appendLogs(state.terminalLogs, [`[chat] ${message}`]),
       }));
 
-      return modifyCurrentProject({ get, set }, message);
+      return modifyCurrentProject(store, message);
     },
   };
 }

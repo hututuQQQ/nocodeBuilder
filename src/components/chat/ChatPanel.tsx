@@ -1,5 +1,5 @@
 import { FormEvent, useState } from "react";
-import { Loader2, SendHorizontal, Undo2 } from "lucide-react";
+import { Loader2, SendHorizontal } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
 import {
   DEEPSEEK_MODEL_OPTIONS,
@@ -19,19 +19,11 @@ export function ChatPanel({
 }: ChatPanelProps) {
   const [draft, setDraft] = useState("");
   const [modelError, setModelError] = useState<string | null>(null);
-  const changeHistory = useAppStore((state) => state.changeHistory);
   const chatMessages = useAppStore((state) => state.chatMessages);
-  const currentProject = useAppStore((state) => state.currentProject);
   const isGeneratingProject = useAppStore((state) => state.isGeneratingProject);
   const isModifyingProject = useAppStore((state) => state.isModifyingProject);
-  const isRollingBack = useAppStore((state) => state.isRollingBack);
-  const rollbackLastChange = useAppStore((state) => state.rollbackLastChange);
   const sendMessage = useAppStore((state) => state.sendMessage);
-  const isBusy = isGeneratingProject || isModifyingProject || isRollingBack;
-  const canRollback =
-    Boolean(currentProject) &&
-    changeHistory.some((change) => change.projectId === currentProject?.id) &&
-    !isBusy;
+  const isBusy = isGeneratingProject || isModifyingProject;
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -59,20 +51,6 @@ export function ChatPanel({
           <p className="text-xs text-zinc-500">Frontend vibe coding workspace</p>
         </div>
         <div className="flex min-w-0 items-center gap-3">
-          <button
-            aria-label="Rollback last agent change"
-            className="grid size-9 shrink-0 place-items-center rounded-md border border-zinc-800 text-zinc-500 transition hover:border-amber-400/40 hover:text-amber-200 disabled:cursor-not-allowed disabled:text-zinc-700"
-            disabled={!canRollback}
-            onClick={() => void rollbackLastChange()}
-            title="Rollback last agent change"
-            type="button"
-          >
-            {isRollingBack ? (
-              <Loader2 size={15} className="animate-spin" aria-hidden="true" />
-            ) : (
-              <Undo2 size={15} aria-hidden="true" />
-            )}
-          </button>
           <div className="flex min-w-0 flex-col items-end gap-1">
           <div
             aria-label="DeepSeek model"

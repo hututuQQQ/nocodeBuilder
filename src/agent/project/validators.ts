@@ -2,10 +2,12 @@ import type { ProjectFileInput } from "../../services/projects";
 import type {
   AgentCommand,
   AgentStepResponse,
+  AgentToolCallStep,
   GenerateProjectResponse,
   ModifyProjectResponse,
 } from "./types";
 import {
+  isAllowedProjectSearchPath,
   isAllowedProjectPath,
   normalizeProjectPath,
   uniquePaths,
@@ -15,6 +17,11 @@ import {
   validatePackageJsonContent,
 } from "./packageValidation";
 import { isRecord } from "./records";
+import {
+  AGENT_COMMANDS,
+  getAgentToolDefinition,
+  isAgentToolName,
+} from "./toolRegistry";
 
 const REQUIRED_GENERATED_FILES = [
   "package.json",
@@ -23,24 +30,7 @@ const REQUIRED_GENERATED_FILES = [
   "app/globals.css",
 ];
 
-const AGENT_COMMANDS = new Set<AgentCommand>([
-  "npm install",
-  "npm run build",
-  "pnpm install",
-  "pnpm build",
-]);
-
-const AGENT_TOOLS = new Set([
-  "list_files",
-  "read_files",
-  "write_files",
-  "delete_files",
-  "run_command",
-  "start_dev_server",
-  "stop_dev_server",
-  "refresh_preview",
-  "rollback_last_change",
-]);
+const AGENT_COMMAND_SET = new Set<AgentCommand>(AGENT_COMMANDS);
 
 export function validateGeneratedProjectResponse(
   value: unknown,
@@ -104,15 +94,56 @@ export function validateAgentStepResponse(value: unknown): AgentStepResponse {
     };
   }
 
+  if (value.type === "tool_calls") {
+    if (!Array.isArray(value.calls) || value.calls.length === 0) {
+      throw new Error("Invalid DeepSeek response: tool_calls.calls is required.");
+    }
+
+    if (value.calls.length > 6) {
+      throw new Error("Invalid DeepSeek response: tool_calls may include at most 6 calls.");
+    }
+
+    const calls = value.calls.map((call) => {
+      if (!isRecord(call)) {
+        throw new Error("Invalid DeepSeek response: every tool call must be an object.");
+      }
+
+      return validateAgentToolCall(call);
+    });
+    const unsafeCall = calls.find((call) => {
+      const definition = getAgentToolDefinition(call.tool);
+      return !definition?.isReadOnly || !definition.isConcurrencySafe;
+    });
+
+    if (unsafeCall) {
+      throw new Error(
+        `Invalid DeepSeek response: tool_calls may only include read-only tools, got ${unsafeCall.tool}.`,
+      );
+    }
+
+    return {
+      type: "tool_calls",
+      rationale:
+        typeof value.rationale === "string" && value.rationale.trim()
+          ? value.rationale.trim()
+          : undefined,
+      calls,
+    };
+  }
+
   if (value.type !== "tool_call") {
     throw new Error(
-      'Invalid DeepSeek response: type must be "answer", "tool_call", or "finish".',
+      'Invalid DeepSeek response: type must be "answer", "tool_call", "tool_calls", or "finish".',
     );
   }
 
+  return validateAgentToolCall(value);
+}
+
+function validateAgentToolCall(value: Record<string, unknown>): AgentToolCallStep {
   const tool = typeof value.tool === "string" ? value.tool : "";
 
-  if (!AGENT_TOOLS.has(tool)) {
+  if (!isAgentToolName(tool)) {
     throw new Error(`Invalid DeepSeek response: unknown tool "${tool}".`);
   }
 
@@ -127,7 +158,6 @@ export function validateAgentStepResponse(value: unknown): AgentStepResponse {
     case "start_dev_server":
     case "stop_dev_server":
     case "refresh_preview":
-    case "rollback_last_change":
       return {
         type: "tool_call",
         tool,
@@ -141,6 +171,46 @@ export function validateAgentStepResponse(value: unknown): AgentStepResponse {
         rationale,
         args: {
           paths: validatePathArray(args.paths, "read_files.paths"),
+          offset: validateOptionalInteger(args.offset, "read_files.offset", 1, 20_000),
+          limit: validateOptionalInteger(args.limit, "read_files.limit", 1, 800),
+        },
+      };
+    case "grep_files":
+      return {
+        type: "tool_call",
+        tool,
+        rationale,
+        args: {
+          query: validateTextArg(args.query, "grep_files.query", 240),
+          paths: validateOptionalSearchPathArray(args.paths, "grep_files.paths"),
+          maxResults: validateOptionalInteger(args.maxResults, "grep_files.maxResults", 1, 100),
+          contextLines: validateOptionalInteger(args.contextLines, "grep_files.contextLines", 0, 3),
+          caseSensitive:
+            typeof args.caseSensitive === "boolean" ? args.caseSensitive : undefined,
+        },
+      };
+    case "glob_files":
+      return {
+        type: "tool_call",
+        tool,
+        rationale,
+        args: {
+          pattern: validateGlobPattern(args.pattern),
+          maxResults: validateOptionalInteger(args.maxResults, "glob_files.maxResults", 1, 200),
+        },
+      };
+    case "edit_file":
+      return {
+        type: "tool_call",
+        tool,
+        rationale,
+        args: {
+          path: validateSinglePath(args.path, "edit_file.path"),
+          old_string: validateTextArg(args.old_string, "edit_file.old_string", 80_000),
+          new_string: validateStringArg(args.new_string, "edit_file.new_string", 100_000),
+          replace_all:
+            typeof args.replace_all === "boolean" ? args.replace_all : undefined,
+          summary: validateSummaryArg(args.summary, "Edited project file."),
         },
       };
     case "write_files":
@@ -177,6 +247,11 @@ export function validateAgentStepResponse(value: unknown): AgentStepResponse {
   throw new Error(`Invalid DeepSeek response: unknown tool "${tool}".`);
 }
 
+function validateSinglePath(value: unknown, label: string) {
+  const paths = validatePathArray([value], label);
+  return paths[0];
+}
+
 function validatePathArray(value: unknown, label: string) {
   if (!Array.isArray(value) || value.length === 0) {
     throw new Error(`Invalid DeepSeek response: ${label} must be a non-empty array.`);
@@ -201,6 +276,34 @@ function validatePathArray(value: unknown, label: string) {
   );
 }
 
+function validateOptionalSearchPathArray(value: unknown, label: string) {
+  if (typeof value === "undefined") {
+    return undefined;
+  }
+
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`Invalid DeepSeek response: ${label} must be a non-empty array when provided.`);
+  }
+
+  if (value.length > 12) {
+    throw new Error(`Invalid DeepSeek response: ${label} may include at most 12 paths.`);
+  }
+
+  return uniquePaths(
+    value.map((item) => {
+      const path = normalizeProjectPath(item);
+
+      if (!path || !isAllowedProjectSearchPath(path)) {
+        throw new Error(
+          `DeepSeek attempted to search a forbidden path: ${String(item ?? "")}`,
+        );
+      }
+
+      return path;
+    }),
+  );
+}
+
 function validateProjectFiles(value: unknown, label: string) {
   const response = validateProjectFileResponse(
     {
@@ -215,6 +318,12 @@ function validateProjectFiles(value: unknown, label: string) {
     throw new Error(`Invalid DeepSeek response: ${label} may include at most 16 files.`);
   }
 
+  const packageFile = response.files.find((file) => file.path === "package.json");
+
+  if (packageFile) {
+    validatePackageJsonContent(packageFile.content);
+  }
+
   return response.files;
 }
 
@@ -225,13 +334,73 @@ function validateSummaryArg(value: unknown, fallback: string) {
 function validateAgentCommand(value: unknown): AgentCommand {
   const command = typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
 
-  if (!AGENT_COMMANDS.has(command as AgentCommand)) {
+  if (!AGENT_COMMAND_SET.has(command as AgentCommand)) {
     throw new Error(
       `DeepSeek attempted to run a forbidden command: ${String(value ?? "")}`,
     );
   }
 
   return command as AgentCommand;
+}
+
+function validateTextArg(value: unknown, label: string, maxLength: number) {
+  const text = validateStringArg(value, label, maxLength);
+
+  if (!text.trim()) {
+    throw new Error(`Invalid DeepSeek response: ${label} must not be empty.`);
+  }
+
+  return text;
+}
+
+function validateStringArg(value: unknown, label: string, maxLength: number) {
+  if (typeof value !== "string") {
+    throw new Error(`Invalid DeepSeek response: ${label} must be a string.`);
+  }
+
+  if (value.length > maxLength) {
+    throw new Error(
+      `Invalid DeepSeek response: ${label} may include at most ${maxLength} characters.`,
+    );
+  }
+
+  return value;
+}
+
+function validateOptionalInteger(
+  value: unknown,
+  label: string,
+  min: number,
+  max: number,
+): number | undefined {
+  if (typeof value === "undefined") {
+    return undefined;
+  }
+
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+    throw new Error(
+      `Invalid DeepSeek response: ${label} must be an integer from ${min} to ${max}.`,
+    );
+  }
+
+  return value;
+}
+
+function validateGlobPattern(value: unknown) {
+  const pattern = validateTextArg(value, "glob_files.pattern", 240)
+    .trim()
+    .replace(/\\/g, "/");
+
+  if (
+    pattern.startsWith("/") ||
+    /^[A-Za-z]:/.test(pattern) ||
+    pattern.includes("\0") ||
+    pattern.split("/").some((segment) => segment === "." || segment === "..")
+  ) {
+    throw new Error("Invalid DeepSeek response: glob_files.pattern is forbidden.");
+  }
+
+  return pattern;
 }
 
 function validateProjectFileResponse<TType extends "write_files" | "modify_files">(

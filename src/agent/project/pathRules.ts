@@ -41,7 +41,7 @@ export function formatProjectFileTree(fileTree: FileTree) {
 }
 
 export function getContextFilePaths(fileTree: FileTree) {
-  const paths = flattenFileTree(fileTree)
+  const paths = flattenProjectFileTree(fileTree)
     .filter((node) => node.kind === "file")
     .map((node) => normalizeProjectPath(node.path))
     .filter((path): path is string => Boolean(path))
@@ -87,8 +87,33 @@ export function isAllowedProjectPath(path: string) {
   return isAllowedLocation && hasAllowedTextExtension(path);
 }
 
+export function isAllowedProjectSearchPath(path: string) {
+  if (isAllowedProjectPath(path)) {
+    return true;
+  }
+
+  const directoryPath = path.endsWith("/") ? path : `${path}/`;
+
+  return ALLOWED_PROJECT_DIRECTORIES.includes(directoryPath);
+}
+
 export function uniquePaths(paths: string[]) {
   return Array.from(new Set(paths));
+}
+
+export function flattenProjectFileTree(fileTree: FileTree): FileTree[] {
+  return [
+    fileTree,
+    ...(fileTree.children ?? []).flatMap((child) => flattenProjectFileTree(child)),
+  ];
+}
+
+export function getAllowedFilePaths(fileTree: FileTree) {
+  return flattenProjectFileTree(fileTree)
+    .filter((node) => node.kind === "file")
+    .map((node) => normalizeProjectPath(node.path))
+    .filter((path): path is string => Boolean(path))
+    .filter(isAllowedProjectPath);
 }
 
 function formatFileTree(fileTree: FileTree) {
@@ -106,13 +131,6 @@ function formatFileTree(fileTree: FileTree) {
 
   visit(fileTree, 0);
   return lines.join("\n");
-}
-
-function flattenFileTree(fileTree: FileTree): FileTree[] {
-  return [
-    fileTree,
-    ...(fileTree.children ?? []).flatMap((child) => flattenFileTree(child)),
-  ];
 }
 
 function sortContextPaths(paths: string[]) {

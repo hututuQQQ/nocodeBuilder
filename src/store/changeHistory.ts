@@ -7,6 +7,7 @@ export type FileChangeSummary = {
   path: string;
   sampleAddedLines: string[];
   sampleRemovedLines: string[];
+  unifiedDiff: string;
 };
 
 export type ChangeRecord = {
@@ -53,9 +54,18 @@ export function formatChangeRecordMessage(summary: string, record: ChangeRecord)
     for (const removedLine of file.sampleRemovedLines.slice(0, 2)) {
       lines.push(`  - ${removedLine}`);
     }
+
+    const diffPreview = file.unifiedDiff.split("\n").slice(0, 12);
+
+    if (diffPreview.length > 0) {
+      lines.push("  Diff preview:");
+
+      for (const diffLine of diffPreview) {
+        lines.push(`  ${diffLine}`);
+      }
+    }
   }
 
-  lines.push("", "Rollback is available from the chat toolbar.");
   return lines.join("\n");
 }
 
@@ -85,7 +95,62 @@ function summarizeFileChange(
     path,
     sampleAddedLines: sampleChangedLines(afterLines, beforeLines),
     sampleRemovedLines: beforeContent === null ? [] : sampleChangedLines(beforeLines, afterLines),
+    unifiedDiff: createUnifiedDiff(path, beforeContent, afterContent),
   };
+}
+
+function createUnifiedDiff(
+  path: string,
+  beforeContent: string | null,
+  afterContent: string | null,
+) {
+  const beforeLines = splitLines(beforeContent ?? "");
+  const afterLines = splitLines(afterContent ?? "");
+  let prefixLength = 0;
+
+  while (
+    prefixLength < beforeLines.length &&
+    prefixLength < afterLines.length &&
+    beforeLines[prefixLength] === afterLines[prefixLength]
+  ) {
+    prefixLength += 1;
+  }
+
+  let suffixLength = 0;
+
+  while (
+    suffixLength < beforeLines.length - prefixLength &&
+    suffixLength < afterLines.length - prefixLength &&
+    beforeLines[beforeLines.length - 1 - suffixLength] ===
+      afterLines[afterLines.length - 1 - suffixLength]
+  ) {
+    suffixLength += 1;
+  }
+
+  const removedLines = beforeLines.slice(
+    prefixLength,
+    beforeLines.length - suffixLength,
+  );
+  const addedLines = afterLines.slice(prefixLength, afterLines.length - suffixLength);
+  const lines = [
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    `@@ -${prefixLength + 1},${removedLines.length} +${prefixLength + 1},${addedLines.length} @@`,
+  ];
+
+  for (const line of removedLines.slice(0, 60)) {
+    lines.push(`-${line}`);
+  }
+
+  for (const line of addedLines.slice(0, 60)) {
+    lines.push(`+${line}`);
+  }
+
+  if (removedLines.length + addedLines.length > 120) {
+    lines.push("[Diff truncated.]");
+  }
+
+  return lines.join("\n");
 }
 
 function splitLines(content: string) {
