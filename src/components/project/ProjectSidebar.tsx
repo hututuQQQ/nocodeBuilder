@@ -16,6 +16,7 @@ type ProjectSidebarProps = {
 export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [projectName, setProjectName] = useState("");
+  const [projectPrompt, setProjectPrompt] = useState("");
   const currentProject = useAppStore((state) => state.currentProject);
   const createProject = useAppStore((state) => state.createProject);
   const isCreatingProject = useAppStore((state) => state.isCreatingProject);
@@ -27,10 +28,11 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
 
   async function handleCreateProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const createdProject = await createProject(projectName);
+    const createdProject = await createProject(projectName, projectPrompt);
 
     if (createdProject) {
       setProjectName("");
+      setProjectPrompt("");
       setIsDialogOpen(false);
     }
   }
@@ -161,7 +163,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                   New Project
                 </h2>
                 <p className="mt-1 text-xs text-zinc-500">
-                  Vite React Tailwind template
+                  AI generated Next.js App Router project
                 </p>
               </div>
               <button
@@ -188,6 +190,20 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
               value={projectName}
             />
 
+            <label
+              className="mb-2 mt-4 block text-xs font-medium text-zinc-400"
+              htmlFor="project-prompt"
+            >
+              Website brief
+            </label>
+            <textarea
+              className="h-28 min-h-28 w-full resize-none rounded-md border border-zinc-800 bg-zinc-900 px-3 py-3 text-sm leading-5 text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/10"
+              id="project-prompt"
+              onChange={(event) => setProjectPrompt(event.currentTarget.value)}
+              placeholder="Build a polished Chinese landing page for a boutique coffee brand with menu, story, and reservation sections."
+              value={projectPrompt}
+            />
+
             {projectError ? (
               <p className="mt-3 rounded border border-red-400/30 bg-red-400/10 px-3 py-2 text-xs leading-5 text-red-200">
                 {projectError}
@@ -204,7 +220,11 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
               </button>
               <button
                 className="flex h-9 items-center gap-2 rounded-md border border-teal-400/30 bg-teal-400/10 px-3 text-sm font-medium text-teal-100 transition hover:border-teal-300/60 hover:bg-teal-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
-                disabled={!projectName.trim() || isCreatingProject}
+                disabled={
+                  !projectName.trim() ||
+                  !projectPrompt.trim() ||
+                  isCreatingProject
+                }
                 type="submit"
               >
                 {isCreatingProject ? (

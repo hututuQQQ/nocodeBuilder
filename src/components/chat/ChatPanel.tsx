@@ -1,27 +1,40 @@
 import { FormEvent, useState } from "react";
 import { Loader2, SendHorizontal } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
+import type { ConfiguredModelOption } from "../../App";
 import {
-  DEEPSEEK_MODEL_OPTIONS,
-  DeepSeekModel,
-} from "../../services/keyStore";
+  getAiProviderDefinition,
+  type AiProviderId,
+} from "../../services/aiProviders";
 
 type ChatPanelProps = {
-  activeModel: DeepSeekModel;
+  activeProvider: AiProviderId;
+  activeModel: string;
+  configuredModelOptions: ConfiguredModelOption[];
   isSavingModel: boolean;
-  onChangeModel: (model: DeepSeekModel) => Promise<void>;
+  onChangeModel: (selection: ConfiguredModelOption) => Promise<void>;
 };
 
 export function ChatPanel({
+  activeProvider,
   activeModel,
+  configuredModelOptions,
   isSavingModel,
   onChangeModel,
 }: ChatPanelProps) {
   const [draft, setDraft] = useState("");
   const [modelError, setModelError] = useState<string | null>(null);
   const chatMessages = useAppStore((state) => state.chatMessages);
+  const isGeneratingProject = useAppStore((state) => state.isGeneratingProject);
   const isModifyingProject = useAppStore((state) => state.isModifyingProject);
   const sendMessage = useAppStore((state) => state.sendMessage);
+  const isBusy = isGeneratingProject || isModifyingProject;
+  const provider = getAiProviderDefinition(activeProvider);
+  const activeSelection = { provider: activeProvider, model: activeModel };
+  const availableModelOptions =
+    configuredModelOptions.length > 0
+      ? configuredModelOptions
+      : [activeSelection];
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -29,11 +42,11 @@ export function ChatPanel({
     setDraft("");
   }
 
-  async function handleChangeModel(model: DeepSeekModel) {
+  async function handleChangeModel(selection: ConfiguredModelOption) {
     setModelError(null);
 
     try {
-      await onChangeModel(model);
+      await onChangeModel(selection);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Failed to save model.";
@@ -49,46 +62,52 @@ export function ChatPanel({
           <p className="text-xs text-zinc-500">Frontend vibe coding workspace</p>
         </div>
         <div className="flex min-w-0 flex-col items-end gap-1">
-          <div
-            aria-label="DeepSeek model"
-            className="grid grid-cols-2 rounded-md border border-zinc-800 bg-zinc-950 p-1"
-            role="group"
-          >
-            {DEEPSEEK_MODEL_OPTIONS.map((option) => {
-              const isSelected = activeModel === option.value;
+          <label className="sr-only" htmlFor="chat-model-select">
+            {provider.label} model
+          </label>
+          <div className="flex items-center gap-2">
+            {isSavingModel ? (
+              <Loader2
+                size={14}
+                className="animate-spin text-blue-200"
+                aria-hidden="true"
+              />
+            ) : null}
+            <select
+              className="h-9 min-w-44 rounded-md border border-zinc-800 bg-zinc-950 px-3 text-xs font-medium text-zinc-200 outline-none transition hover:border-zinc-700 focus:border-blue-400/60 focus:ring-2 focus:ring-blue-400/10 disabled:cursor-not-allowed disabled:text-zinc-600"
+              disabled={isSavingModel || isBusy}
+              id="chat-model-select"
+              onChange={(event) => {
+                const selection = decodeModelSelection(
+                  event.currentTarget.value,
+                );
+                void handleChangeModel(selection);
+              }}
+              value={encodeModelSelection(activeSelection)}
+            >
+              {availableModelOptions.map((selection) => {
+                const selectionProvider = getAiProviderDefinition(
+                  selection.provider,
+                );
+                const option = selectionProvider.modelOptions.find(
+                  (modelOption) => modelOption.value === selection.model,
+                );
 
-              return (
-                <button
-                  aria-pressed={isSelected}
-                  className={`h-8 min-w-20 rounded px-3 text-xs font-medium transition ${
-                    isSelected
-                      ? "bg-blue-500/15 text-blue-100 ring-1 ring-blue-400/35"
-                      : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
-                  }`}
-                  disabled={isSavingModel || isModifyingProject}
-                  key={option.value}
-                  onClick={() => void handleChangeModel(option.value)}
-                  title={`${option.value}: ${option.description}`}
-                  type="button"
-                >
-                  {isSavingModel && isSelected ? (
-                    <span className="inline-flex items-center gap-1">
-                      <Loader2
-                        size={12}
-                        className="animate-spin"
-                        aria-hidden="true"
-                      />
-                      {option.label}
-                    </span>
-                  ) : (
-                    option.label
-                  )}
-                </button>
-              );
-            })}
+                return (
+                  <option
+                    key={encodeModelSelection(selection)}
+                    value={encodeModelSelection(selection)}
+                  >
+                    {option
+                      ? `${selectionProvider.label} / ${option.label} (${selection.model})`
+                      : `${selectionProvider.label} / ${selection.model}`}
+                  </option>
+                );
+              })}
+            </select>
           </div>
           <span className="max-w-[260px] truncate text-[11px] text-zinc-600">
-            {modelError ?? activeModel}
+            {modelError ?? `${provider.label} / ${activeModel}`}
           </span>
         </div>
       </header>
@@ -96,10 +115,12 @@ export function ChatPanel({
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
         {chatMessages.map((message) => (
           <article
-            className={`max-w-[86%] rounded-md border px-4 py-3 text-sm leading-6 ${
+            className={`max-w-[86%] whitespace-pre-wrap rounded-md border px-4 py-3 text-sm leading-6 ${
               message.role === "user"
                 ? "ml-auto border-teal-400/30 bg-teal-400/10 text-teal-50"
-                : "border-zinc-800 bg-zinc-900/70 text-zinc-300"
+                : message.isStreaming
+                  ? "border-blue-400/30 bg-blue-400/10 text-blue-100"
+                  : "border-zinc-800 bg-zinc-900/70 text-zinc-300"
             }`}
             key={message.id}
           >
@@ -117,24 +138,37 @@ export function ChatPanel({
       >
         <textarea
           className="h-20 min-h-20 flex-1 resize-none rounded-md border border-zinc-800 bg-zinc-900 px-3 py-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/10"
-          disabled={isModifyingProject}
+          disabled={isBusy}
           onChange={(event) => setDraft(event.currentTarget.value)}
           placeholder="Tell the builder what to change..."
           value={draft}
         />
         <button
           className="flex h-20 w-24 shrink-0 items-center justify-center gap-2 rounded-md border border-teal-400/30 bg-teal-400/10 text-sm font-medium text-teal-100 transition hover:border-teal-300/60 hover:bg-teal-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
-          disabled={!draft.trim() || isModifyingProject}
+          disabled={!draft.trim() || isBusy}
           type="submit"
         >
-          {isModifyingProject ? (
+          {isBusy ? (
             <Loader2 size={16} className="animate-spin" aria-hidden="true" />
           ) : (
             <SendHorizontal size={16} aria-hidden="true" />
           )}
-          {isModifyingProject ? "Writing" : "Send"}
+          {isBusy ? "Writing" : "Send"}
         </button>
       </form>
     </main>
   );
+}
+
+function encodeModelSelection(selection: ConfiguredModelOption) {
+  return `${selection.provider}:${selection.model}`;
+}
+
+function decodeModelSelection(value: string): ConfiguredModelOption {
+  const [provider, ...modelParts] = value.split(":");
+
+  return {
+    provider: provider as AiProviderId,
+    model: modelParts.join(":"),
+  };
 }

@@ -5,7 +5,7 @@ export type ProjectInfo = {
   id: string;
   name: string;
   path: string;
-  framework: "vite-react";
+  framework: "next-app-router";
   createdAt: string;
   updatedAt: string;
   lastOpenedAt: string;
@@ -40,6 +40,27 @@ export type DevServerInfo = {
   status: "running";
   startedAt: string;
   url: string;
+};
+
+export type VercelDeployTarget = "preview" | "production";
+
+export type VercelDeployOptions = {
+  token: string;
+  scope?: string;
+  projectName?: string;
+  target: VercelDeployTarget;
+};
+
+export type VercelDeploymentInfo = {
+  projectId: string;
+  target: VercelDeployTarget;
+  url: string;
+  startedAt: string;
+  finishedAt: string;
+};
+
+export type VercelUserInfo = {
+  username: string;
 };
 
 export type CommandOutputEvent = {
@@ -90,6 +111,10 @@ export const projectApi = {
     return invoke<void>("write_files", { projectId, files });
   },
 
+  deleteFiles(projectId: string, paths: string[]) {
+    return invoke<void>("delete_files", { paths, projectId });
+  },
+
   openProjectFolder(projectId: string) {
     return invoke<void>("open_project_folder", { projectId });
   },
@@ -104,6 +129,17 @@ export const projectApi = {
 
   stopDevServer(projectId: string) {
     return invoke<void>("stop_dev_server", { projectId });
+  },
+
+  deployToVercel(projectId: string, options: VercelDeployOptions) {
+    return invoke<VercelDeploymentInfo>("deploy_to_vercel", {
+      options,
+      projectId,
+    });
+  },
+
+  testVercelToken(token: string) {
+    return invoke<VercelUserInfo>("test_vercel_token", { token });
   },
 
   openPreviewInBrowser(url: string) {
