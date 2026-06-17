@@ -1,19 +1,24 @@
 import { FormEvent, useState } from "react";
 import { Loader2, SendHorizontal } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
+import type { ConfiguredModelOption } from "../../App";
 import {
-  DEEPSEEK_MODEL_OPTIONS,
-  DeepSeekModel,
-} from "../../services/keyStore";
+  getAiProviderDefinition,
+  type AiProviderId,
+} from "../../services/aiProviders";
 
 type ChatPanelProps = {
-  activeModel: DeepSeekModel;
+  activeProvider: AiProviderId;
+  activeModel: string;
+  configuredModelOptions: ConfiguredModelOption[];
   isSavingModel: boolean;
-  onChangeModel: (model: DeepSeekModel) => Promise<void>;
+  onChangeModel: (selection: ConfiguredModelOption) => Promise<void>;
 };
 
 export function ChatPanel({
+  activeProvider,
   activeModel,
+  configuredModelOptions,
   isSavingModel,
   onChangeModel,
 }: ChatPanelProps) {
@@ -24,6 +29,12 @@ export function ChatPanel({
   const isModifyingProject = useAppStore((state) => state.isModifyingProject);
   const sendMessage = useAppStore((state) => state.sendMessage);
   const isBusy = isGeneratingProject || isModifyingProject;
+  const provider = getAiProviderDefinition(activeProvider);
+  const activeSelection = { provider: activeProvider, model: activeModel };
+  const availableModelOptions =
+    configuredModelOptions.length > 0
+      ? configuredModelOptions
+      : [activeSelection];
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -31,11 +42,11 @@ export function ChatPanel({
     setDraft("");
   }
 
-  async function handleChangeModel(model: DeepSeekModel) {
+  async function handleChangeModel(selection: ConfiguredModelOption) {
     setModelError(null);
 
     try {
-      await onChangeModel(model);
+      await onChangeModel(selection);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Failed to save model.";
@@ -50,50 +61,54 @@ export function ChatPanel({
           <h2 className="text-sm font-semibold text-zinc-100">Chat</h2>
           <p className="text-xs text-zinc-500">Frontend vibe coding workspace</p>
         </div>
-        <div className="flex min-w-0 items-center gap-3">
-          <div className="flex min-w-0 flex-col items-end gap-1">
-          <div
-            aria-label="DeepSeek model"
-            className="grid grid-cols-2 rounded-md border border-zinc-800 bg-zinc-950 p-1"
-            role="group"
-          >
-            {DEEPSEEK_MODEL_OPTIONS.map((option) => {
-              const isSelected = activeModel === option.value;
+        <div className="flex min-w-0 flex-col items-end gap-1">
+          <label className="sr-only" htmlFor="chat-model-select">
+            {provider.label} model
+          </label>
+          <div className="flex items-center gap-2">
+            {isSavingModel ? (
+              <Loader2
+                size={14}
+                className="animate-spin text-blue-200"
+                aria-hidden="true"
+              />
+            ) : null}
+            <select
+              className="h-9 min-w-44 rounded-md border border-zinc-800 bg-zinc-950 px-3 text-xs font-medium text-zinc-200 outline-none transition hover:border-zinc-700 focus:border-blue-400/60 focus:ring-2 focus:ring-blue-400/10 disabled:cursor-not-allowed disabled:text-zinc-600"
+              disabled={isSavingModel || isBusy}
+              id="chat-model-select"
+              onChange={(event) => {
+                const selection = decodeModelSelection(
+                  event.currentTarget.value,
+                );
+                void handleChangeModel(selection);
+              }}
+              value={encodeModelSelection(activeSelection)}
+            >
+              {availableModelOptions.map((selection) => {
+                const selectionProvider = getAiProviderDefinition(
+                  selection.provider,
+                );
+                const option = selectionProvider.modelOptions.find(
+                  (modelOption) => modelOption.value === selection.model,
+                );
 
-              return (
-                <button
-                  aria-pressed={isSelected}
-                  className={`h-8 min-w-20 rounded px-3 text-xs font-medium transition ${
-                    isSelected
-                      ? "bg-blue-500/15 text-blue-100 ring-1 ring-blue-400/35"
-                      : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
-                  }`}
-                  disabled={isSavingModel || isBusy}
-                  key={option.value}
-                  onClick={() => void handleChangeModel(option.value)}
-                  title={`${option.value}: ${option.description}`}
-                  type="button"
-                >
-                  {isSavingModel && isSelected ? (
-                    <span className="inline-flex items-center gap-1">
-                      <Loader2
-                        size={12}
-                        className="animate-spin"
-                        aria-hidden="true"
-                      />
-                      {option.label}
-                    </span>
-                  ) : (
-                    option.label
-                  )}
-                </button>
-              );
-            })}
+                return (
+                  <option
+                    key={encodeModelSelection(selection)}
+                    value={encodeModelSelection(selection)}
+                  >
+                    {option
+                      ? `${selectionProvider.label} / ${option.label} (${selection.model})`
+                      : `${selectionProvider.label} / ${selection.model}`}
+                  </option>
+                );
+              })}
+            </select>
           </div>
           <span className="max-w-[260px] truncate text-[11px] text-zinc-600">
-            {modelError ?? activeModel}
+            {modelError ?? `${provider.label} / ${activeModel}`}
           </span>
-          </div>
         </div>
       </header>
 
@@ -143,4 +158,17 @@ export function ChatPanel({
       </form>
     </main>
   );
+}
+
+function encodeModelSelection(selection: ConfiguredModelOption) {
+  return `${selection.provider}:${selection.model}`;
+}
+
+function decodeModelSelection(value: string): ConfiguredModelOption {
+  const [provider, ...modelParts] = value.split(":");
+
+  return {
+    provider: provider as AiProviderId,
+    model: modelParts.join(":"),
+  };
 }

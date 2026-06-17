@@ -16,6 +16,7 @@ import {
 import {
   formatChangeRecordMessage,
 } from "./changeHistory";
+import { getAiProviderDefinition } from "../services/aiProviders";
 import { appendLogs } from "./commandLogs";
 import { replaceChatMessage } from "./chatMessages";
 import {
@@ -46,7 +47,7 @@ export async function generateInitialProject(
 ) {
   const stream = startStreamingAgentMessage(
     store,
-    `Generating ${project.name} with DeepSeek`,
+    `Generating ${project.name} with the model`,
   );
 
   store.set((state) => ({
@@ -58,10 +59,10 @@ export async function generateInitialProject(
   }));
 
   try {
-    const config = await keyStore.getDeepSeekConfig();
+    const config = await keyStore.getAiProviderConfig();
 
     if (!config) {
-      throw new Error("Configure your DeepSeek API key first.");
+      throw new Error("Configure your AI provider first.");
     }
 
     const response = await requestProjectGeneration({
@@ -149,13 +150,17 @@ export async function modifyCurrentProject(
   }));
 
   try {
-    const config = await keyStore.getDeepSeekConfig();
+    const config = await keyStore.getAiProviderConfig();
 
     if (!config) {
-      throw new Error("Configure your DeepSeek API key first.");
+      throw new Error("Configure your AI provider first.");
     }
 
-    appendTerminalLog(store, `[agent] Using model ${config.model}`);
+    const provider = getAiProviderDefinition(config.provider);
+    appendTerminalLog(
+      store,
+      `[agent] Using ${provider.label} model ${config.model}`,
+    );
     updateAgentStatus(activeStream, statusLines, "Collecting project context.");
 
     let fileTree = store.get().fileTree;

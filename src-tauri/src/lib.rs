@@ -10,7 +10,7 @@ mod projects;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DeepSeekChatCompletionRequest {
+struct LlmChatCompletionRequest {
     url: String,
     api_key: String,
     body: Value,
@@ -18,7 +18,7 @@ struct DeepSeekChatCompletionRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DeepSeekChatCompletionStreamRequest {
+struct LlmChatCompletionStreamRequest {
     request_id: String,
     url: String,
     api_key: String,
@@ -26,14 +26,14 @@ struct DeepSeekChatCompletionStreamRequest {
 }
 
 #[derive(Debug, Serialize)]
-struct DeepSeekChatCompletionResponse {
+struct LlmChatCompletionResponse {
     status: u16,
     body: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct DeepSeekStreamEvent {
+struct LlmStreamEvent {
     request_id: String,
     delta: String,
     done: bool,
@@ -41,9 +41,9 @@ struct DeepSeekStreamEvent {
 }
 
 #[tauri::command]
-async fn deepseek_chat_completion(
-    request: DeepSeekChatCompletionRequest,
-) -> Result<DeepSeekChatCompletionResponse, String> {
+async fn llm_chat_completion(
+    request: LlmChatCompletionRequest,
+) -> Result<LlmChatCompletionResponse, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -63,14 +63,14 @@ async fn deepseek_chat_completion(
         .await
         .map_err(|error| format!("response: {error}"))?;
 
-    Ok(DeepSeekChatCompletionResponse { status, body })
+    Ok(LlmChatCompletionResponse { status, body })
 }
 
 #[tauri::command]
-async fn deepseek_chat_completion_stream(
+async fn llm_chat_completion_stream(
     app: AppHandle,
-    request: DeepSeekChatCompletionStreamRequest,
-) -> Result<DeepSeekChatCompletionResponse, String> {
+    request: LlmChatCompletionStreamRequest,
+) -> Result<LlmChatCompletionResponse, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()
@@ -97,7 +97,7 @@ async fn deepseek_chat_completion_stream(
             .await
             .map_err(|error| format!("response: {error}"))?;
 
-        return Ok(DeepSeekChatCompletionResponse { status, body });
+        return Ok(LlmChatCompletionResponse { status, body });
     }
 
     let mut stream = response.bytes_stream();
@@ -131,8 +131,8 @@ async fn deepseek_chat_completion_stream(
     }
 
     let _ = app.emit(
-        "deepseek-stream",
-        DeepSeekStreamEvent {
+        "llm-stream",
+        LlmStreamEvent {
             request_id: request.request_id.clone(),
             delta: String::new(),
             done: true,
@@ -151,7 +151,7 @@ async fn deepseek_chat_completion_stream(
     })
     .to_string();
 
-    Ok(DeepSeekChatCompletionResponse { status, body })
+    Ok(LlmChatCompletionResponse { status, body })
 }
 
 fn next_sse_event(buffer: &str) -> Option<(&str, usize)> {
@@ -196,8 +196,8 @@ fn process_sse_event(
 
         assistant_content.push_str(delta);
         let _ = app.emit(
-            "deepseek-stream",
-            DeepSeekStreamEvent {
+            "llm-stream",
+            LlmStreamEvent {
                 request_id: request_id.to_string(),
                 delta: delta.to_string(),
                 done: false,
@@ -214,8 +214,8 @@ pub fn run() {
     tauri::Builder::default()
         .manage(commands::DevServerRegistry::default())
         .invoke_handler(tauri::generate_handler![
-            deepseek_chat_completion,
-            deepseek_chat_completion_stream,
+            llm_chat_completion,
+            llm_chat_completion_stream,
             commands::deploy_to_vercel,
             commands::run_command,
             commands::start_dev_server,

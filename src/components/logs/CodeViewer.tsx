@@ -9,11 +9,14 @@ type CodeViewerProps = {
 };
 
 export function CodeViewer({ content, isLoading, path }: CodeViewerProps) {
+  const language = getMonacoLanguage(path);
+  const languageLabel = getLanguageLabel(language, path);
+
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden bg-[#0b0b0d]">
       <Editor
         height="100%"
-        language={getMonacoLanguage(path)}
+        language={language}
         loading={
           <div className="grid h-full place-items-center text-xs text-zinc-600">
             Loading editor
@@ -24,6 +27,7 @@ export function CodeViewer({ content, isLoading, path }: CodeViewerProps) {
           contextmenu: true,
           cursorBlinking: "smooth",
           domReadOnly: true,
+          folding: true,
           fontFamily:
             'JetBrains Mono, "Cascadia Code", "Fira Code", Consolas, monospace',
           fontLigatures: true,
@@ -42,13 +46,14 @@ export function CodeViewer({ content, isLoading, path }: CodeViewerProps) {
           },
           readOnly: true,
           renderLineHighlight: "line",
+          renderValidationDecorations: "off",
           scrollBeyondLastLine: false,
           smoothScrolling: true,
           tabSize: 2,
           wordWrap: "on",
         }}
         path={path}
-        theme="vs-dark"
+        theme="nocode-dark"
         value={content}
       />
 
@@ -57,6 +62,10 @@ export function CodeViewer({ content, isLoading, path }: CodeViewerProps) {
           <Loader2 size={12} className="animate-spin" aria-hidden="true" />
           Loading
         </div>
+      ) : languageLabel ? (
+        <div className="pointer-events-none absolute right-3 top-3 rounded border border-zinc-800 bg-zinc-950/90 px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-zinc-500 shadow-lg shadow-black/30">
+          {languageLabel}
+        </div>
       ) : null}
     </div>
   );
@@ -64,6 +73,18 @@ export function CodeViewer({ content, isLoading, path }: CodeViewerProps) {
 
 function getMonacoLanguage(path: string) {
   const normalizedPath = path.toLowerCase();
+  const fileName = normalizedPath.split("/").pop() ?? normalizedPath;
+
+  if (
+    fileName === ".env" ||
+    fileName.startsWith(".env.") ||
+    fileName === ".npmrc" ||
+    fileName === ".editorconfig" ||
+    normalizedPath.endsWith(".ini") ||
+    normalizedPath.endsWith(".toml")
+  ) {
+    return "ini";
+  }
 
   if (normalizedPath.endsWith(".tsx") || normalizedPath.endsWith(".ts")) {
     return "typescript";
@@ -77,15 +98,23 @@ function getMonacoLanguage(path: string) {
     return "css";
   }
 
-  if (normalizedPath.endsWith(".json")) {
+  if (normalizedPath.endsWith(".scss")) {
+    return "scss";
+  }
+
+  if (normalizedPath.endsWith(".less")) {
+    return "less";
+  }
+
+  if (normalizedPath.endsWith(".json") || normalizedPath.endsWith(".jsonc")) {
     return "json";
   }
 
-  if (normalizedPath.endsWith(".md")) {
+  if (normalizedPath.endsWith(".md") || normalizedPath.endsWith(".mdx")) {
     return "markdown";
   }
 
-  if (normalizedPath.endsWith(".html")) {
+  if (normalizedPath.endsWith(".html") || normalizedPath.endsWith(".htm")) {
     return "html";
   }
 
@@ -100,10 +129,27 @@ function getMonacoLanguage(path: string) {
   if (
     normalizedPath.endsWith(".sh") ||
     normalizedPath.endsWith(".bash") ||
-    normalizedPath.endsWith(".env")
+    normalizedPath.endsWith(".zsh") ||
+    normalizedPath.endsWith(".ps1")
   ) {
     return "shell";
   }
 
   return "plaintext";
+}
+
+function getLanguageLabel(language: string, path: string) {
+  if (language === "plaintext") {
+    return "";
+  }
+
+  if (path.toLowerCase().endsWith(".tsx")) {
+    return "TSX";
+  }
+
+  if (path.toLowerCase().endsWith(".jsx")) {
+    return "JSX";
+  }
+
+  return language;
 }

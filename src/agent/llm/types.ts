@@ -1,15 +1,18 @@
+import type { AiProviderId } from "../../services/aiProviders";
+
 export type ChatMessage = {
   role: "system" | "user" | "assistant";
   content: string;
 };
 
-export type DeepSeekClientConfig = {
+export type LlmClientConfig = {
+  provider: AiProviderId;
   baseUrl: string;
   apiKey: string;
   model: string;
 };
 
-export type DeepSeekErrorCode =
+export type LlmErrorCode =
   | "config"
   | "api_key"
   | "network"
@@ -21,7 +24,7 @@ export type ChatCompletionResponse = {
   choices?: Array<{
     finish_reason?: string | null;
     message?: {
-      content?: string | null;
+      content?: string | Array<{ text?: string | null }> | null;
     };
   }>;
   error?: {
@@ -37,7 +40,7 @@ export type NativeChatCompletionResponse = {
   body: string;
 };
 
-export type DeepSeekStreamEvent = {
+export type LlmStreamEvent = {
   requestId: string;
   delta: string;
   done: boolean;

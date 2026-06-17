@@ -1,28 +1,35 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { DeepSeekClientError } from "./errors";
+import {
+  getAiProviderDefinition,
+  type AiProviderDefinition,
+} from "../../services/aiProviders";
+import { LlmClientError } from "./errors";
 import { findSseBoundary, readSseDelta } from "./sse";
 import {
   ChatCompletionResponse,
   ChatJsonOptions,
   ChatMessage,
-  DeepSeekClientConfig,
-  DeepSeekStreamEvent,
+  LlmClientConfig,
+  LlmStreamEvent,
   NativeChatCompletionResponse,
   RawChatCompletionResponse,
 } from "./types";
 
-export { DeepSeekClientError } from "./errors";
+export { LlmClientError } from "./errors";
 
-export class DeepSeekClient {
-  private readonly config: DeepSeekClientConfig;
+export class ChatCompletionClient {
+  private readonly config: LlmClientConfig;
+  private readonly provider: AiProviderDefinition;
 
-  constructor(config: DeepSeekClientConfig) {
+  constructor(config: LlmClientConfig) {
     this.config = {
+      provider: config.provider,
       baseUrl: config.baseUrl.trim(),
       apiKey: config.apiKey.trim(),
       model: config.model.trim(),
     };
+    this.provider = getAiProviderDefinition(this.config.provider);
   }
 
   async chatJson<T>(
@@ -33,17 +40,39 @@ export class DeepSeekClient {
   }
 
   async testConnection(): Promise<boolean> {
-    const result = await this.requestJson<{ ok?: unknown }>(
-      [
+    this.validateConfig();
+
+    const body: Record<string, unknown> = {
+      model: this.config.model,
+      messages: [
         {
           role: "user",
-          content: 'Return exactly this JSON object: {"ok":true}',
+          content: "Reply with the word ok.",
         },
       ],
-      32,
+      stream: false,
+      temperature: 0,
+      ...this.provider.requestBodyDefaults,
+    };
+    body.max_tokens = 16;
+
+    const response = await this.sendChatCompletion(body, {});
+    const parsedResponse = parseApiResponse(
+      response.body,
+      response.ok,
+      this.provider.label,
     );
 
-    return result.ok === true;
+    if (!response.ok) {
+      throw createHttpError(
+        response.status,
+        parsedResponse,
+        response.body,
+        this.provider.label,
+      );
+    }
+
+    return isChatCompletionResponse(parsedResponse) || response.body.trim().length > 0;
   }
 
   private async requestJson<T>(
@@ -57,7 +86,7 @@ export class DeepSeekClient {
       options,
     );
 
-    return parseAssistantJson<T>(content);
+    return parseAssistantJson<T>(content, this.provider.label);
   }
 
   private async createChatCompletion(
@@ -65,16 +94,7 @@ export class DeepSeekClient {
     maxTokens?: number,
     options: ChatJsonOptions = {},
   ): Promise<string> {
-    if (!this.config.apiKey) {
-      throw new DeepSeekClientError(
-        "api_key",
-        "请输入 DeepSeek API Key 后再测试连接。",
-      );
-    }
-
-    if (!this.config.model) {
-      throw new DeepSeekClientError("config", "请选择 DeepSeek 模型。");
-    }
+    this.validateConfig();
 
     const body: Record<string, unknown> = {
       model: this.config.model,
@@ -82,7 +102,7 @@ export class DeepSeekClient {
       response_format: { type: "json_object" },
       stream: Boolean(options.onDelta),
       temperature: 0,
-      thinking: { type: "disabled" },
+      ...this.provider.requestBodyDefaults,
     };
 
     if (typeof maxTokens === "number") {
@@ -90,18 +110,27 @@ export class DeepSeekClient {
     }
 
     const response = await this.sendChatCompletion(body, options);
-    const parsedResponse = parseApiResponse(response.body, response.ok);
+    const parsedResponse = parseApiResponse(
+      response.body,
+      response.ok,
+      this.provider.label,
+    );
 
     if (!response.ok) {
-      throw createHttpError(response.status, parsedResponse, response.body);
+      throw createHttpError(
+        response.status,
+        parsedResponse,
+        response.body,
+        this.provider.label,
+      );
     }
 
     const content = readAssistantContent(parsedResponse);
 
     if (!content) {
-      throw new DeepSeekClientError(
+      throw new LlmClientError(
         "response_parse",
-        "DeepSeek 响应格式异常：未找到模型返回内容。",
+        `${this.provider.label} response did not include assistant content.`,
       );
     }
 
@@ -127,12 +156,28 @@ export class DeepSeekClient {
     return this.fetchChatCompletion(body);
   }
 
+  private validateConfig() {
+    if (!this.config.apiKey) {
+      throw new LlmClientError(
+        "api_key",
+        `Enter a ${this.provider.label} API key before testing the connection.`,
+      );
+    }
+
+    if (!this.config.model) {
+      throw new LlmClientError(
+        "config",
+        `Choose a ${this.provider.label} model.`,
+      );
+    }
+  }
+
   private async invokeNativeChatCompletion(
     body: Record<string, unknown>,
   ): Promise<RawChatCompletionResponse> {
     try {
       const response = await invoke<NativeChatCompletionResponse>(
-        "deepseek_chat_completion",
+        "llm_chat_completion",
         {
           request: {
             apiKey: this.config.apiKey,
@@ -148,7 +193,7 @@ export class DeepSeekClient {
         status: response.status,
       };
     } catch (error) {
-      throw createNetworkError(error);
+      throw createNetworkError(error, this.provider.label);
     }
   }
 
@@ -156,25 +201,22 @@ export class DeepSeekClient {
     body: Record<string, unknown>,
     onDelta: (delta: string) => void,
   ): Promise<RawChatCompletionResponse> {
-    const requestId = `deepseek-${Date.now()}-${Math.random()
+    const requestId = `${this.config.provider}-${Date.now()}-${Math.random()
       .toString(16)
       .slice(2)}`;
-    const unlisten = await listen<DeepSeekStreamEvent>(
-      "deepseek-stream",
-      (event) => {
-        if (event.payload.requestId !== requestId || event.payload.done) {
-          return;
-        }
+    const unlisten = await listen<LlmStreamEvent>("llm-stream", (event) => {
+      if (event.payload.requestId !== requestId || event.payload.done) {
+        return;
+      }
 
-        if (event.payload.delta) {
-          onDelta(event.payload.delta);
-        }
-      },
-    );
+      if (event.payload.delta) {
+        onDelta(event.payload.delta);
+      }
+    });
 
     try {
       const response = await invoke<NativeChatCompletionResponse>(
-        "deepseek_chat_completion_stream",
+        "llm_chat_completion_stream",
         {
           request: {
             apiKey: this.config.apiKey,
@@ -191,7 +233,7 @@ export class DeepSeekClient {
         status: response.status,
       };
     } catch (error) {
-      throw createNetworkError(error);
+      throw createNetworkError(error, this.provider.label);
     } finally {
       unlisten();
     }
@@ -220,7 +262,7 @@ export class DeepSeekClient {
         status: response.status,
       };
     } catch (error) {
-      throw createNetworkError(error);
+      throw createNetworkError(error, this.provider.label);
     } finally {
       globalThis.clearTimeout(timeoutId);
     }
@@ -304,7 +346,7 @@ export class DeepSeekClient {
         status: response.status,
       };
     } catch (error) {
-      throw createNetworkError(error);
+      throw createNetworkError(error, this.provider.label);
     } finally {
       globalThis.clearTimeout(timeoutId);
     }
@@ -312,7 +354,10 @@ export class DeepSeekClient {
 
   private getChatCompletionsUrl(): string {
     if (!this.config.baseUrl) {
-      throw new DeepSeekClientError("config", "请输入 DeepSeek Base URL。");
+      throw new LlmClientError(
+        "config",
+        `Enter a ${this.provider.label} Base URL.`,
+      );
     }
 
     let url: URL;
@@ -320,9 +365,9 @@ export class DeepSeekClient {
     try {
       url = new URL(this.config.baseUrl);
     } catch (error) {
-      throw new DeepSeekClientError(
+      throw new LlmClientError(
         "config",
-        "DeepSeek Base URL 格式无效，请输入完整 URL。",
+        `${this.provider.label} Base URL is not a valid URL.`,
         { cause: error },
       );
     }
@@ -355,18 +400,18 @@ function isTauriRuntime() {
   return "__TAURI_INTERNALS__" in globalThis;
 }
 
-function createNetworkError(error: unknown) {
+function createNetworkError(error: unknown, providerLabel: string) {
   if (error instanceof Error && error.name === "AbortError") {
-    return new DeepSeekClientError(
+    return new LlmClientError(
       "network",
-      "网络错误：连接 DeepSeek API 超时，请检查网络、代理或 Base URL。",
+      `Network error: connecting to ${providerLabel} timed out. Check your network, proxy, or Base URL.`,
       { cause: error },
     );
   }
 
-  return new DeepSeekClientError(
+  return new LlmClientError(
     "network",
-    "网络错误：无法连接 DeepSeek API，请检查网络、代理或 Base URL。",
+    `Network error: cannot connect to ${providerLabel}. Check your network, proxy, or Base URL.`,
     { cause: error },
   );
 }
@@ -374,6 +419,7 @@ function createNetworkError(error: unknown) {
 function parseApiResponse(
   responseText: string,
   isSuccessfulResponse: boolean,
+  providerLabel: string,
 ): ChatCompletionResponse {
   if (!responseText.trim()) {
     return {};
@@ -386,9 +432,9 @@ function parseApiResponse(
       return {};
     }
 
-    throw new DeepSeekClientError(
+    throw new LlmClientError(
       "response_parse",
-      "DeepSeek 响应格式异常：API 返回的不是有效 JSON。",
+      `${providerLabel} response was not valid JSON.`,
       { cause: error },
     );
   }
@@ -398,6 +444,7 @@ function createHttpError(
   status: number,
   responseBody: ChatCompletionResponse,
   responseText: string,
+  providerLabel: string,
 ) {
   const apiMessage = truncateMessage(
     responseBody.error?.message ?? responseBody.message ?? responseText.trim(),
@@ -410,51 +457,76 @@ function createHttpError(
     normalizedApiMessage.includes("authentication") ||
     normalizedApiMessage.includes("api key")
   ) {
-    return new DeepSeekClientError(
+    return new LlmClientError(
       "api_key",
-      "API Key 无效或没有访问权限，请检查 DeepSeek API Key。",
+      `API key is invalid or unauthorized. Check your ${providerLabel} API key.`,
       { status },
     );
   }
 
   if (status === 429) {
-    return new DeepSeekClientError(
+    return new LlmClientError(
       "http",
-      `DeepSeek 请求受限或额度不足：${apiMessage || "请稍后重试。"}`,
+      `${providerLabel} request was rate limited or quota is insufficient: ${
+        apiMessage || "try again later."
+      }`,
       { status },
     );
   }
 
   if (status >= 500) {
-    return new DeepSeekClientError(
+    return new LlmClientError(
       "http",
-      `DeepSeek 服务暂时不可用（HTTP ${status}），请稍后重试。`,
+      `${providerLabel} is temporarily unavailable (HTTP ${status}). Try again later.`,
       { status },
     );
   }
 
-  return new DeepSeekClientError(
+  return new LlmClientError(
     "http",
-    `DeepSeek API 请求失败（HTTP ${status}）：${
-      apiMessage || "请检查 Base URL、模型和请求参数。"
+    `${providerLabel} API request failed (HTTP ${status}): ${
+      apiMessage || "check Base URL, model, and request parameters."
     }`,
     { status },
   );
 }
 
 function readAssistantContent(response: ChatCompletionResponse) {
-  return response.choices?.[0]?.message?.content?.trim() ?? "";
+  const content = response.choices?.[0]?.message?.content;
+
+  if (typeof content === "string") {
+    return content.trim();
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) =>
+        isRecord(part) && typeof part.text === "string" ? part.text : "",
+      )
+      .join("")
+      .trim();
+  }
+
+  return "";
 }
 
-function parseAssistantJson<T>(content: string): T {
+function isChatCompletionResponse(response: ChatCompletionResponse) {
+  return Array.isArray(response.choices) || Boolean(response.error);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseAssistantJson<T>(content: string, providerLabel: string): T {
   const jsonText = stripJsonCodeFence(content);
 
   try {
     return JSON.parse(jsonText) as T;
   } catch (error) {
-    throw new DeepSeekClientError(
+    throw new LlmClientError(
       "json_parse",
-      "JSON 解析失败：DeepSeek 没有返回有效 JSON，请重试或调整提示。",
+      `JSON parse failed: ${providerLabel} did not return valid JSON. Try again or adjust the prompt.`,
       { cause: error },
     );
   }

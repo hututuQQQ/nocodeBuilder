@@ -1,22 +1,29 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { CheckCircle2, KeyRound, PlugZap, Save, X } from "lucide-react";
 import {
-  DeepSeekClient,
-  DeepSeekClientError,
-} from "../../agent/llm/DeepSeekClient";
+  ChatCompletionClient,
+  LlmClientError,
+} from "../../agent/llm/ChatCompletionClient";
 import {
-  DEEPSEEK_MODEL_OPTIONS,
-  DEFAULT_DEEPSEEK_BASE_URL,
-  DeepSeekConfig,
-  DeepSeekConfigInput,
-  DeepSeekModel,
+  AI_PROVIDER_IDS,
+  DEFAULT_AI_PROVIDER,
+  getAiProviderDefinition,
+  type AiProviderId,
+} from "../../services/aiProviders";
+import {
+  AiProviderConfig,
+  AiProviderConfigInput,
+  AiProviderState,
 } from "../../services/keyStore";
 
 type ApiKeySetupPageProps = {
-  config: DeepSeekConfig | null;
+  aiState: AiProviderState | null;
   mode: "onboarding" | "settings";
   onCancel?: () => void;
-  onSave: (config: DeepSeekConfigInput) => Promise<void>;
+  onSave: (
+    configs: AiProviderConfigInput[],
+    activeProvider: AiProviderId,
+  ) => Promise<void>;
 };
 
 type Notice = {
@@ -24,77 +31,133 @@ type Notice = {
   message: string;
 };
 
-const DEFAULT_DEEPSEEK_MODEL = DEEPSEEK_MODEL_OPTIONS[0].value;
+type ProviderDraft = {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  models: string[];
+};
+
+type TestedProviderSignatures = Partial<Record<AiProviderId, string>>;
 
 export function ApiKeySetupPage({
-  config,
+  aiState,
   mode,
   onCancel,
   onSave,
 }: ApiKeySetupPageProps) {
-  const [apiKey, setApiKey] = useState(config?.apiKey ?? "");
-  const [model, setModel] = useState<DeepSeekModel>(
-    config?.model ?? DEFAULT_DEEPSEEK_MODEL,
+  const [providerId, setProviderId] = useState<AiProviderId>(
+    aiState?.activeProvider ?? DEFAULT_AI_PROVIDER,
   );
-  const [baseUrl, setBaseUrl] = useState(
-    config?.baseUrl ?? DEFAULT_DEEPSEEK_BASE_URL,
+  const [drafts, setDrafts] = useState<Record<AiProviderId, ProviderDraft>>(
+    () => createDrafts(aiState),
   );
   const [notice, setNotice] = useState<Notice | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
-  const [testedConfigSignature, setTestedConfigSignature] = useState<
-    string | null
-  >(null);
+  const [testedConfigSignatures, setTestedConfigSignatures] =
+    useState<TestedProviderSignatures>({});
+  const provider = getAiProviderDefinition(providerId);
+  const draft = drafts[providerId];
 
   useEffect(() => {
-    setApiKey(config?.apiKey ?? "");
-    setModel(config?.model ?? DEFAULT_DEEPSEEK_MODEL);
-    setBaseUrl(config?.baseUrl ?? DEFAULT_DEEPSEEK_BASE_URL);
+    setProviderId(aiState?.activeProvider ?? DEFAULT_AI_PROVIDER);
+    setDrafts(createDrafts(aiState));
     setNotice(null);
-    setTestedConfigSignature(null);
-  }, [config]);
+    setTestedConfigSignatures({});
+  }, [aiState]);
 
   const configSignature = useMemo(
-    () =>
-      JSON.stringify({
-        apiKey: apiKey.trim(),
-        baseUrl: baseUrl.trim(),
-        model,
-      }),
-    [apiKey, baseUrl, model],
+    () => getDraftSignature(providerId, draft),
+    [draft, providerId],
   );
   const hasRequiredFields = useMemo(
-    () => apiKey.trim().length > 0 && baseUrl.trim().length > 0,
-    [apiKey, baseUrl],
+    () =>
+      draft.apiKey.trim().length > 0 &&
+      draft.baseUrl.trim().length > 0 &&
+      draft.models.length > 0,
+    [draft.apiKey, draft.baseUrl, draft.models.length],
   );
-  const hasPassedConnectionTest = testedConfigSignature === configSignature;
+  const providerIdsToSave = useMemo(
+    () => getProviderIdsToSave(drafts, testedConfigSignatures),
+    [drafts, testedConfigSignatures],
+  );
   const canTest = hasRequiredFields && !isSaving && !isTesting;
   const canSave = useMemo(
-    () =>
-      hasRequiredFields && hasPassedConnectionTest && !isSaving && !isTesting,
-    [hasPassedConnectionTest, hasRequiredFields, isSaving, isTesting],
+    () => providerIdsToSave.length > 0 && !isSaving && !isTesting,
+    [isSaving, isTesting, providerIdsToSave.length],
   );
 
   function markConfigDirty() {
-    setTestedConfigSignature(null);
+    setTestedConfigSignatures((currentSignatures) => {
+      const nextSignatures = { ...currentSignatures };
+      delete nextSignatures[providerId];
+      return nextSignatures;
+    });
     setNotice((currentNotice) =>
       currentNotice?.tone === "success" ? null : currentNotice,
     );
   }
 
-  function validateConfig() {
-    if (!apiKey.trim()) {
-      return "请输入 DeepSeek API Key。";
+  function updateDraft(updater: (draft: ProviderDraft) => ProviderDraft) {
+    setDrafts((currentDrafts) => ({
+      ...currentDrafts,
+      [providerId]: updater(currentDrafts[providerId]),
+    }));
+    markConfigDirty();
+  }
+
+  function handleProviderChange(nextProviderId: AiProviderId) {
+    if (nextProviderId === providerId) {
+      return;
     }
 
-    if (!baseUrl.trim()) {
-      return "请输入 DeepSeek Base URL。";
+    setProviderId(nextProviderId);
+    setNotice(null);
+  }
+
+  function handleToggleModel(model: string) {
+    updateDraft((currentDraft) => {
+      const isSelected = currentDraft.models.includes(model);
+      const selectedModels = isSelected
+        ? currentDraft.models.filter((selectedModel) => selectedModel !== model)
+        : [...currentDraft.models, model];
+
+      if (selectedModels.length === 0) {
+        return currentDraft;
+      }
+
+      const orderedModels = provider.modelOptions
+        .map((option) => option.value)
+        .filter((optionModel) => selectedModels.includes(optionModel));
+
+      return {
+        ...currentDraft,
+        model: orderedModels.includes(currentDraft.model)
+          ? currentDraft.model
+          : orderedModels[0],
+        models: orderedModels,
+      };
+    });
+  }
+
+  function validateConfig() {
+    if (!draft.apiKey.trim()) {
+      return `Enter a ${provider.label} API key.`;
+    }
+
+    if (!draft.baseUrl.trim()) {
+      return `Enter a ${provider.label} Base URL.`;
+    }
+
+    if (draft.models.length === 0) {
+      return `Choose at least one ${provider.label} model.`;
     }
 
     try {
-      new URL(baseUrl.trim());
+      new URL(draft.baseUrl.trim());
     } catch {
-      return "Base URL 必须是有效的 URL。";
+      return "Base URL must be a valid URL.";
     }
 
     return null;
@@ -110,28 +173,40 @@ export function ApiKeySetupPage({
 
     setIsTesting(true);
     setNotice(null);
-    setTestedConfigSignature(null);
+    setTestedConfigSignatures((currentSignatures) => {
+      const nextSignatures = { ...currentSignatures };
+      delete nextSignatures[providerId];
+      return nextSignatures;
+    });
 
     try {
-      const client = new DeepSeekClient({
-        apiKey: apiKey.trim(),
-        baseUrl: baseUrl.trim(),
-        model,
-      });
-      const isConnected = await client.testConnection();
+      const results = await Promise.all(
+        draft.models.map((model) =>
+          testModelConnection({
+            apiKey: draft.apiKey.trim(),
+            baseUrl: draft.baseUrl.trim(),
+            model,
+            provider: providerId,
+          }),
+        ),
+      );
+      const failedResult = results.find((result) => !result.ok);
 
-      if (!isConnected) {
+      if (failedResult) {
         setNotice({
           tone: "error",
-          message: "DeepSeek API 已响应，但连接测试返回值异常，请稍后重试。",
+          message: failedResult.message,
         });
         return;
       }
 
-      setTestedConfigSignature(configSignature);
+      setTestedConfigSignatures((currentSignatures) => ({
+        ...currentSignatures,
+        [providerId]: configSignature,
+      }));
       setNotice({
         tone: "success",
-        message: "DeepSeek 真实连接测试成功，可以保存配置。",
+        message: `${provider.label} connection test passed for ${draft.models.join(", ")}. You can save this configuration.`,
       });
     } catch (testError) {
       setNotice({
@@ -145,33 +220,45 @@ export function ApiKeySetupPage({
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const saveProviderIds = getProviderIdsToSave(
+      drafts,
+      testedConfigSignatures,
+    );
 
-    const error = validateConfig();
-
-    if (error) {
-      setNotice({ tone: "error", message: error });
-      return;
-    }
-
-    if (!hasPassedConnectionTest) {
+    if (saveProviderIds.length === 0) {
       setNotice({
         tone: "error",
-        message: "请先通过 Test Connection 真实连接测试后再保存配置。",
+        message:
+          "Run a real connection test for DeepSeek or GLM before saving.",
       });
       return;
     }
+
+    const activeProviderToSave = saveProviderIds.includes(providerId)
+      ? providerId
+      : saveProviderIds[0];
+    const configsToSave = saveProviderIds.map((saveProviderId) => {
+      const saveDraft = drafts[saveProviderId];
+
+      return {
+        provider: saveProviderId,
+        apiKey: saveDraft.apiKey.trim(),
+        model: saveDraft.model,
+        models: saveDraft.models,
+        baseUrl: saveDraft.baseUrl.trim(),
+      };
+    });
 
     setIsSaving(true);
     setNotice(null);
 
     try {
-      await onSave({
-        apiKey: apiKey.trim(),
-        model,
-        baseUrl: baseUrl.trim(),
-      });
+      await onSave(configsToSave, activeProviderToSave);
     } catch {
-      setNotice({ tone: "error", message: "保存配置失败，请稍后重试。" });
+      setNotice({
+        tone: "error",
+        message: "Failed to save configuration. Try again later.",
+      });
     } finally {
       setIsSaving(false);
     }
@@ -180,7 +267,7 @@ export function ApiKeySetupPage({
   return (
     <main className="grid min-h-dvh w-dvw place-items-center overflow-y-auto bg-[#0b0b0d] px-4 py-6 text-zinc-100 sm:px-6">
       <form
-        className="w-full max-w-[560px] rounded-md border border-zinc-800 bg-[#101012] shadow-2xl shadow-black/30"
+        className="w-full max-w-[620px] rounded-md border border-zinc-800 bg-[#101012] shadow-2xl shadow-black/30"
         onSubmit={handleSubmit}
       >
         <div className="flex items-start justify-between gap-4 border-b border-zinc-800 px-6 py-5">
@@ -193,7 +280,7 @@ export function ApiKeySetupPage({
                 AI Web Builder
               </h1>
               <p className="mt-1 text-sm text-zinc-500">
-                使用前请配置 DeepSeek API Key
+                Configure an AI provider before using the builder.
               </p>
             </div>
           </div>
@@ -211,6 +298,39 @@ export function ApiKeySetupPage({
         </div>
 
         <div className="space-y-5 px-6 py-6">
+          <fieldset>
+            <legend className="mb-2 block text-sm font-medium text-zinc-300">
+              Provider
+            </legend>
+            <div className="grid grid-cols-2 gap-2 rounded-md border border-zinc-800 bg-zinc-950 p-1">
+              {AI_PROVIDER_IDS.map((optionProviderId) => {
+                const optionProvider =
+                  getAiProviderDefinition(optionProviderId);
+                const isSelected = providerId === optionProviderId;
+                const isConfigured = Boolean(aiState?.configs[optionProviderId]);
+
+                return (
+                  <button
+                    aria-pressed={isSelected}
+                    className={`flex min-h-12 flex-col items-center justify-center rounded text-sm font-medium transition ${
+                      isSelected
+                        ? "bg-teal-400/15 text-teal-100 ring-1 ring-teal-400/30"
+                        : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
+                    }`}
+                    key={optionProviderId}
+                    onClick={() => handleProviderChange(optionProviderId)}
+                    type="button"
+                  >
+                    <span>{optionProvider.label}</span>
+                    <span className="mt-0.5 text-[11px] font-normal text-zinc-600">
+                      {isConfigured ? "Configured" : optionProvider.defaultModel}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </fieldset>
+
           <label className="block">
             <span className="mb-2 block text-sm font-medium text-zinc-300">
               API Key
@@ -218,39 +338,52 @@ export function ApiKeySetupPage({
             <input
               className="h-11 w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/10"
               onChange={(event) => {
-                setApiKey(event.currentTarget.value);
-                markConfigDirty();
+                const apiKey = event.currentTarget.value;
+
+                updateDraft((currentDraft) => ({
+                  ...currentDraft,
+                  apiKey,
+                }));
               }}
-              placeholder="sk-..."
+              placeholder={provider.apiKeyPlaceholder}
               type="password"
-              value={apiKey}
+              value={draft.apiKey}
             />
           </label>
 
           <fieldset>
             <legend className="mb-2 block text-sm font-medium text-zinc-300">
-              Model
+              Models
             </legend>
-            <div className="grid grid-cols-2 gap-2 rounded-md border border-zinc-800 bg-zinc-950 p-1">
-              {DEEPSEEK_MODEL_OPTIONS.map((option) => {
-                const isSelected = model === option.value;
+            <div
+              className="grid gap-2 rounded-md border border-zinc-800 bg-zinc-950 p-1"
+              style={{
+                gridTemplateColumns: "repeat(auto-fit, minmax(128px, 1fr))",
+              }}
+            >
+              {provider.modelOptions.map((option) => {
+                const isSelected = draft.models.includes(option.value);
 
                 return (
                   <button
-                    className={`flex min-h-12 flex-col items-center justify-center rounded text-sm font-medium transition ${
+                    aria-pressed={isSelected}
+                    className={`flex min-h-12 flex-col items-center justify-center rounded px-2 text-sm font-medium transition ${
                       isSelected
                         ? "bg-teal-400/15 text-teal-100 ring-1 ring-teal-400/30"
                         : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
                     }`}
                     key={option.value}
-                    onClick={() => {
-                      setModel(option.value);
-                      markConfigDirty();
-                    }}
+                    onClick={() => handleToggleModel(option.value)}
+                    title={option.description}
                     type="button"
                   >
-                    <span>{option.label}</span>
-                    <span className="mt-0.5 text-[11px] font-normal text-zinc-600">
+                    <span className="flex items-center gap-1.5">
+                      {isSelected ? (
+                        <CheckCircle2 size={13} aria-hidden="true" />
+                      ) : null}
+                      {option.label}
+                    </span>
+                    <span className="mt-0.5 max-w-full truncate text-[11px] font-normal text-zinc-600">
                       {option.value}
                     </span>
                   </button>
@@ -266,10 +399,15 @@ export function ApiKeySetupPage({
             <input
               className="h-11 w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/10"
               onChange={(event) => {
-                setBaseUrl(event.currentTarget.value);
-                markConfigDirty();
+                const baseUrl = event.currentTarget.value;
+
+                updateDraft((currentDraft) => ({
+                  ...currentDraft,
+                  baseUrl,
+                }));
               }}
-              value={baseUrl}
+              placeholder={provider.defaultBaseUrl}
+              value={draft.baseUrl}
             />
           </label>
 
@@ -283,7 +421,9 @@ export function ApiKeySetupPage({
                   : "border-zinc-800 bg-zinc-950 text-zinc-600"
             }`}
           >
-            {notice ? notice.message : "测试结果和错误提示会显示在这里。"}
+            {notice
+              ? notice.message
+              : "Connection test results and errors appear here."}
           </div>
         </div>
 
@@ -315,8 +455,104 @@ export function ApiKeySetupPage({
   );
 }
 
+function createDrafts(
+  aiState: AiProviderState | null,
+): Record<AiProviderId, ProviderDraft> {
+  const drafts = {} as Record<AiProviderId, ProviderDraft>;
+
+  for (const providerId of AI_PROVIDER_IDS) {
+    drafts[providerId] = createProviderDraft(
+      providerId,
+      aiState?.configs[providerId],
+    );
+  }
+
+  return drafts;
+}
+
+async function testModelConnection({
+  apiKey,
+  baseUrl,
+  model,
+  provider,
+}: {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  provider: AiProviderId;
+}): Promise<{ ok: true } | { ok: false; message: string }> {
+  const providerDefinition = getAiProviderDefinition(provider);
+
+  try {
+    const client = new ChatCompletionClient({
+      provider,
+      apiKey,
+      baseUrl,
+      model,
+    });
+    const isConnected = await client.testConnection();
+
+    if (!isConnected) {
+      return {
+        ok: false,
+        message: `${providerDefinition.label} model ${model} responded with an unexpected value.`,
+      };
+    }
+
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `${providerDefinition.label} model ${model} failed: ${getConnectionErrorMessage(error)}`,
+    };
+  }
+}
+
+function getProviderIdsToSave(
+  drafts: Record<AiProviderId, ProviderDraft>,
+  testedSignatures: TestedProviderSignatures,
+) {
+  return AI_PROVIDER_IDS.filter(
+    (candidateProviderId) =>
+      testedSignatures[candidateProviderId] ===
+      getDraftSignature(candidateProviderId, drafts[candidateProviderId]),
+  );
+}
+
+function getDraftSignature(providerId: AiProviderId, draft: ProviderDraft) {
+  return JSON.stringify({
+    provider: providerId,
+    apiKey: draft.apiKey.trim(),
+    baseUrl: draft.baseUrl.trim(),
+    model: draft.model,
+    models: draft.models,
+  });
+}
+
+function createProviderDraft(
+  providerId: AiProviderId,
+  config?: AiProviderConfig,
+): ProviderDraft {
+  const provider = getAiProviderDefinition(providerId);
+  const optionValues = provider.modelOptions.map((option) => option.value);
+  const models =
+    config?.models.filter((model) => optionValues.includes(model)) ?? [];
+  const selectedModels = models.length > 0 ? models : [provider.defaultModel];
+  const activeModel =
+    config?.model && selectedModels.includes(config.model)
+      ? config.model
+      : selectedModels[0];
+
+  return {
+    apiKey: config?.apiKey ?? "",
+    baseUrl: config?.baseUrl ?? provider.defaultBaseUrl,
+    model: activeModel,
+    models: selectedModels,
+  };
+}
+
 function getConnectionErrorMessage(error: unknown) {
-  if (error instanceof DeepSeekClientError) {
+  if (error instanceof LlmClientError) {
     return error.message;
   }
 
@@ -324,5 +560,5 @@ function getConnectionErrorMessage(error: unknown) {
     return error.message;
   }
 
-  return "连接测试失败，请稍后重试。";
+  return "Connection test failed. Try again later.";
 }

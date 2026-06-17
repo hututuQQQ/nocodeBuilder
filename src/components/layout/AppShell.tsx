@@ -4,12 +4,15 @@ import { LogsPanel } from "../logs/LogsPanel";
 import { PreviewPanel } from "../preview/PreviewPanel";
 import { ProjectSidebar } from "../project/ProjectSidebar";
 import { initializeCommandEvents, useAppStore } from "../../store/appStore";
-import type { DeepSeekModel } from "../../services/keyStore";
+import type { ConfiguredModelOption } from "../../App";
+import type { AiProviderId } from "../../services/aiProviders";
 
 type AppShellProps = {
-  activeModel: DeepSeekModel;
+  activeProvider: AiProviderId;
+  activeModel: string;
+  configuredModelOptions: ConfiguredModelOption[];
   isSavingModel: boolean;
-  onChangeModel: (model: DeepSeekModel) => Promise<void>;
+  onChangeModel: (selection: ConfiguredModelOption) => Promise<void>;
   onOpenSettings: () => void;
 };
 
@@ -29,7 +32,9 @@ const MAX_RIGHT_WIDTH = 860;
 const MAX_SIDEBAR_WIDTH = 360;
 
 export function AppShell({
+  activeProvider,
   activeModel,
+  configuredModelOptions,
   isSavingModel,
   onChangeModel,
   onOpenSettings,
@@ -159,7 +164,9 @@ export function AppShell({
         orientation="vertical"
       />
       <ChatPanel
+        activeProvider={activeProvider}
         activeModel={activeModel}
+        configuredModelOptions={configuredModelOptions}
         isSavingModel={isSavingModel}
         onChangeModel={onChangeModel}
       />

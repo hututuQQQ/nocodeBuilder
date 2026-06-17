@@ -1,5 +1,5 @@
-import type { DeepSeekConfig } from "../../services/keyStore";
-import { DeepSeekClient } from "../llm/DeepSeekClient";
+import type { AiProviderConfig } from "../../services/keyStore";
+import { ChatCompletionClient } from "../llm/ChatCompletionClient";
 import {
   buildAgentStepMessages,
   buildGenerateProjectMessages,
@@ -18,12 +18,13 @@ export async function requestProjectGeneration({
   projectName,
   userPrompt,
 }: {
-  config: DeepSeekConfig;
+  config: AiProviderConfig;
   onDelta?: (delta: string) => void;
   projectName: string;
   userPrompt: string;
 }) {
-  const client = new DeepSeekClient({
+  const client = new ChatCompletionClient({
+    provider: config.provider,
     apiKey: config.apiKey,
     baseUrl: config.baseUrl,
     model: config.model,
@@ -43,12 +44,13 @@ export async function requestProjectModification({
   onDelta,
   userRequest,
 }: {
-  config: DeepSeekConfig;
+  config: AiProviderConfig;
   context: ModificationContext;
   onDelta?: (delta: string) => void;
   userRequest: string;
 }) {
-  const client = new DeepSeekClient({
+  const client = new ChatCompletionClient({
+    provider: config.provider,
     apiKey: config.apiKey,
     baseUrl: config.baseUrl,
     model: config.model,
@@ -68,12 +70,13 @@ export async function requestAgentStep({
   onDelta,
   userRequest,
 }: {
-  config: DeepSeekConfig;
+  config: AiProviderConfig;
   context: AgentStepContext;
   onDelta?: (delta: string) => void;
   userRequest: string;
 }) {
-  const client = new DeepSeekClient({
+  const client = new ChatCompletionClient({
+    provider: config.provider,
     apiKey: config.apiKey,
     baseUrl: config.baseUrl,
     model: config.model,

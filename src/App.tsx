@@ -8,32 +8,40 @@ import {
 } from "react";
 import { AppShell } from "./components/layout/AppShell";
 import { ApiKeySetupPage } from "./components/settings/ApiKeySetupPage";
+import { AI_PROVIDER_IDS, type AiProviderId } from "./services/aiProviders";
 import {
-  DeepSeekConfig,
-  DeepSeekConfigInput,
-  DeepSeekModel,
+  AiProviderConfigInput,
+  AiProviderState,
+  getActiveAiProviderConfig,
   keyStore,
 } from "./services/keyStore";
 
+export type ConfiguredModelOption = {
+  provider: AiProviderId;
+  model: string;
+};
+
 function App() {
-  const [config, setConfig] = useState<DeepSeekConfig | null>(null);
+  const [aiState, setAiState] = useState<AiProviderState | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSavingModel, setIsSavingModel] = useState(false);
+  const config = getActiveAiProviderConfig(aiState);
+  const configuredModelOptions = getConfiguredModelOptions(aiState);
 
   useEffect(() => {
     let isActive = true;
 
     async function loadConfig() {
       try {
-        const storedConfig = await keyStore.getDeepSeekConfig();
+        const storedState = await keyStore.getAiProviderState();
 
         if (isActive) {
-          setConfig(storedConfig);
+          setAiState(storedState);
         }
       } catch {
         if (isActive) {
-          setConfig(null);
+          setAiState(null);
         }
       } finally {
         if (isActive) {
@@ -49,33 +57,52 @@ function App() {
     };
   }, []);
 
-  const handleSaveConfig = useCallback(async (nextConfig: DeepSeekConfigInput) => {
-    const savedConfig = await keyStore.saveDeepSeekConfig(nextConfig);
-    setConfig(savedConfig);
-    setIsSettingsOpen(false);
-  }, []);
+  const handleSaveConfigs = useCallback(
+    async (
+      nextConfigs: AiProviderConfigInput[],
+      activeProvider: AiProviderId,
+    ) => {
+      const savedState = await keyStore.saveAiProviderConfigs(
+        nextConfigs,
+        activeProvider,
+      );
+      setAiState(savedState);
+      setIsSettingsOpen(false);
+    },
+    [],
+  );
 
   const handleChangeModel = useCallback(
-    async (model: DeepSeekModel) => {
-      if (!config || config.model === model || isSavingModel) {
+    async (selection: ConfiguredModelOption) => {
+      const targetConfig = aiState?.configs[selection.provider];
+
+      if (
+        !targetConfig ||
+        (config?.provider === selection.provider &&
+          config.model === selection.model) ||
+        !targetConfig.models.includes(selection.model) ||
+        isSavingModel
+      ) {
         return;
       }
 
       setIsSavingModel(true);
 
       try {
-        const savedConfig = await keyStore.saveDeepSeekConfig({
-          apiKey: config.apiKey,
-          baseUrl: config.baseUrl,
-          model,
+        const savedState = await keyStore.saveAiProviderConfig({
+          provider: targetConfig.provider,
+          apiKey: targetConfig.apiKey,
+          baseUrl: targetConfig.baseUrl,
+          model: selection.model,
+          models: targetConfig.models,
         });
 
-        setConfig(savedConfig);
+        setAiState(savedState);
       } finally {
         setIsSavingModel(false);
       }
     },
-    [config, isSavingModel],
+    [aiState, config?.model, config?.provider, isSavingModel],
   );
 
   if (isLoading) {
@@ -90,10 +117,10 @@ function App() {
     return (
       <AppErrorBoundary>
         <ApiKeySetupPage
-          config={config}
+          aiState={aiState}
           mode={config ? "settings" : "onboarding"}
           onCancel={config ? () => setIsSettingsOpen(false) : undefined}
-          onSave={handleSaveConfig}
+          onSave={handleSaveConfigs}
         />
       </AppErrorBoundary>
     );
@@ -102,13 +129,36 @@ function App() {
   return (
     <AppErrorBoundary>
       <AppShell
+        activeProvider={config.provider}
         activeModel={config.model}
+        configuredModelOptions={configuredModelOptions}
         isSavingModel={isSavingModel}
         onChangeModel={handleChangeModel}
         onOpenSettings={() => setIsSettingsOpen(true)}
       />
     </AppErrorBoundary>
   );
+}
+
+function getConfiguredModelOptions(
+  state: AiProviderState | null,
+): ConfiguredModelOption[] {
+  if (!state) {
+    return [];
+  }
+
+  return AI_PROVIDER_IDS.flatMap((provider) => {
+    const config = state.configs[provider];
+
+    if (!config) {
+      return [];
+    }
+
+    return config.models.map((model) => ({
+      provider,
+      model,
+    }));
+  });
 }
 
 type AppErrorBoundaryProps = {

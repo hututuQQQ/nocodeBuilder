@@ -1,43 +1,40 @@
-export const DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com";
+import {
+  AI_PROVIDER_IDS,
+  DEFAULT_AI_PROVIDER,
+  getAiProviderDefinition,
+  getDefaultAiBaseUrl,
+  getDefaultAiModel,
+  isAiProviderId,
+  isKnownProviderModel,
+  type AiProviderId,
+} from "./aiProviders";
 
-export const DEEPSEEK_MODELS = [
-  "deepseek-v4-pro",
-  "deepseek-v4-flash",
-] as const;
 export const VERCEL_DEPLOY_TARGETS = ["preview", "production"] as const;
 export const DEFAULT_VERCEL_DEPLOY_TARGET = "preview";
 
-export type DeepSeekModel = (typeof DEEPSEEK_MODELS)[number];
-
-export const DEEPSEEK_MODEL_OPTIONS: Array<{
-  value: DeepSeekModel;
-  label: string;
-  description: string;
-}> = [
-  {
-    value: "deepseek-v4-pro",
-    label: "Pro",
-    description: "Higher quality edits",
-  },
-  {
-    value: "deepseek-v4-flash",
-    label: "Flash",
-    description: "Faster and lighter",
-  },
-];
-
-export type DeepSeekConfig = {
-  provider: "deepseek";
+export type AiProviderConfig = {
+  provider: AiProviderId;
   apiKey: string;
-  model: DeepSeekModel;
+  model: string;
+  models: string[];
   baseUrl: string;
   updatedAt: string;
 };
 
-export type DeepSeekConfigInput = {
+export type AiProviderConfigInput = {
+  provider: AiProviderId;
   apiKey: string;
-  model: DeepSeekModel;
+  model?: string;
+  models: string[];
   baseUrl: string;
+};
+
+export type AiProviderConfigs = Partial<Record<AiProviderId, AiProviderConfig>>;
+
+export type AiProviderState = {
+  activeProvider: AiProviderId;
+  configs: AiProviderConfigs;
+  updatedAt: string;
 };
 
 export type VercelDeployTarget = (typeof VERCEL_DEPLOY_TARGETS)[number];
@@ -59,30 +56,129 @@ export type VercelConfigInput = {
 };
 
 export interface KeyStore {
-  getDeepSeekConfig: () => Promise<DeepSeekConfig | null>;
+  getAiProviderState: () => Promise<AiProviderState>;
+  getAiProviderConfig: () => Promise<AiProviderConfig | null>;
   getVercelConfig: () => Promise<VercelConfig | null>;
-  saveDeepSeekConfig: (config: DeepSeekConfigInput) => Promise<DeepSeekConfig>;
+  saveAiProviderConfig: (
+    config: AiProviderConfigInput,
+  ) => Promise<AiProviderState>;
+  saveAiProviderConfigs: (
+    configs: AiProviderConfigInput[],
+    activeProvider?: AiProviderId,
+  ) => Promise<AiProviderState>;
   saveVercelConfig: (config: VercelConfigInput) => Promise<VercelConfig>;
 }
 
-const DEEPSEEK_STORAGE_KEY = "ai-web-builder.deepseek-config.v1";
+const AI_PROVIDER_STORAGE_KEY = "ai-web-builder.ai-provider-config.v3";
+const STALE_AI_PROVIDER_STORAGE_KEYS = [
+  "ai-web-builder.ai-provider-config.v2",
+  "ai-web-builder.ai-provider-config.v1",
+  "ai-web-builder.deepseek-config.v1",
+];
 const VERCEL_STORAGE_KEY = "ai-web-builder.vercel-config.v1";
-
-function isDeepSeekModel(value: string): value is DeepSeekModel {
-  return DEEPSEEK_MODELS.some((model) => model === value);
-}
 
 function isVercelDeployTarget(value: string): value is VercelDeployTarget {
   return VERCEL_DEPLOY_TARGETS.some((target) => target === value);
 }
 
-function normalizeConfig(config: DeepSeekConfigInput): DeepSeekConfig {
+function createEmptyAiProviderState(): AiProviderState {
   return {
-    provider: "deepseek",
+    activeProvider: DEFAULT_AI_PROVIDER,
+    configs: {},
+    updatedAt: "",
+  };
+}
+
+export function getActiveAiProviderConfig(
+  state: AiProviderState | null,
+): AiProviderConfig | null {
+  if (!state) {
+    return null;
+  }
+
+  return state.configs[state.activeProvider] ?? null;
+}
+
+function normalizeAiProviderConfig(
+  config: AiProviderConfigInput,
+): AiProviderConfig {
+  const provider = config.provider;
+  const models = normalizeModelList(provider, config.models, config.model);
+  const model =
+    config.model && models.includes(config.model) ? config.model : models[0];
+
+  return {
+    provider,
     apiKey: config.apiKey.trim(),
-    model: config.model,
-    baseUrl: config.baseUrl.trim() || DEFAULT_DEEPSEEK_BASE_URL,
+    model,
+    models,
+    baseUrl: config.baseUrl.trim() || getDefaultAiBaseUrl(provider),
     updatedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeModelList(
+  provider: AiProviderId,
+  models: string[],
+  preferredModel?: string,
+) {
+  const knownModels = getAiProviderDefinition(provider).modelOptions.map(
+    (option) => option.value,
+  );
+  const selectedModels = new Set(
+    models
+      .map((model) => model.trim())
+      .filter((model) => isKnownProviderModel(provider, model)),
+  );
+
+  if (
+    preferredModel &&
+    isKnownProviderModel(provider, preferredModel) &&
+    selectedModels.size === 0
+  ) {
+    selectedModels.add(preferredModel);
+  }
+
+  if (selectedModels.size === 0) {
+    selectedModels.add(getDefaultAiModel(provider));
+  }
+
+  return knownModels.filter((model) => selectedModels.has(model));
+}
+
+function normalizeAiProviderState(
+  state: Partial<AiProviderState>,
+): AiProviderState {
+  const configs: AiProviderConfigs = {};
+
+  for (const provider of AI_PROVIDER_IDS) {
+    const config = state.configs?.[provider];
+
+    if (!config || typeof config.apiKey !== "string" || !config.apiKey.trim()) {
+      continue;
+    }
+
+    configs[provider] = normalizeAiProviderConfig({
+      provider,
+      apiKey: config.apiKey,
+      baseUrl: config.baseUrl,
+      model: config.model,
+      models: Array.isArray(config.models) ? config.models : [config.model],
+    });
+  }
+
+  const activeProvider =
+    typeof state.activeProvider === "string" &&
+    isAiProviderId(state.activeProvider) &&
+    configs[state.activeProvider]
+      ? state.activeProvider
+      : (AI_PROVIDER_IDS.find((provider) => configs[provider]) ??
+        DEFAULT_AI_PROVIDER);
+
+  return {
+    activeProvider,
+    configs,
+    updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : "",
   };
 }
 
@@ -97,35 +193,19 @@ function normalizeVercelConfig(config: VercelConfigInput): VercelConfig {
   };
 }
 
-function readStoredConfig(value: string | null): DeepSeekConfig | null {
+function readStoredAiProviderState(value: string | null): AiProviderState | null {
   if (!value) {
     return null;
   }
 
   try {
-    const parsed = JSON.parse(value) as Partial<DeepSeekConfig>;
+    const parsed = JSON.parse(value) as Partial<AiProviderState>;
 
-    if (
-      parsed.provider !== "deepseek" ||
-      typeof parsed.apiKey !== "string" ||
-      !parsed.apiKey.trim() ||
-      typeof parsed.model !== "string" ||
-      !isDeepSeekModel(parsed.model)
-    ) {
+    if (!parsed.configs || typeof parsed.configs !== "object") {
       return null;
     }
 
-    return {
-      provider: "deepseek",
-      apiKey: parsed.apiKey.trim(),
-      model: parsed.model,
-      baseUrl:
-        typeof parsed.baseUrl === "string" && parsed.baseUrl.trim()
-          ? parsed.baseUrl.trim()
-          : DEFAULT_DEEPSEEK_BASE_URL,
-      updatedAt:
-        typeof parsed.updatedAt === "string" ? parsed.updatedAt : "",
-    };
+    return normalizeAiProviderState(parsed);
   } catch {
     return null;
   }
@@ -164,9 +244,29 @@ function readStoredVercelConfig(value: string | null): VercelConfig | null {
   }
 }
 
+function removeStaleAiProviderConfigs() {
+  for (const storageKey of STALE_AI_PROVIDER_STORAGE_KEYS) {
+    window.localStorage.removeItem(storageKey);
+  }
+}
+
 class LocalStorageKeyStore implements KeyStore {
-  async getDeepSeekConfig() {
-    return readStoredConfig(window.localStorage.getItem(DEEPSEEK_STORAGE_KEY));
+  async getAiProviderState() {
+    removeStaleAiProviderConfigs();
+
+    const currentState = readStoredAiProviderState(
+      window.localStorage.getItem(AI_PROVIDER_STORAGE_KEY),
+    );
+
+    if (currentState) {
+      return currentState;
+    }
+
+    return createEmptyAiProviderState();
+  }
+
+  async getAiProviderConfig() {
+    return getActiveAiProviderConfig(await this.getAiProviderState());
   }
 
   async getVercelConfig() {
@@ -175,10 +275,48 @@ class LocalStorageKeyStore implements KeyStore {
     );
   }
 
-  async saveDeepSeekConfig(config: DeepSeekConfigInput) {
-    const nextConfig = normalizeConfig(config);
-    window.localStorage.setItem(DEEPSEEK_STORAGE_KEY, JSON.stringify(nextConfig));
-    return nextConfig;
+  async saveAiProviderConfig(config: AiProviderConfigInput) {
+    return this.saveAiProviderConfigs([config], config.provider);
+  }
+
+  async saveAiProviderConfigs(
+    configs: AiProviderConfigInput[],
+    activeProvider?: AiProviderId,
+  ) {
+    const currentState = await this.getAiProviderState();
+    const nextConfigs = configs.map(normalizeAiProviderConfig);
+    const mergedConfigs: AiProviderConfigs = {
+      ...currentState.configs,
+    };
+
+    for (const nextConfig of nextConfigs) {
+      mergedConfigs[nextConfig.provider] = nextConfig;
+    }
+
+    const lastConfig = nextConfigs[nextConfigs.length - 1];
+    const fallbackActiveProvider =
+      AI_PROVIDER_IDS.find((provider) => mergedConfigs[provider]) ??
+      DEFAULT_AI_PROVIDER;
+    const nextActiveProvider =
+      activeProvider && mergedConfigs[activeProvider]
+        ? activeProvider
+        : lastConfig
+          ? lastConfig.provider
+          : mergedConfigs[currentState.activeProvider]
+            ? currentState.activeProvider
+            : fallbackActiveProvider;
+    const nextState: AiProviderState = {
+      activeProvider: nextActiveProvider,
+      configs: mergedConfigs,
+      updatedAt: new Date().toISOString(),
+    };
+
+    window.localStorage.setItem(
+      AI_PROVIDER_STORAGE_KEY,
+      JSON.stringify(nextState),
+    );
+
+    return nextState;
   }
 
   async saveVercelConfig(config: VercelConfigInput) {
