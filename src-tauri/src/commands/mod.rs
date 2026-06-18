@@ -43,6 +43,13 @@ pub fn stop_dev_server(
     dev_server::stop_dev_server(app, registry, project_id)
 }
 
+pub fn stop_all_dev_servers(
+    app: AppHandle,
+    registry: State<'_, DevServerRegistry>,
+) -> Result<(), String> {
+    dev_server::stop_all_dev_servers(app, registry)
+}
+
 #[tauri::command]
 pub fn open_preview_in_browser(url: String) -> Result<(), String> {
     preview::open_preview_in_browser(url)

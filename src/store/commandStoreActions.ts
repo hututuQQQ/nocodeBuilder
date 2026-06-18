@@ -162,6 +162,16 @@ export function createCommandActions({ get, set }: StoreAccess): CommandActions 
     },
 
     startDevServer: async (projectId) => {
+      const state = get();
+
+      if (
+        state.currentProject?.id !== projectId ||
+        state.devServerStatus === "starting" ||
+        state.devServerStatus === "running"
+      ) {
+        return;
+      }
+
       set({
         devServerStatus: "starting",
         isStartingDevServer: true,
@@ -183,10 +193,14 @@ export function createCommandActions({ get, set }: StoreAccess): CommandActions 
         const message = getProjectErrorMessage(error);
 
         set((state) => ({
-          devServerStatus: "failed",
-          isStartingDevServer: false,
-          projectError: message,
-          previewUrl: null,
+          ...(state.currentProject?.id === projectId
+            ? {
+                devServerStatus: "failed" as const,
+                isStartingDevServer: false,
+                previewUrl: null,
+                projectError: message,
+              }
+            : {}),
           terminalLogs: appendLogs(state.terminalLogs, [
             `[dev-server:error] ${message}`,
           ]),

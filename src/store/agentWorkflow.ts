@@ -18,7 +18,10 @@ import {
 } from "./changeHistory";
 import { getAiProviderDefinition } from "../services/aiProviders";
 import { appendLogs } from "./commandLogs";
-import { replaceChatMessage } from "./chatMessages";
+import {
+  persistCurrentConversation,
+  replaceConversationMessage,
+} from "./conversationState";
 import {
   appendAssistantMessage,
   appendTerminalLog,
@@ -81,13 +84,15 @@ export async function generateInitialProject(
     );
 
     if (store.get().currentProject?.id === project.id) {
+      replaceConversationMessage(
+        store,
+        stream.messageId,
+        formatChangeRecordMessage(response.summary, changeRecord),
+        false,
+      );
+      void persistCurrentConversation(store);
+
       store.set((state) => ({
-        chatMessages: replaceChatMessage(
-          state.chatMessages,
-          stream.messageId,
-          formatChangeRecordMessage(response.summary, changeRecord),
-          false,
-        ),
         previewRefreshKey: state.previewRefreshKey + 1,
         terminalLogs: appendLogs(state.terminalLogs, [
           `[agent] ${response.summary}`,
@@ -99,13 +104,17 @@ export async function generateInitialProject(
   } catch (error) {
     const message = getProjectErrorMessage(error);
 
-    store.set((state) => ({
-      chatMessages: replaceChatMessage(
-        state.chatMessages,
+    if (store.get().currentProject?.id === project.id) {
+      replaceConversationMessage(
+        store,
         stream.messageId,
         `Project generation failed: ${message}`,
         false,
-      ),
+      );
+      void persistCurrentConversation(store);
+    }
+
+    store.set((state) => ({
       projectError: message,
       terminalLogs: appendLogs(state.terminalLogs, [`[agent:error] ${message}`]),
     }));
@@ -206,13 +215,15 @@ export async function modifyCurrentProject(
         return;
       }
 
+      replaceConversationMessage(
+        store,
+        activeStream.messageId,
+        formatChangeRecordMessage(response.summary, changeRecord),
+        false,
+      );
+      void persistCurrentConversation(store);
+
       store.set((state) => ({
-        chatMessages: replaceChatMessage(
-          state.chatMessages,
-          activeStream.messageId,
-          formatChangeRecordMessage(response.summary, changeRecord),
-          false,
-        ),
         previewRefreshKey: state.previewRefreshKey + 1,
         terminalLogs: appendLogs(state.terminalLogs, [
           `[agent] ${response.summary}`,
@@ -246,13 +257,15 @@ export async function modifyCurrentProject(
       ensureCurrentProject(store, project.id);
 
       if (step.type === "answer") {
+        replaceConversationMessage(
+          store,
+          activeStream.messageId,
+          step.message,
+          false,
+        );
+        void persistCurrentConversation(store);
+
         store.set((state) => ({
-          chatMessages: replaceChatMessage(
-            state.chatMessages,
-            activeStream.messageId,
-            step.message,
-            false,
-          ),
           terminalLogs: appendLogs(state.terminalLogs, [`[agent] answered`]),
         }));
         return;
@@ -264,13 +277,15 @@ export async function modifyCurrentProject(
           didChangeFiles,
         });
 
+        replaceConversationMessage(
+          store,
+          activeStream.messageId,
+          content,
+          false,
+        );
+        void persistCurrentConversation(store);
+
         store.set((state) => ({
-          chatMessages: replaceChatMessage(
-            state.chatMessages,
-            activeStream.messageId,
-            content,
-            false,
-          ),
           terminalLogs: appendLogs(state.terminalLogs, [`[agent] ${step.summary}`]),
         }));
         return;
@@ -363,33 +378,35 @@ export async function modifyCurrentProject(
             "Review the changed files in the file panel before continuing.",
           ].join("\n");
 
-          store.set((state) => ({
-            chatMessages: replaceChatMessage(
-              state.chatMessages,
-              activeStream.messageId,
-              content,
-              false,
-            ),
-            projectError: buildObservation.summary,
-          }));
+          replaceConversationMessage(
+            store,
+            activeStream.messageId,
+            content,
+            false,
+          );
+          void persistCurrentConversation(store);
+
+          store.set({ projectError: buildObservation.summary });
           return;
         }
       }
     }
 
+    replaceConversationMessage(
+      store,
+      activeStream.messageId,
+      [
+        "I stopped after reaching the agent step limit.",
+        "",
+        didChangeFiles
+          ? "Some project files were changed."
+          : "No project files were changed.",
+      ].join("\n"),
+      false,
+    );
+    void persistCurrentConversation(store);
+
     store.set((state) => ({
-      chatMessages: replaceChatMessage(
-        state.chatMessages,
-        activeStream.messageId,
-        [
-          "I stopped after reaching the agent step limit.",
-          "",
-          didChangeFiles
-            ? "Some project files were changed."
-            : "No project files were changed.",
-        ].join("\n"),
-        false,
-      ),
       terminalLogs: appendLogs(state.terminalLogs, [
         "[agent:error] stopped after reaching step limit",
       ]),
@@ -397,13 +414,17 @@ export async function modifyCurrentProject(
   } catch (error) {
     const message = getProjectErrorMessage(error);
 
-    store.set((state) => ({
-      chatMessages: replaceChatMessage(
-        state.chatMessages,
+    if (store.get().currentProject?.id === project.id) {
+      replaceConversationMessage(
+        store,
         activeStream.messageId,
         `Agent workflow failed: ${message}`,
         false,
-      ),
+      );
+      void persistCurrentConversation(store);
+    }
+
+    store.set((state) => ({
       projectError: message,
       terminalLogs: appendLogs(state.terminalLogs, [`[agent:error] ${message}`]),
     }));
@@ -420,7 +441,7 @@ function buildAgentStepContext(
   userRequest: string,
 ) {
   const state = store.get();
-  const recentMessages = state.chatMessages
+  const recentMessages = (state.currentConversation?.messages ?? [])
     .filter((message) => message.id !== "welcome" && !message.isStreaming)
     .slice(-8)
     .map((message) => ({

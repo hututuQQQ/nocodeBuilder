@@ -23,6 +23,31 @@ export type ProjectFileInput = {
   content: string;
 };
 
+export type ProjectChatMessage = {
+  id: string;
+  isStreaming?: boolean;
+  role: "assistant" | "user";
+  content: string;
+};
+
+export type ProjectConversationSummary = {
+  id: string;
+  projectId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  lastMessageAt: string;
+  archivedAt: string | null;
+  messageCount: number;
+};
+
+export type ProjectConversation = Omit<
+  ProjectConversationSummary,
+  "messageCount"
+> & {
+  messages: ProjectChatMessage[];
+};
+
 export type CommandResult = {
   projectId: string;
   command: string;
@@ -117,6 +142,51 @@ export const projectApi = {
 
   openProjectFolder(projectId: string) {
     return invoke<void>("open_project_folder", { projectId });
+  },
+
+  listProjectConversations(projectId: string, includeArchived = false) {
+    return invoke<ProjectConversationSummary[]>("list_project_conversations", {
+      includeArchived,
+      projectId,
+    });
+  },
+
+  createProjectConversation(projectId: string, title?: string) {
+    return invoke<ProjectConversation>("create_project_conversation", {
+      projectId,
+      title,
+    });
+  },
+
+  readProjectConversation(projectId: string, conversationId: string) {
+    return invoke<ProjectConversation>("read_project_conversation", {
+      conversationId,
+      projectId,
+    });
+  },
+
+  saveProjectConversation(
+    projectId: string,
+    conversation: ProjectConversation,
+  ) {
+    return invoke<ProjectConversation>("save_project_conversation", {
+      conversation,
+      projectId,
+    });
+  },
+
+  archiveProjectConversation(projectId: string, conversationId: string) {
+    return invoke<ProjectConversation>("archive_project_conversation", {
+      conversationId,
+      projectId,
+    });
+  },
+
+  unarchiveProjectConversation(projectId: string, conversationId: string) {
+    return invoke<ProjectConversation>("unarchive_project_conversation", {
+      conversationId,
+      projectId,
+    });
   },
 
   runCommand(projectId: string, command: string) {

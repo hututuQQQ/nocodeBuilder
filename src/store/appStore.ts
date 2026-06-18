@@ -4,6 +4,8 @@ import type {
   CommandResult,
   CommandStatusEvent,
   FileTree,
+  ProjectConversation,
+  ProjectConversationSummary,
   ProjectInfo,
   VercelDeploymentInfo,
   VercelDeployOptions,
@@ -17,6 +19,7 @@ import type { ChangeRecord } from "./changeHistory";
 import { createChatActions } from "./chatStoreActions";
 import { appendLogs } from "./commandLogs";
 import { createCommandActions } from "./commandStoreActions";
+import { createConversationActions } from "./conversationStoreActions";
 import { createDeploymentActions } from "./deploymentStoreActions";
 import { createPreviewActions } from "./previewStoreActions";
 import { createProjectActions } from "./projectStoreActions";
@@ -34,6 +37,8 @@ export type AppState = {
   fileTree: FileTree | null;
   selectedFilePath: string | null;
   selectedFileContent: string;
+  conversationSummaries: ProjectConversationSummary[];
+  currentConversation: ProjectConversation | null;
   chatMessages: ChatMessage[];
   changeHistory: ChangeRecord[];
   terminalLogs: string[];
@@ -43,6 +48,8 @@ export type AppState = {
   isInstallingDependencies: boolean;
   isLoadingProjects: boolean;
   isCreatingProject: boolean;
+  isCreatingConversation: boolean;
+  isLoadingConversations: boolean;
   isGeneratingProject: boolean;
   isLoadingFiles: boolean;
   isReadingFile: boolean;
@@ -51,7 +58,14 @@ export type AppState = {
   isDeploying: boolean;
   isModifyingProject: boolean;
   projectError: string | null;
+  showArchivedConversations: boolean;
+  archiveConversation: (conversationId: string) => Promise<void>;
+  archiveCurrentConversation: () => Promise<void>;
   bootstrapProject: (projectId: string) => Promise<void>;
+  createConversation: (
+    projectId?: string,
+    title?: string,
+  ) => Promise<ProjectConversation | null>;
   createProject: (
     projectName: string,
     projectPrompt: string,
@@ -61,6 +75,10 @@ export type AppState = {
   ) => Promise<VercelDeploymentInfo | null>;
   handleCommandOutput: (event: CommandOutputEvent) => void;
   handleCommandStatus: (event: CommandStatusEvent) => void;
+  loadProjectConversations: (
+    projectId: string,
+    options?: { ensureConversation?: boolean; initialTitle?: string },
+  ) => Promise<void>;
   loadProjects: () => Promise<void>;
   openProjectFolder: (projectId: string) => Promise<void>;
   openPreviewInBrowser: (url?: string) => Promise<void>;
@@ -70,13 +88,20 @@ export type AppState = {
     projectId: string,
     command: string,
   ) => Promise<CommandResult | null>;
+  selectConversation: (conversationId: string) => Promise<void>;
   selectProject: (
     projectId: string,
-    options?: { startDevServer?: boolean },
+    options?: {
+      ensureConversation?: boolean;
+      startDevServer?: boolean;
+      conversationTitle?: string;
+    },
   ) => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
+  setShowArchivedConversations: (showArchived: boolean) => Promise<void>;
   startDevServer: (projectId: string) => Promise<void>;
   stopDevServer: (projectId: string) => Promise<void>;
+  unarchiveConversation: (conversationId: string) => Promise<void>;
 };
 
 const initialState = {
@@ -87,14 +112,9 @@ const initialState = {
   fileTree: null,
   selectedFilePath: null,
   selectedFileContent: "",
-  chatMessages: [
-    {
-      id: "welcome",
-      role: "assistant",
-      content:
-        "Ready. Create a project with a website brief, then I will generate a Next.js App Router app.",
-    },
-  ],
+  conversationSummaries: [],
+  currentConversation: null,
+  chatMessages: [],
   changeHistory: [],
   terminalLogs: [],
   previewRefreshKey: 0,
@@ -103,6 +123,8 @@ const initialState = {
   isInstallingDependencies: false,
   isLoadingProjects: false,
   isCreatingProject: false,
+  isCreatingConversation: false,
+  isLoadingConversations: false,
   isGeneratingProject: false,
   isLoadingFiles: false,
   isReadingFile: false,
@@ -111,23 +133,31 @@ const initialState = {
   isDeploying: false,
   isModifyingProject: false,
   projectError: null,
+  showArchivedConversations: false,
 } satisfies Omit<
   AppState,
+  | "archiveConversation"
+  | "archiveCurrentConversation"
   | "bootstrapProject"
+  | "createConversation"
   | "createProject"
   | "deployCurrentProject"
   | "handleCommandOutput"
   | "handleCommandStatus"
+  | "loadProjectConversations"
   | "loadProjects"
   | "openProjectFolder"
   | "openPreviewInBrowser"
   | "readProjectFile"
   | "refreshPreview"
   | "runProjectCommand"
+  | "selectConversation"
   | "selectProject"
   | "sendMessage"
+  | "setShowArchivedConversations"
   | "startDevServer"
   | "stopDevServer"
+  | "unarchiveConversation"
 >;
 
 export const useAppStore = create<AppState>((set, get) => {
@@ -136,6 +166,7 @@ export const useAppStore = create<AppState>((set, get) => {
   return {
     ...initialState,
     ...createCommandActions(store),
+    ...createConversationActions(store),
     ...createDeploymentActions(store),
     ...createPreviewActions(store),
     ...createProjectActions(store),

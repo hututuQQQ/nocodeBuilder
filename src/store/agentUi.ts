@@ -1,8 +1,9 @@
-import {
-  createChatMessage,
-  replaceChatMessage,
-} from "./chatMessages";
+import { createChatMessage } from "./chatMessages";
 import { appendLogs } from "./commandLogs";
+import {
+  appendConversationMessage,
+  replaceConversationMessage,
+} from "./conversationState";
 import type { StoreAccess } from "./storeAccess";
 
 export type AgentStreamController = {
@@ -21,19 +22,15 @@ export function startStreamingAgentMessage(
   let receivedChars = 0;
   let lastUpdateAt = 0;
 
-  store.set((state) => ({
-    chatMessages: [...state.chatMessages, message],
-  }));
+  appendConversationMessage(store, message);
 
   function update(status: string) {
-    store.set((state) => ({
-      chatMessages: replaceChatMessage(
-        state.chatMessages,
-        message.id,
-        `${title}\n\n${status}\n\nReceived ${receivedChars.toLocaleString()} characters.`,
-        true,
-      ),
-    }));
+    replaceConversationMessage(
+      store,
+      message.id,
+      `${title}\n\n${status}\n\nReceived ${receivedChars.toLocaleString()} characters.`,
+      true,
+    );
   }
 
   return {
@@ -61,12 +58,7 @@ export function updateAgentStatus(
 }
 
 export function appendAssistantMessage(store: StoreAccess, content: string) {
-  store.set((state) => ({
-    chatMessages: [
-      ...state.chatMessages,
-      createChatMessage("assistant", content),
-    ],
-  }));
+  appendConversationMessage(store, createChatMessage("assistant", content));
 }
 
 export function appendTerminalLog(store: StoreAccess, content: string) {
