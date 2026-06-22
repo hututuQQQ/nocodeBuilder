@@ -71,7 +71,7 @@ export function CodeViewer({ content, isLoading, path }: CodeViewerProps) {
   );
 }
 
-function getMonacoLanguage(path: string) {
+export function getMonacoLanguage(path: string) {
   const normalizedPath = path.toLowerCase();
   const fileName = normalizedPath.split("/").pop() ?? normalizedPath;
 
@@ -138,7 +138,7 @@ function getMonacoLanguage(path: string) {
   return "plaintext";
 }
 
-function getLanguageLabel(language: string, path: string) {
+export function getLanguageLabel(language: string, path: string) {
   if (language === "plaintext") {
     return "";
   }

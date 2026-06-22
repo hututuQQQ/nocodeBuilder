@@ -39,20 +39,51 @@ pub fn start_dev_server(
     project_id: String,
 ) -> Result<DevServerInfo, String> {
     let project_dir = resolve_project_dir(&project_id)?;
-
-    if let Some(info) = current_dev_server_info(&registry, &project_id)? {
-        return Ok(info);
-    }
-
     let allowed = preferred_dev_command(&project_dir);
     let command_label = allowed.label.to_string();
     let started_at = current_timestamp();
-    let mut child = spawn_child(&project_dir, allowed)?;
-    let pid = child.id();
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
     let url_state = Arc::new(Mutex::new(None));
     let (url_sender, url_receiver) = mpsc::channel::<String>();
+    let (child, pid, stdout, stderr) = {
+        let mut servers = lock_servers(&registry)?;
+
+        if let Some(server) = servers.get(&project_id) {
+            if let Some(url) = server
+                .url
+                .lock()
+                .map_err(|_| "command: failed to read dev server URL".to_string())?
+                .clone()
+            {
+                return Ok(DevServerInfo {
+                    project_id,
+                    command: server.command.clone(),
+                    pid: server.pid,
+                    status: "running".to_string(),
+                    started_at: server.started_at.clone(),
+                    url,
+                });
+            }
+
+            return Err("command: dev server is already starting".to_string());
+        }
+
+        let mut child = spawn_child(&project_dir, allowed)?;
+        let pid = child.id();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        servers.insert(
+            project_id.clone(),
+            DevServerProcess {
+                command: command_label.clone(),
+                pid,
+                started_at: started_at.clone(),
+                url: url_state.clone(),
+            },
+        );
+
+        (child, pid, stdout, stderr)
+    };
 
     emit_status(
         &app,
@@ -92,23 +123,9 @@ pub fn start_dev_server(
         );
     }
 
-    let servers = registry.servers.clone();
-    {
-        let mut servers = lock_servers(&registry)?;
-        servers.insert(
-            project_id.clone(),
-            DevServerProcess {
-                command: command_label.clone(),
-                pid,
-                started_at: started_at.clone(),
-                url: url_state.clone(),
-            },
-        );
-    }
-
     spawn_dev_server_watcher(
         app.clone(),
-        servers,
+        registry.servers.clone(),
         project_id.clone(),
         command_label.clone(),
         pid,
@@ -176,31 +193,39 @@ pub fn stop_dev_server(
     Ok(())
 }
 
-fn current_dev_server_info(
-    registry: &State<'_, DevServerRegistry>,
-    project_id: &str,
-) -> Result<Option<DevServerInfo>, String> {
-    let servers = lock_servers(registry)?;
-    let Some(server) = servers.get(project_id) else {
-        return Ok(None);
-    };
-    let Some(url) = server
-        .url
-        .lock()
-        .map_err(|_| "command: failed to read dev server URL".to_string())?
-        .clone()
-    else {
-        return Ok(None);
+pub fn stop_all_dev_servers(
+    app: AppHandle,
+    registry: State<'_, DevServerRegistry>,
+) -> Result<(), String> {
+    let servers = {
+        let mut servers = lock_servers(&registry)?;
+        servers.drain().collect::<Vec<_>>()
     };
 
-    Ok(Some(DevServerInfo {
-        project_id: project_id.to_string(),
-        command: server.command.clone(),
-        pid: server.pid,
-        status: "running".to_string(),
-        started_at: server.started_at.clone(),
-        url,
-    }))
+    for (project_id, server) in servers {
+        match kill_process_tree(server.pid) {
+            Ok(()) => emit_status(
+                &app,
+                &project_id,
+                &server.command,
+                "stopped",
+                None,
+                Some(format!("stopped pid {}", server.pid)),
+                None,
+            ),
+            Err(error) => emit_status(
+                &app,
+                &project_id,
+                &server.command,
+                "failed",
+                None,
+                Some(error),
+                None,
+            ),
+        }
+    }
+
+    Ok(())
 }
 
 fn spawn_dev_server_watcher(

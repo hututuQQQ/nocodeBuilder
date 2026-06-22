@@ -23,6 +23,81 @@ export type ProjectFileInput = {
   content: string;
 };
 
+export type ProjectFileChangeSummary = {
+  action: "created" | "deleted" | "modified";
+  additions: number;
+  afterContent: string | null;
+  beforeContent: string | null;
+  deletions: number;
+  path: string;
+  revertedAt?: string;
+  sampleAddedLines: string[];
+  sampleRemovedLines: string[];
+  unifiedDiff: string;
+};
+
+export type ProjectChangeRecord = {
+  createdAt: string;
+  files: ProjectFileChangeSummary[];
+  id: string;
+  kind: "agent" | "revert";
+  projectId: string;
+  revertedAt?: string;
+  revertedByChangeId?: string;
+  summary: string;
+};
+
+export type ProjectChatMessage = {
+  activities?: ProjectChatActivity[];
+  activitiesCollapsed?: boolean;
+  activitySummary?: string;
+  animateContent?: boolean;
+  id: string;
+  isStreaming?: boolean;
+  role: "assistant" | "user";
+  content: string;
+};
+
+export type ProjectChatActivity = {
+  command?: string;
+  detail?: string;
+  elapsedMs?: number;
+  error?: string;
+  finishedAt?: string;
+  id: string;
+  kind:
+    | "command"
+    | "database"
+    | "file"
+    | "preview"
+    | "thinking"
+    | "tool"
+    | "verification";
+  outputLineCount?: number;
+  outputPreview?: string[];
+  startedAt?: string;
+  status: "failed" | "pending" | "running" | "succeeded";
+  title: string;
+};
+
+export type ProjectConversationSummary = {
+  id: string;
+  projectId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  lastMessageAt: string;
+  archivedAt: string | null;
+  messageCount: number;
+};
+
+export type ProjectConversation = Omit<
+  ProjectConversationSummary,
+  "messageCount"
+> & {
+  messages: ProjectChatMessage[];
+};
+
 export type CommandResult = {
   projectId: string;
   command: string;
@@ -117,6 +192,64 @@ export const projectApi = {
 
   openProjectFolder(projectId: string) {
     return invoke<void>("open_project_folder", { projectId });
+  },
+
+  listProjectChangeHistory(projectId: string) {
+    return invoke<ProjectChangeRecord[]>("list_project_change_history", {
+      projectId,
+    });
+  },
+
+  saveProjectChangeHistory(
+    projectId: string,
+    records: ProjectChangeRecord[],
+  ) {
+    return invoke<void>("save_project_change_history", { projectId, records });
+  },
+
+  listProjectConversations(projectId: string, includeArchived = false) {
+    return invoke<ProjectConversationSummary[]>("list_project_conversations", {
+      includeArchived,
+      projectId,
+    });
+  },
+
+  createProjectConversation(projectId: string, title?: string) {
+    return invoke<ProjectConversation>("create_project_conversation", {
+      projectId,
+      title,
+    });
+  },
+
+  readProjectConversation(projectId: string, conversationId: string) {
+    return invoke<ProjectConversation>("read_project_conversation", {
+      conversationId,
+      projectId,
+    });
+  },
+
+  saveProjectConversation(
+    projectId: string,
+    conversation: ProjectConversation,
+  ) {
+    return invoke<ProjectConversation>("save_project_conversation", {
+      conversation,
+      projectId,
+    });
+  },
+
+  archiveProjectConversation(projectId: string, conversationId: string) {
+    return invoke<ProjectConversation>("archive_project_conversation", {
+      conversationId,
+      projectId,
+    });
+  },
+
+  unarchiveProjectConversation(projectId: string, conversationId: string) {
+    return invoke<ProjectConversation>("unarchive_project_conversation", {
+      conversationId,
+      projectId,
+    });
   },
 
   runCommand(projectId: string, command: string) {

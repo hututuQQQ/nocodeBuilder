@@ -3,16 +3,21 @@ use std::{
     process::{Child, Command, Stdio},
 };
 
-use super::types::AllowedCommand;
+use super::{
+    node_runtime::{apply_runtime_environment, resolve_package_manager_command, ResolvedCommand},
+    types::AllowedCommand,
+};
 
 pub fn spawn_child(project_dir: &Path, allowed: AllowedCommand) -> Result<Child, String> {
-    let mut command = Command::new(package_manager_executable(allowed.package_manager));
+    let resolved = resolve_package_manager_command(allowed.package_manager, allowed.args)?;
+    let mut command = Command::new(&resolved.executable);
     command
-        .args(allowed.args)
+        .args(&resolved.args)
         .current_dir(project_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    apply_runtime_environment(&mut command, &resolved)?;
 
     #[cfg(target_os = "windows")]
     {
@@ -30,12 +35,15 @@ pub fn spawn_child(project_dir: &Path, allowed: AllowedCommand) -> Result<Child,
     })
 }
 
-pub fn npx_executable() -> String {
-    if cfg!(target_os = "windows") {
-        "npx.cmd".to_string()
-    } else {
-        "npx".to_string()
-    }
+pub fn resolve_npx_command(args: Vec<String>) -> Result<ResolvedCommand, String> {
+    super::node_runtime::resolve_npx_command(args)
+}
+
+pub fn apply_resolved_command_environment(
+    command: &mut Command,
+    resolved: &ResolvedCommand,
+) -> Result<(), String> {
+    apply_runtime_environment(command, resolved)
 }
 
 pub fn kill_process_tree(pid: u32) -> Result<(), String> {
@@ -69,13 +77,5 @@ pub fn kill_process_tree(pid: u32) -> Result<(), String> {
                 "command: kill failed while stopping dev server process {pid}"
             ))
         }
-    }
-}
-
-fn package_manager_executable(package_manager: &str) -> String {
-    if cfg!(target_os = "windows") {
-        format!("{package_manager}.cmd")
-    } else {
-        package_manager.to_string()
     }
 }

@@ -4,6 +4,7 @@ import {
   AgentToolCallStep,
   formatProjectFileTree,
 } from "../agent/projectModifier";
+import { applySupabaseSchema } from "../agent/project/backendContext";
 import {
   getAllowedFilePaths,
 } from "../agent/project/pathRules";
@@ -16,6 +17,7 @@ import {
   ProjectInfo,
   projectApi,
 } from "../services/projects";
+import type { CommandRunLink } from "./commandLogs";
 import {
   runPostToolUseHooks,
   runPreToolUseHooks,
@@ -89,6 +91,7 @@ export async function executeAgentTool(
   step: AgentToolCallStep,
   observationStep: number,
   runState: AgentRunState,
+  commandRunLink?: CommandRunLink,
 ): Promise<AgentToolResult> {
   try {
     ensureCurrentProject(store, project.id);
@@ -112,6 +115,7 @@ export async function executeAgentTool(
       step,
       observationStep,
       runState,
+      commandRunLink,
     );
     const postHookNotes = runPostToolUseHooks(step, result);
 
@@ -148,6 +152,7 @@ async function executeAgentToolCore(
   step: AgentToolCallStep,
   observationStep: number,
   runState: AgentRunState,
+  commandRunLink?: CommandRunLink,
 ): Promise<AgentToolResult> {
   switch (step.tool) {
       case "list_files": {
@@ -332,7 +337,21 @@ async function executeAgentToolCore(
             step.args.command,
             observationStep,
             "Ran requested command.",
+            commandRunLink,
           ),
+        };
+      }
+      case "apply_supabase_schema": {
+        const result = await applySupabaseSchema(project.id, step.args);
+
+        return {
+          observation: createAgentObservation({
+            content: JSON.stringify(result, null, 2),
+            ok: true,
+            step: observationStep,
+            summary: step.args.summary,
+            tool: step.tool,
+          }),
         };
       }
       case "start_dev_server": {
@@ -672,10 +691,11 @@ export async function runAgentCommandObservation(
   command: CommandResult["command"],
   observationStep: number,
   reason: string,
+  link?: CommandRunLink,
 ): Promise<AgentObservation> {
   ensureCurrentProject(store, project.id);
 
-  const result = await store.get().runProjectCommand(project.id, command);
+  const result = await store.get().runProjectCommand(project.id, command, link);
   ensureCurrentProject(store, project.id);
 
   if (!result) {
@@ -736,6 +756,8 @@ export function formatAgentToolLabel(step: AgentToolCallStep) {
       return `delete_files ${step.args.paths.join(", ")}`;
     case "run_command":
       return `run_command ${step.args.command}`;
+    case "apply_supabase_schema":
+      return `apply_supabase_schema ${step.args.tables.map((table) => table.name).join(", ")}`;
     default:
       return step.tool;
   }

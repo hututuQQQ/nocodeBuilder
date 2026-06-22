@@ -5,7 +5,7 @@ use std::{
 
 use super::super::{
     events::{redact_secrets, strip_ansi_codes},
-    process::npx_executable,
+    process::{apply_resolved_command_environment, resolve_npx_command},
     types::{VercelDeployOptions, VercelUserInfo},
 };
 
@@ -37,15 +37,17 @@ pub fn spawn_vercel_deploy_child(
         args.push(project_name);
     }
 
-    let mut command = Command::new(npx_executable());
+    let resolved = resolve_npx_command(args)?;
+    let mut command = Command::new(&resolved.executable);
     command
-        .args(args)
+        .args(&resolved.args)
         .current_dir(project_dir)
         .env("CI", "1")
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    apply_resolved_command_environment(&mut command, &resolved)?;
 
     #[cfg(target_os = "windows")]
     {
@@ -83,18 +85,23 @@ pub fn normalize_secret(value: &str, error_message: &str) -> Result<String, Stri
 }
 
 pub fn vercel_whoami(token: String) -> Result<VercelUserInfo, String> {
-    let output = Command::new(npx_executable())
-        .args([
-            "--yes",
-            "vercel@latest",
-            "whoami",
-            "--token",
-            &token,
-            "--no-color",
-        ])
+    let resolved = resolve_npx_command(vec![
+        "--yes".to_string(),
+        "vercel@latest".to_string(),
+        "whoami".to_string(),
+        "--token".to_string(),
+        token.clone(),
+        "--no-color".to_string(),
+    ])?;
+    let mut command = Command::new(&resolved.executable);
+    command
+        .args(&resolved.args)
         .env("CI", "1")
         .env("NO_COLOR", "1")
-        .stdin(Stdio::null())
+        .stdin(Stdio::null());
+    apply_resolved_command_environment(&mut command, &resolved)?;
+
+    let output = command
         .output()
         .map_err(|error| format!("vercel: failed to run whoami: {error}"))?;
 

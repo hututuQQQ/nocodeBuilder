@@ -1,13 +1,18 @@
 import { FormEvent, MouseEvent, useState } from "react";
 import {
+  Archive,
   FolderKanban,
   FolderOpen,
   Loader2,
+  MessageSquare,
   Plus,
+  RotateCcw,
   Settings,
+  SquarePen,
   X,
 } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
+import { selectConversationList } from "../../store/conversationStoreActions";
 
 type ProjectSidebarProps = {
   onOpenSettings: () => void;
@@ -17,14 +22,42 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [projectName, setProjectName] = useState("");
   const [projectPrompt, setProjectPrompt] = useState("");
+  const archiveConversation = useAppStore((state) => state.archiveConversation);
+  const conversationSummaries = useAppStore(
+    (state) => state.conversationSummaries,
+  );
+  const createConversation = useAppStore((state) => state.createConversation);
   const currentProject = useAppStore((state) => state.currentProject);
+  const currentConversation = useAppStore(
+    (state) => state.currentConversation,
+  );
   const createProject = useAppStore((state) => state.createProject);
+  const isCreatingConversation = useAppStore(
+    (state) => state.isCreatingConversation,
+  );
   const isCreatingProject = useAppStore((state) => state.isCreatingProject);
+  const isLoadingConversations = useAppStore(
+    (state) => state.isLoadingConversations,
+  );
   const isLoadingProjects = useAppStore((state) => state.isLoadingProjects);
   const openProjectFolder = useAppStore((state) => state.openProjectFolder);
   const projectError = useAppStore((state) => state.projectError);
   const projects = useAppStore((state) => state.projects);
+  const selectConversation = useAppStore((state) => state.selectConversation);
   const selectProject = useAppStore((state) => state.selectProject);
+  const setShowArchivedConversations = useAppStore(
+    (state) => state.setShowArchivedConversations,
+  );
+  const showArchivedConversations = useAppStore(
+    (state) => state.showArchivedConversations,
+  );
+  const unarchiveConversation = useAppStore(
+    (state) => state.unarchiveConversation,
+  );
+  const visibleConversations = selectConversationList(
+    conversationSummaries,
+    showArchivedConversations,
+  );
 
   async function handleCreateProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -43,6 +76,58 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
   ) {
     event.stopPropagation();
     void openProjectFolder(projectId);
+  }
+
+  async function handleCreateConversation(
+    event: MouseEvent<HTMLButtonElement>,
+    projectId: string,
+  ) {
+    event.stopPropagation();
+
+    if (currentProject?.id !== projectId) {
+      await selectProject(projectId, { ensureConversation: false });
+    }
+
+    await createConversation(projectId);
+  }
+
+  async function handleToggleArchivedConversations(
+    event: MouseEvent<HTMLButtonElement>,
+    projectId: string,
+  ) {
+    event.stopPropagation();
+    const nextShowArchived =
+      currentProject?.id === projectId ? !showArchivedConversations : true;
+
+    if (currentProject?.id !== projectId) {
+      await selectProject(projectId, { ensureConversation: false });
+    }
+
+    await setShowArchivedConversations(nextShowArchived);
+  }
+
+  function handleSelectConversation(
+    event: MouseEvent<HTMLElement>,
+    conversationId: string,
+  ) {
+    event.stopPropagation();
+    void selectConversation(conversationId);
+  }
+
+  function handleArchiveConversation(
+    event: MouseEvent<HTMLButtonElement>,
+    conversationId: string,
+  ) {
+    event.stopPropagation();
+    void archiveConversation(conversationId);
+  }
+
+  function handleRestoreConversation(
+    event: MouseEvent<HTMLButtonElement>,
+    conversationId: string,
+  ) {
+    event.stopPropagation();
+    void unarchiveConversation(conversationId);
   }
 
   return (
@@ -75,7 +160,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4">
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
-            Project List
+            Projects
           </h2>
           <span className="rounded border border-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500">
             {projects.length}
@@ -97,42 +182,181 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
               const isCurrent = currentProject?.id === project.id;
 
               return (
-                <div
-                  className={`group w-full cursor-pointer rounded-md border px-3 py-2 text-left text-sm transition ${
-                    isCurrent
-                      ? "border-teal-400/40 bg-teal-400/10 text-teal-50"
-                      : "border-zinc-800 bg-zinc-900/40 text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900"
-                  }`}
-                  key={project.id}
-                  onClick={() => void selectProject(project.id)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      void selectProject(project.id);
-                    }
-                  }}
-                  role="button"
-                  tabIndex={0}
-                >
-                  <div className="flex items-start gap-2">
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate font-medium">{project.name}</div>
-                      <div className="mt-1 truncate text-xs text-zinc-500">
-                        {project.framework}
-                      </div>
-                    </div>
-                    <button
-                      aria-label={`Open ${project.name} folder`}
-                      className="grid size-7 shrink-0 place-items-center rounded border border-zinc-800 text-zinc-500 opacity-0 transition hover:border-teal-400/40 hover:text-teal-200 group-hover:opacity-100"
-                      onClick={(event) =>
-                        handleOpenProjectFolder(event, project.id)
+                <div key={project.id}>
+                  <div
+                    className={`group/project flex h-10 w-full cursor-pointer items-center gap-2 rounded-md border px-2 text-left text-sm transition ${
+                      isCurrent
+                        ? "border-teal-400/40 bg-teal-400/10 text-teal-50"
+                        : "border-zinc-800 bg-zinc-900/40 text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900"
+                    }`}
+                    onClick={() => void selectProject(project.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        void selectProject(project.id);
                       }
-                      title="Open folder"
-                      type="button"
+                    }}
+                    role="button"
+                    tabIndex={0}
+                  >
+                    <FolderKanban
+                      size={15}
+                      className="shrink-0 text-zinc-500"
+                      aria-hidden="true"
+                    />
+                    <div className="min-w-0 flex-1 truncate font-medium">
+                      {project.name}
+                    </div>
+                    <div
+                      className={`flex shrink-0 items-center gap-1 ${
+                        isCurrent
+                          ? "opacity-100"
+                          : "opacity-0 transition group-hover/project:opacity-100"
+                      }`}
                     >
-                      <FolderOpen size={14} aria-hidden="true" />
-                    </button>
+                      <button
+                        aria-label={`Open ${project.name} folder`}
+                        className="grid size-7 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-teal-400/40 hover:text-teal-200"
+                        onClick={(event) =>
+                          handleOpenProjectFolder(event, project.id)
+                        }
+                        title="Open folder"
+                        type="button"
+                      >
+                        <FolderOpen size={14} aria-hidden="true" />
+                      </button>
+                      <button
+                        aria-label={`Show archived chats for ${project.name}`}
+                        className={`grid size-7 place-items-center rounded border transition disabled:cursor-not-allowed disabled:text-zinc-700 ${
+                          isCurrent && showArchivedConversations
+                            ? "border-teal-400/40 bg-teal-400/10 text-teal-100"
+                            : "border-zinc-800 text-zinc-500 hover:border-zinc-700 hover:text-zinc-100"
+                        }`}
+                        disabled={isLoadingConversations}
+                        onClick={(event) =>
+                          void handleToggleArchivedConversations(
+                            event,
+                            project.id,
+                          )
+                        }
+                        title={
+                          isCurrent && showArchivedConversations
+                            ? "Show active chats"
+                            : "Show archived chats"
+                        }
+                        type="button"
+                      >
+                        <Archive size={14} aria-hidden="true" />
+                      </button>
+                      <button
+                        aria-label={`New chat in ${project.name}`}
+                        className="grid size-7 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-teal-400/40 hover:text-teal-100 disabled:cursor-not-allowed disabled:text-zinc-700"
+                        disabled={isCreatingConversation}
+                        onClick={(event) =>
+                          void handleCreateConversation(event, project.id)
+                        }
+                        title="New chat"
+                        type="button"
+                      >
+                        <SquarePen size={14} aria-hidden="true" />
+                      </button>
+                    </div>
                   </div>
+
+                  {isCurrent ? (
+                    <div className="mt-1 space-y-1 pl-4">
+                      {isLoadingConversations ? (
+                        <div className="flex items-center gap-2 px-2 py-2 text-xs text-zinc-500">
+                          <Loader2
+                            size={13}
+                            className="animate-spin"
+                            aria-hidden="true"
+                          />
+                          Loading chats
+                        </div>
+                      ) : visibleConversations.length === 0 ? (
+                        <div className="px-2 py-2 text-xs text-zinc-500">
+                          {showArchivedConversations
+                            ? "No archived chats"
+                            : "No active chats"}
+                        </div>
+                      ) : (
+                        visibleConversations.map((conversation) => {
+                          const isSelected =
+                            currentConversation?.id === conversation.id;
+
+                          return (
+                            <div
+                              className={`group/chat flex h-8 w-full min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-xs transition ${
+                                isSelected
+                                  ? "bg-zinc-800 text-zinc-50"
+                                  : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
+                              }`}
+                              key={conversation.id}
+                              onClick={(event) =>
+                                handleSelectConversation(event, conversation.id)
+                              }
+                              onKeyDown={(event) => {
+                                if (
+                                  event.key === "Enter" ||
+                                  event.key === " "
+                                ) {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  void selectConversation(conversation.id);
+                                }
+                              }}
+                              role="button"
+                              tabIndex={0}
+                            >
+                              <MessageSquare
+                                size={13}
+                                className="shrink-0 text-zinc-500"
+                                aria-hidden="true"
+                              />
+                              <span className="min-w-0 flex-1 truncate">
+                                {conversation.title}
+                              </span>
+                              <span className="shrink-0 text-[10px] text-zinc-600">
+                                {formatRelativeTime(conversation.lastMessageAt)}
+                              </span>
+                              {conversation.archivedAt ? (
+                                <button
+                                  aria-label={`Restore ${conversation.title}`}
+                                  className="grid size-6 shrink-0 place-items-center rounded text-zinc-500 transition hover:bg-zinc-800 hover:text-teal-100"
+                                  onClick={(event) =>
+                                    handleRestoreConversation(
+                                      event,
+                                      conversation.id,
+                                    )
+                                  }
+                                  title="Restore chat"
+                                  type="button"
+                                >
+                                  <RotateCcw size={12} aria-hidden="true" />
+                                </button>
+                              ) : (
+                                <button
+                                  aria-label={`Archive ${conversation.title}`}
+                                  className="grid size-6 shrink-0 place-items-center rounded text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-100"
+                                  onClick={(event) =>
+                                    handleArchiveConversation(
+                                      event,
+                                      conversation.id,
+                                    )
+                                  }
+                                  title="Archive chat"
+                                  type="button"
+                                >
+                                  <Archive size={12} aria-hidden="true" />
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  ) : null}
                 </div>
               );
             })}
@@ -240,4 +464,37 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
       ) : null}
     </aside>
   );
+}
+
+function formatRelativeTime(value: string) {
+  const timestamp = new Date(value).getTime();
+
+  if (!Number.isFinite(timestamp)) {
+    return "";
+  }
+
+  const diffMs = Math.max(0, Date.now() - timestamp);
+  const minutes = Math.floor(diffMs / 60_000);
+
+  if (minutes < 1) {
+    return "刚刚";
+  }
+
+  if (minutes < 60) {
+    return `${minutes}分`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+
+  if (hours < 24) {
+    return `${hours}时`;
+  }
+
+  const days = Math.floor(hours / 24);
+
+  if (days < 14) {
+    return `${days}天`;
+  }
+
+  return `${Math.floor(days / 7)}周`;
 }

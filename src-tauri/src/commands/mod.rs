@@ -2,8 +2,10 @@ mod command_runner;
 mod command_whitelist;
 mod dev_server;
 mod events;
+mod node_runtime;
 mod preview;
 mod process;
+mod supabase;
 mod time;
 mod types;
 mod vercel;
@@ -43,6 +45,13 @@ pub fn stop_dev_server(
     dev_server::stop_dev_server(app, registry, project_id)
 }
 
+pub fn stop_all_dev_servers(
+    app: AppHandle,
+    registry: State<'_, DevServerRegistry>,
+) -> Result<(), String> {
+    dev_server::stop_all_dev_servers(app, registry)
+}
+
 #[tauri::command]
 pub fn open_preview_in_browser(url: String) -> Result<(), String> {
     preview::open_preview_in_browser(url)
@@ -60,4 +69,39 @@ pub async fn deploy_to_vercel(
 #[tauri::command]
 pub async fn test_vercel_token(token: String) -> Result<VercelUserInfo, String> {
     vercel::test_vercel_token(token).await
+}
+
+#[tauri::command]
+pub async fn supabase_proxy_request(
+    request: supabase::SupabaseProxyRequest,
+) -> Result<supabase::SupabaseProxyResponse, String> {
+    supabase::supabase_proxy_request(request).await
+}
+
+#[tauri::command]
+pub async fn create_supabase_table(
+    request: supabase::SupabaseCreateTableRequest,
+) -> Result<(), String> {
+    supabase::create_supabase_table(request).await
+}
+
+#[tauri::command]
+pub async fn test_supabase_database_url(
+    request: supabase::SupabaseDatabaseUrlRequest,
+) -> Result<(), String> {
+    supabase::test_supabase_database_url(request).await
+}
+
+#[tauri::command]
+pub async fn drop_supabase_table(
+    request: supabase::SupabaseDropTableRequest,
+) -> Result<(), String> {
+    supabase::drop_supabase_table(request).await
+}
+
+#[tauri::command]
+pub async fn alter_supabase_table(
+    request: supabase::SupabaseAlterTableRequest,
+) -> Result<(), String> {
+    supabase::alter_supabase_table(request).await
 }

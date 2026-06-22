@@ -3,7 +3,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
 mod commands;
 mod projects;
@@ -213,20 +213,43 @@ fn process_sse_event(
 pub fn run() {
     tauri::Builder::default()
         .manage(commands::DevServerRegistry::default())
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { .. } = event {
+                let app = window.app_handle().clone();
+                let registry = window.state::<commands::DevServerRegistry>();
+
+                if let Err(error) = commands::stop_all_dev_servers(app, registry) {
+                    eprintln!("failed to stop dev servers on close: {error}");
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             llm_chat_completion,
             llm_chat_completion_stream,
             commands::deploy_to_vercel,
+            commands::alter_supabase_table,
+            commands::create_supabase_table,
+            commands::drop_supabase_table,
             commands::run_command,
             commands::start_dev_server,
             commands::stop_dev_server,
             commands::open_preview_in_browser,
+            commands::supabase_proxy_request,
+            commands::test_supabase_database_url,
             commands::test_vercel_token,
             projects::create_project,
+            projects::create_project_conversation,
             projects::delete_files,
+            projects::archive_project_conversation,
+            projects::list_project_change_history,
             projects::list_projects,
+            projects::list_project_conversations,
             projects::list_files,
+            projects::read_project_conversation,
             projects::read_file,
+            projects::save_project_conversation,
+            projects::save_project_change_history,
+            projects::unarchive_project_conversation,
             projects::write_file,
             projects::write_files,
             projects::open_project_folder

@@ -1,11 +1,16 @@
 import {
   AgentObservation,
   AgentStepResponse,
+  AgentToolCallStep,
   formatProjectFileTree,
   getContextFilePaths,
   requestAgentStep,
   requestProjectGeneration,
 } from "../agent/projectModifier";
+import {
+  buildProjectBackendContext,
+  hasBackendIntent,
+} from "../agent/project/backendContext";
 import { buildDynamicAgentContext } from "../agent/project/memory";
 import { keyStore } from "../services/keyStore";
 import {
@@ -18,10 +23,14 @@ import {
 } from "./changeHistory";
 import { getAiProviderDefinition } from "../services/aiProviders";
 import { appendLogs } from "./commandLogs";
-import { replaceChatMessage } from "./chatMessages";
+import {
+  persistCurrentConversation,
+} from "./conversationState";
 import {
   appendAssistantMessage,
   appendTerminalLog,
+  type AgentActivityInput,
+  type AgentStreamController,
   startStreamingAgentMessage,
   updateAgentStatus,
 } from "./agentUi";
@@ -65,13 +74,22 @@ export async function generateInitialProject(
       throw new Error("Configure your AI provider first.");
     }
 
+    const backendContext = await buildProjectBackendContext(project.id, {
+      includeSchema: hasBackendIntent(projectPrompt),
+    });
     const response = await requestProjectGeneration({
+      backendContext,
       config,
-      onDelta: stream.onDelta,
+      onDelta: stream.onModelDelta,
       projectName: project.name,
       userPrompt: projectPrompt,
     });
     stream.setStatus("Model output received. Applying files...");
+    const writeActivityId = stream.addActivity({
+      detail: `${response.files.length} file(s) returned by the model.`,
+      kind: "file",
+      title: "Writing project files",
+    });
 
     const changeRecord = await writeAgentFiles(
       store,
@@ -79,15 +97,19 @@ export async function generateInitialProject(
       response.files,
       response.summary,
     );
+    stream.updateActivity(writeActivityId, {
+      detail: response.summary,
+      finishActivity: true,
+      status: "succeeded",
+    });
 
     if (store.get().currentProject?.id === project.id) {
+      stream.completeWithTypewriter(
+        formatChangeRecordMessage(response.summary, changeRecord),
+      );
+      void persistCurrentConversation(store);
+
       store.set((state) => ({
-        chatMessages: replaceChatMessage(
-          state.chatMessages,
-          stream.messageId,
-          formatChangeRecordMessage(response.summary, changeRecord),
-          false,
-        ),
         previewRefreshKey: state.previewRefreshKey + 1,
         terminalLogs: appendLogs(state.terminalLogs, [
           `[agent] ${response.summary}`,
@@ -99,13 +121,14 @@ export async function generateInitialProject(
   } catch (error) {
     const message = getProjectErrorMessage(error);
 
-    store.set((state) => ({
-      chatMessages: replaceChatMessage(
-        state.chatMessages,
-        stream.messageId,
+    if (store.get().currentProject?.id === project.id) {
+      stream.failWithTypewriter(
         `Project generation failed: ${message}`,
-        false,
-      ),
+      );
+      void persistCurrentConversation(store);
+    }
+
+    store.set((state) => ({
       projectError: message,
       terminalLogs: appendLogs(state.terminalLogs, [`[agent:error] ${message}`]),
     }));
@@ -162,6 +185,11 @@ export async function modifyCurrentProject(
       `[agent] Using ${provider.label} model ${config.model}`,
     );
     updateAgentStatus(activeStream, statusLines, "Collecting project context.");
+    const contextActivityId = activeStream.addActivity({
+      detail: "Reading the project file tree and current workspace state.",
+      kind: "tool",
+      title: "Collecting project context",
+    });
 
     let fileTree = store.get().fileTree;
 
@@ -171,6 +199,14 @@ export async function modifyCurrentProject(
     }
 
     const contextFilePaths = getContextFilePaths(fileTree);
+    activeStream.updateActivity(contextActivityId, {
+      detail:
+        contextFilePaths.length > 0
+          ? `Found ${contextFilePaths.length} editable context file(s).`
+          : "No editable project files were found.",
+      finishActivity: true,
+      status: "succeeded",
+    });
 
     if (contextFilePaths.length === 0) {
       appendTerminalLog(
@@ -183,9 +219,13 @@ export async function modifyCurrentProject(
         "No editable files found. Generating a full project.",
       );
 
+      const backendContext = await buildProjectBackendContext(project.id, {
+        includeSchema: hasBackendIntent(userRequest),
+      });
       const response = await requestProjectGeneration({
+        backendContext,
         config,
-        onDelta: activeStream.onDelta,
+        onDelta: activeStream.onModelDelta,
         projectName: project.name,
         userPrompt: userRequest,
       });
@@ -194,6 +234,11 @@ export async function modifyCurrentProject(
         statusLines,
         "Model output received. Applying files.",
       );
+      const writeActivityId = activeStream.addActivity({
+        detail: `${response.files.length} file(s) returned by the model.`,
+        kind: "file",
+        title: "Writing project files",
+      });
 
       const changeRecord = await writeAgentFiles(
         store,
@@ -201,18 +246,22 @@ export async function modifyCurrentProject(
         response.files,
         response.summary,
       );
+      activeStream.updateActivity(writeActivityId, {
+        detail: response.summary,
+        finishActivity: true,
+        status: "succeeded",
+      });
 
       if (store.get().currentProject?.id !== project.id) {
         return;
       }
 
+      activeStream.completeWithTypewriter(
+        formatChangeRecordMessage(response.summary, changeRecord),
+      );
+      void persistCurrentConversation(store);
+
       store.set((state) => ({
-        chatMessages: replaceChatMessage(
-          state.chatMessages,
-          activeStream.messageId,
-          formatChangeRecordMessage(response.summary, changeRecord),
-          false,
-        ),
         previewRefreshKey: state.previewRefreshKey + 1,
         terminalLogs: appendLogs(state.terminalLogs, [
           `[agent] ${response.summary}`,
@@ -230,29 +279,77 @@ export async function modifyCurrentProject(
         statusLines,
         `Planning step ${stepIndex}.`,
       );
-
-      const step = await requestAgentStep({
-        config,
-        context: buildAgentStepContext(
-          store,
-          project,
-          observations,
-          runState,
-          userRequest,
-        ),
-        onDelta: activeStream.onDelta,
-        userRequest,
+      const planningActivityId = activeStream.addActivity({
+        detail: "Asking the model for the next project action.",
+        kind: "thinking",
+        title: `Planning step ${stepIndex}`,
       });
+
+      let step: AgentStepResponse;
+
+      try {
+        step = await requestAgentStep({
+          config,
+          context: await buildAgentStepContext(
+            store,
+            project,
+            observations,
+            runState,
+            userRequest,
+          ),
+          onDelta: activeStream.onModelDelta,
+          userRequest,
+        });
+        activeStream.updateActivity(planningActivityId, {
+          detail: formatAgentStepLabelForStatus(step),
+          finishActivity: true,
+          status: "succeeded",
+        });
+      } catch (error) {
+        const message = getProjectErrorMessage(error);
+
+        if (!isRecoverableAgentPlanningError(message)) {
+          activeStream.updateActivity(planningActivityId, {
+            detail: message,
+            error: message,
+            finishActivity: true,
+            status: "failed",
+          });
+          throw error;
+        }
+
+        const observation: AgentObservation = {
+          content: [
+            message,
+            "Do not run install commands with package names. If a dependency is needed, edit package.json with an exact pinned version; the host will run the project install command automatically after package.json changes.",
+          ].join("\n"),
+          ok: false,
+          step: observations.length + 1,
+          summary: "Agent proposed a forbidden package install command.",
+          tool: "run_command",
+        };
+        observations.push(observation);
+        appendTerminalLog(store, `[agent:error] ${observation.summary}`);
+        activeStream.updateActivity(planningActivityId, {
+          detail: observation.summary,
+          error: message,
+          finishActivity: true,
+          status: "failed",
+        });
+        updateAgentStatus(
+          activeStream,
+          statusLines,
+          "The agent proposed a forbidden install command. Asking it to repair the plan.",
+        );
+        continue;
+      }
       ensureCurrentProject(store, project.id);
 
       if (step.type === "answer") {
+        activeStream.completeWithTypewriter(step.message);
+        void persistCurrentConversation(store);
+
         store.set((state) => ({
-          chatMessages: replaceChatMessage(
-            state.chatMessages,
-            activeStream.messageId,
-            step.message,
-            false,
-          ),
           terminalLogs: appendLogs(state.terminalLogs, [`[agent] answered`]),
         }));
         return;
@@ -264,19 +361,17 @@ export async function modifyCurrentProject(
           didChangeFiles,
         });
 
+        activeStream.completeWithTypewriter(content);
+        void persistCurrentConversation(store);
+
         store.set((state) => ({
-          chatMessages: replaceChatMessage(
-            state.chatMessages,
-            activeStream.messageId,
-            content,
-            false,
-          ),
           terminalLogs: appendLogs(state.terminalLogs, [`[agent] ${step.summary}`]),
         }));
         return;
       }
 
       updateAgentStatus(activeStream, statusLines, `Tool: ${formatAgentStepLabel(step)}.`);
+      const activityIds = createToolActivities(activeStream, step);
 
       const results =
         step.type === "tool_calls"
@@ -294,11 +389,31 @@ export async function modifyCurrentProject(
                 step,
                 observations.length + 1,
                 runState,
+                step.tool === "run_command"
+                  ? {
+                      chatActivityId: activityIds[0],
+                      chatMessageId: activeStream.messageId,
+                    }
+                  : undefined,
               ),
             ];
 
-      for (const result of results) {
+      for (const [resultIndex, result] of results.entries()) {
         observations.push(result.observation);
+        const activityId = activityIds[resultIndex];
+
+        if (activityId) {
+          activeStream.updateActivity(activityId, {
+            detail: result.observation.summary,
+            error: result.observation.ok ? undefined : result.observation.summary,
+            finishActivity: true,
+            outputPreview: result.observation.content
+              ?.split(/\r?\n/)
+              .filter(Boolean)
+              .slice(-6),
+            status: result.observation.ok ? "succeeded" : "failed",
+          });
+        }
         appendTerminalLog(
           store,
           `[agent:${result.observation.ok ? "ok" : "error"}] ${result.observation.summary}`,
@@ -313,14 +428,35 @@ export async function modifyCurrentProject(
         buildVerified = false;
 
         if (stepChangedPackage) {
+          const installCommand = getPreferredProjectCommand(store, "install");
+          const installActivityId = activeStream.addActivity({
+            command: installCommand,
+            detail: "package.json changed, so dependencies need to be installed.",
+            kind: "command",
+            title: "Installing dependencies",
+          });
           const installObservation = await runAgentCommandObservation(
             store,
             project,
-            getPreferredProjectCommand(store, "install"),
+            installCommand,
             observations.length + 1,
             "Installing dependencies after package.json changed.",
+            {
+              chatActivityId: installActivityId,
+              chatMessageId: activeStream.messageId,
+            },
           );
           observations.push(installObservation);
+          activeStream.updateActivity(installActivityId, {
+            detail: installObservation.summary,
+            error: installObservation.ok ? undefined : installObservation.summary,
+            finishActivity: true,
+            outputPreview: installObservation.content
+              ?.split(/\r?\n/)
+              .filter(Boolean)
+              .slice(-6),
+            status: installObservation.ok ? "succeeded" : "failed",
+          });
           appendTerminalLog(
             store,
             `[agent:${installObservation.ok ? "ok" : "error"}] ${installObservation.summary}`,
@@ -331,14 +467,35 @@ export async function modifyCurrentProject(
           }
         }
 
+        const buildCommand = getPreferredProjectCommand(store, "build");
+        const buildActivityId = activeStream.addActivity({
+          command: buildCommand,
+          detail: "Checking that the project still builds after file changes.",
+          kind: "verification",
+          title: "Verifying build",
+        });
         const buildObservation = await runAgentCommandObservation(
           store,
           project,
-          getPreferredProjectCommand(store, "build"),
+          buildCommand,
           observations.length + 1,
           "Verifying project build after file changes.",
+          {
+            chatActivityId: buildActivityId,
+            chatMessageId: activeStream.messageId,
+          },
         );
         observations.push(buildObservation);
+        activeStream.updateActivity(buildActivityId, {
+          detail: buildObservation.summary,
+          error: buildObservation.ok ? undefined : buildObservation.summary,
+          finishActivity: true,
+          outputPreview: buildObservation.content
+            ?.split(/\r?\n/)
+            .filter(Boolean)
+            .slice(-6),
+          status: buildObservation.ok ? "succeeded" : "failed",
+        });
         appendTerminalLog(
           store,
           `[agent:${buildObservation.ok ? "ok" : "error"}] ${buildObservation.summary}`,
@@ -363,33 +520,27 @@ export async function modifyCurrentProject(
             "Review the changed files in the file panel before continuing.",
           ].join("\n");
 
-          store.set((state) => ({
-            chatMessages: replaceChatMessage(
-              state.chatMessages,
-              activeStream.messageId,
-              content,
-              false,
-            ),
-            projectError: buildObservation.summary,
-          }));
+          activeStream.failWithTypewriter(content);
+          void persistCurrentConversation(store);
+
+          store.set({ projectError: buildObservation.summary });
           return;
         }
       }
     }
 
+    activeStream.failWithTypewriter(
+      [
+        "I stopped after reaching the agent step limit.",
+        "",
+        didChangeFiles
+          ? "Some project files were changed."
+          : "No project files were changed.",
+      ].join("\n"),
+    );
+    void persistCurrentConversation(store);
+
     store.set((state) => ({
-      chatMessages: replaceChatMessage(
-        state.chatMessages,
-        activeStream.messageId,
-        [
-          "I stopped after reaching the agent step limit.",
-          "",
-          didChangeFiles
-            ? "Some project files were changed."
-            : "No project files were changed.",
-        ].join("\n"),
-        false,
-      ),
       terminalLogs: appendLogs(state.terminalLogs, [
         "[agent:error] stopped after reaching step limit",
       ]),
@@ -397,13 +548,14 @@ export async function modifyCurrentProject(
   } catch (error) {
     const message = getProjectErrorMessage(error);
 
-    store.set((state) => ({
-      chatMessages: replaceChatMessage(
-        state.chatMessages,
-        activeStream.messageId,
+    if (store.get().currentProject?.id === project.id) {
+      activeStream.failWithTypewriter(
         `Agent workflow failed: ${message}`,
-        false,
-      ),
+      );
+      void persistCurrentConversation(store);
+    }
+
+    store.set((state) => ({
       projectError: message,
       terminalLogs: appendLogs(state.terminalLogs, [`[agent:error] ${message}`]),
     }));
@@ -412,7 +564,7 @@ export async function modifyCurrentProject(
   }
 }
 
-function buildAgentStepContext(
+async function buildAgentStepContext(
   store: StoreAccess,
   project: ProjectInfo,
   observations: AgentObservation[],
@@ -420,7 +572,7 @@ function buildAgentStepContext(
   userRequest: string,
 ) {
   const state = store.get();
-  const recentMessages = state.chatMessages
+  const recentMessages = (state.currentConversation?.messages ?? [])
     .filter((message) => message.id !== "welcome" && !message.isStreaming)
     .slice(-8)
     .map((message) => ({
@@ -428,6 +580,13 @@ function buildAgentStepContext(
       role: message.role,
       content: message.content,
     }));
+  const backendIntentText = [
+    userRequest,
+    ...recentMessages.map((message) => message.content),
+  ].join("\n");
+  const backendContext = await buildProjectBackendContext(project.id, {
+    includeSchema: hasBackendIntent(backendIntentText),
+  });
   const dynamicContext = buildDynamicAgentContext({
     changeHistory: state.changeHistory,
     fileTree: state.fileTree,
@@ -439,6 +598,7 @@ function buildAgentStepContext(
   });
 
   return {
+    backend: backendContext,
     devServerStatus: state.devServerStatus,
     fileTree: state.fileTree ? formatProjectFileTree(state.fileTree) : null,
     memory: dynamicContext.memory,
@@ -459,6 +619,118 @@ function formatAgentStepLabel(
   }
 
   return formatAgentToolLabel(step);
+}
+
+function formatAgentStepLabelForStatus(step: AgentStepResponse) {
+  if (step.type === "answer") {
+    return "The model answered without running a tool.";
+  }
+
+  if (step.type === "finish") {
+    return "The model finished the workflow.";
+  }
+
+  return `Next action: ${formatAgentStepLabel(step)}.`;
+}
+
+function createToolActivities(
+  stream: AgentStreamController,
+  step: Extract<AgentStepResponse, { type: "tool_call" | "tool_calls" }>,
+) {
+  if (step.type === "tool_calls") {
+    return step.calls.map((call) => createToolActivity(stream, call));
+  }
+
+  return [createToolActivity(stream, step)];
+}
+
+function createToolActivity(
+  stream: AgentStreamController,
+  step: AgentToolCallStep,
+) {
+  return stream.addActivity(describeToolActivity(step));
+}
+
+function describeToolActivity(step: AgentToolCallStep): AgentActivityInput {
+  switch (step.tool) {
+    case "list_files":
+      return {
+        detail: step.rationale,
+        kind: "tool",
+        title: "Listing project files",
+      };
+    case "read_files":
+      return {
+        detail: step.args.paths.join(", "),
+        kind: "tool",
+        title: `Reading ${step.args.paths.length} file(s)`,
+      };
+    case "grep_files":
+      return {
+        detail: `"${step.args.query}"`,
+        kind: "tool",
+        title: "Searching project files",
+      };
+    case "glob_files":
+      return {
+        detail: step.args.pattern,
+        kind: "tool",
+        title: "Finding matching files",
+      };
+    case "edit_file":
+      return {
+        detail: step.args.summary,
+        kind: "file",
+        title: `Editing ${step.args.path}`,
+      };
+    case "write_files":
+      return {
+        detail: step.args.files.map((file) => file.path).join(", "),
+        kind: "file",
+        title: `Writing ${step.args.files.length} file(s)`,
+      };
+    case "delete_files":
+      return {
+        detail: step.args.paths.join(", "),
+        kind: "file",
+        title: `Deleting ${step.args.paths.length} file(s)`,
+      };
+    case "run_command":
+      return {
+        command: step.args.command,
+        detail: step.rationale,
+        kind: "command",
+        title: `Running ${step.args.command}`,
+      };
+    case "apply_supabase_schema":
+      return {
+        detail: step.args.summary,
+        kind: "database",
+        title: "Applying database schema",
+      };
+    case "start_dev_server":
+      return {
+        detail: step.rationale,
+        kind: "preview",
+        title: "Starting preview",
+      };
+    case "stop_dev_server":
+      return {
+        detail: step.rationale,
+        kind: "preview",
+        title: "Stopping preview",
+      };
+    case "refresh_preview":
+      return {
+        detail: step.rationale,
+        kind: "preview",
+        title: "Refreshing preview",
+      };
+  }
+}
+
+function isRecoverableAgentPlanningError(message: string) {
+  return message.includes("Model attempted to run a forbidden command:");
 }
 
 function formatAgentFinishMessage(

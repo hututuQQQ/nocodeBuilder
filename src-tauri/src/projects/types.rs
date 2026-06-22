@@ -28,3 +28,103 @@ pub struct ProjectFileInput {
     pub path: String,
     pub content: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFileChangeSummary {
+    pub action: String,
+    pub additions: usize,
+    pub after_content: Option<String>,
+    pub before_content: Option<String>,
+    pub deletions: usize,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reverted_at: Option<String>,
+    pub sample_added_lines: Vec<String>,
+    pub sample_removed_lines: Vec<String>,
+    pub unified_diff: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectChangeRecord {
+    pub id: String,
+    pub created_at: String,
+    pub files: Vec<ProjectFileChangeSummary>,
+    pub kind: String,
+    pub project_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reverted_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reverted_by_change_id: Option<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectChatMessage {
+    pub id: String,
+    pub role: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activities: Option<Vec<ProjectChatActivity>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activities_collapsed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub animate_content: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_streaming: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectChatActivity {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_preview: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_line_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectConversation {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_message_at: String,
+    pub archived_at: Option<String>,
+    pub messages: Vec<ProjectChatMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectConversationSummary {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_message_at: String,
+    pub archived_at: Option<String>,
+    pub message_count: usize,
+}

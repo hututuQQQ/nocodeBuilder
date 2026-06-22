@@ -39,26 +39,9 @@ export type AiProviderState = {
 
 export type VercelDeployTarget = (typeof VERCEL_DEPLOY_TARGETS)[number];
 
-export type VercelConfig = {
-  provider: "vercel";
-  token: string;
-  scope: string;
-  projectName: string;
-  defaultTarget: VercelDeployTarget;
-  updatedAt: string;
-};
-
-export type VercelConfigInput = {
-  token: string;
-  scope?: string;
-  projectName?: string;
-  defaultTarget?: VercelDeployTarget;
-};
-
 export interface KeyStore {
   getAiProviderState: () => Promise<AiProviderState>;
   getAiProviderConfig: () => Promise<AiProviderConfig | null>;
-  getVercelConfig: () => Promise<VercelConfig | null>;
   saveAiProviderConfig: (
     config: AiProviderConfigInput,
   ) => Promise<AiProviderState>;
@@ -66,7 +49,6 @@ export interface KeyStore {
     configs: AiProviderConfigInput[],
     activeProvider?: AiProviderId,
   ) => Promise<AiProviderState>;
-  saveVercelConfig: (config: VercelConfigInput) => Promise<VercelConfig>;
 }
 
 const AI_PROVIDER_STORAGE_KEY = "ai-web-builder.ai-provider-config.v3";
@@ -75,11 +57,6 @@ const STALE_AI_PROVIDER_STORAGE_KEYS = [
   "ai-web-builder.ai-provider-config.v1",
   "ai-web-builder.deepseek-config.v1",
 ];
-const VERCEL_STORAGE_KEY = "ai-web-builder.vercel-config.v1";
-
-function isVercelDeployTarget(value: string): value is VercelDeployTarget {
-  return VERCEL_DEPLOY_TARGETS.some((target) => target === value);
-}
 
 function createEmptyAiProviderState(): AiProviderState {
   return {
@@ -182,17 +159,6 @@ function normalizeAiProviderState(
   };
 }
 
-function normalizeVercelConfig(config: VercelConfigInput): VercelConfig {
-  return {
-    provider: "vercel",
-    token: config.token.trim(),
-    scope: config.scope?.trim() ?? "",
-    projectName: config.projectName?.trim() ?? "",
-    defaultTarget: config.defaultTarget ?? DEFAULT_VERCEL_DEPLOY_TARGET,
-    updatedAt: new Date().toISOString(),
-  };
-}
-
 function readStoredAiProviderState(value: string | null): AiProviderState | null {
   if (!value) {
     return null;
@@ -206,39 +172,6 @@ function readStoredAiProviderState(value: string | null): AiProviderState | null
     }
 
     return normalizeAiProviderState(parsed);
-  } catch {
-    return null;
-  }
-}
-
-function readStoredVercelConfig(value: string | null): VercelConfig | null {
-  if (!value) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(value) as Partial<VercelConfig>;
-
-    if (parsed.provider !== "vercel" || typeof parsed.token !== "string") {
-      return null;
-    }
-
-    const defaultTarget =
-      typeof parsed.defaultTarget === "string" &&
-      isVercelDeployTarget(parsed.defaultTarget)
-        ? parsed.defaultTarget
-        : DEFAULT_VERCEL_DEPLOY_TARGET;
-
-    return {
-      provider: "vercel",
-      token: parsed.token.trim(),
-      scope: typeof parsed.scope === "string" ? parsed.scope.trim() : "",
-      projectName:
-        typeof parsed.projectName === "string" ? parsed.projectName.trim() : "",
-      defaultTarget,
-      updatedAt:
-        typeof parsed.updatedAt === "string" ? parsed.updatedAt : "",
-    };
   } catch {
     return null;
   }
@@ -267,12 +200,6 @@ class LocalStorageKeyStore implements KeyStore {
 
   async getAiProviderConfig() {
     return getActiveAiProviderConfig(await this.getAiProviderState());
-  }
-
-  async getVercelConfig() {
-    return readStoredVercelConfig(
-      window.localStorage.getItem(VERCEL_STORAGE_KEY),
-    );
   }
 
   async saveAiProviderConfig(config: AiProviderConfigInput) {
@@ -317,12 +244,6 @@ class LocalStorageKeyStore implements KeyStore {
     );
 
     return nextState;
-  }
-
-  async saveVercelConfig(config: VercelConfigInput) {
-    const nextConfig = normalizeVercelConfig(config);
-    window.localStorage.setItem(VERCEL_STORAGE_KEY, JSON.stringify(nextConfig));
-    return nextConfig;
   }
 }
 

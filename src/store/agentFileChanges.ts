@@ -44,11 +44,11 @@ export async function writeAgentFiles(
     beforeContents,
   );
 
-  store.set((state) => ({
-    changeHistory: [changeRecord, ...state.changeHistory].slice(0, 20),
+  store.set({
     fileTree: refreshedFileTree,
     selectedFileContent,
-  }));
+  });
+  await store.get().recordProjectChange(changeRecord);
 
   return changeRecord;
 }
@@ -93,12 +93,12 @@ export async function deleteAgentFiles(
     beforeContents,
   );
 
-  store.set((state) => ({
-    changeHistory: [changeRecord, ...state.changeHistory].slice(0, 20),
+  store.set({
     fileTree: refreshedFileTree,
     selectedFileContent,
     selectedFilePath: selectedFilePathAfterDelete,
-  }));
+  });
+  await store.get().recordProjectChange(changeRecord);
 
   return changeRecord;
 }

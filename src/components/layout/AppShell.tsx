@@ -1,7 +1,7 @@
 import { PointerEvent, useEffect, useRef, useState } from "react";
 import { ChatPanel } from "../chat/ChatPanel";
 import { LogsPanel } from "../logs/LogsPanel";
-import { PreviewPanel } from "../preview/PreviewPanel";
+import { WorkspacePanel } from "../workspace/WorkspacePanel";
 import { ProjectSidebar } from "../project/ProjectSidebar";
 import { initializeCommandEvents, useAppStore } from "../../store/appStore";
 import type { ConfiguredModelOption } from "../../App";
@@ -183,7 +183,7 @@ export function AppShell({
           gridTemplateRows: `${layout.previewPercent}% 6px minmax(0, 1fr)`,
         }}
       >
-        <PreviewPanel />
+        <WorkspacePanel />
         <ResizeHandle
           ariaLabel="Resize preview and files panels"
           dragging={dragMode === "preview"}
@@ -273,3 +273,4 @@ function clampPreviewPercent(height: number, percent: number) {
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
+

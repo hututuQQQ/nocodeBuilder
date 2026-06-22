@@ -91,15 +91,26 @@ export const AGENT_TOOL_DEFINITIONS = [
   },
   {
     argsDescription: '{"command":"npm run build"}',
-    description: `Run one allowed command. Allowed commands: ${AGENT_COMMANDS.join(", ")}.`,
+    description: `Run one allowed command. Allowed commands: ${AGENT_COMMANDS.join(", ")}. Do not pass package names to install commands; edit package.json with exact pinned dependencies instead.`,
     isConcurrencySafe: false,
     isReadOnly: false,
     name: "run_command",
     needsVerification: false,
   },
   {
+    argsDescription:
+      '{"summary":"Create backend tables","tables":[{"name":"orders","enableRls":true,"columns":[{"name":"id","dataType":"uuid","defaultValue":"gen_random_uuid()","nullable":false,"primaryKey":true,"unique":false},{"name":"created_at","dataType":"timestamptz","defaultValue":"now()","nullable":false,"primaryKey":false,"unique":false}]}]}',
+    description:
+      "Create missing Supabase tables and add missing columns for the current project. Non-destructive; requires the project .env Supabase DB URL and secret key.",
+    isConcurrencySafe: false,
+    isReadOnly: false,
+    name: "apply_supabase_schema",
+    needsVerification: false,
+  },
+  {
     argsDescription: "{}",
-    description: "Start the local preview server.",
+    description:
+      "Start the local preview server only when the user explicitly asks to preview or run the app.",
     isConcurrencySafe: false,
     isReadOnly: false,
     name: "start_dev_server",
@@ -115,7 +126,8 @@ export const AGENT_TOOL_DEFINITIONS = [
   },
   {
     argsDescription: "{}",
-    description: "Refresh the preview iframe after a UI-only change.",
+    description:
+      "Refresh the preview iframe only when preview is already running and the user explicitly asks to refresh or inspect it.",
     isConcurrencySafe: true,
     isReadOnly: false,
     name: "refresh_preview",

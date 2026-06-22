@@ -5,7 +5,12 @@ import {
 } from "../services/projects";
 import { generateInitialProject } from "./agentWorkflow";
 import type { AppState } from "./appStore";
+import { createChatMessage } from "./chatMessages";
 import { appendLogs } from "./commandLogs";
+import {
+  appendConversationMessage,
+  persistConversation,
+} from "./conversationState";
 import type { StoreAccess } from "./storeAccess";
 
 type ProjectActions = Pick<
@@ -35,7 +40,7 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
 
       const installResult = await get().runProjectCommand(project.id, "npm install");
 
-      if (!installResult?.success) {
+      if (!installResult?.success || get().currentProject?.id !== project.id) {
         return;
       }
 
@@ -47,11 +52,15 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
 
       const buildResult = await get().runProjectCommand(project.id, "npm run build");
 
-      if (!buildResult?.success) {
+      if (!buildResult?.success || get().currentProject?.id !== project.id) {
         return;
       }
 
-      await get().startDevServer(project.id);
+      set((state) => ({
+        terminalLogs: appendLogs(state.terminalLogs, [
+          `[project] ${project.name} is ready. Start preview manually when needed.`,
+        ]),
+      }));
     },
 
     createProject: async (projectName, projectPrompt) => {
@@ -70,7 +79,14 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
           ]),
         }));
 
-        await get().selectProject(project.id, { startDevServer: false });
+        await get().selectProject(project.id, {
+          conversationTitle: "Initial build",
+          startDevServer: false,
+        });
+
+        const userMessage = createChatMessage("user", projectPrompt);
+        const conversation = appendConversationMessage({ get, set }, userMessage);
+        void persistConversation({ get, set }, conversation);
 
         const didGenerateProject = await generateInitialProject(
           { get, set },
@@ -118,13 +134,19 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
           await get().selectProject(nextCurrentProject.id);
         } else {
           set({
+            changeHistory: [],
             currentProject: null,
-            devServerStatus: "stopped",
-            fileTree: null,
-            lastDeploymentUrl: null,
+            chatMessages: [],
+            conversationSummaries: [],
+          currentConversation: null,
+          devServerStatus: "stopped",
+          fileTree: null,
+          selectedChangeFilePath: null,
+          lastDeploymentUrl: null,
             previewUrl: null,
             selectedFileContent: "",
             selectedFilePath: null,
+            showArchivedConversations: false,
           });
         }
       } catch (error) {
@@ -187,23 +209,24 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
     selectProject: async (projectId, options = {}) => {
       const project = get().projects.find((item) => item.id === projectId);
       const previousProject = get().currentProject;
-      const shouldStartDevServer = options.startDevServer ?? true;
+      const shouldStartDevServer = options.startDevServer ?? false;
+      const shouldEnsureConversation = options.ensureConversation ?? true;
       let didLoadFiles = false;
 
       if (!project) {
         return;
       }
 
-      if (
-        previousProject &&
-        previousProject.id !== projectId &&
-        get().devServerStatus !== "stopped"
-      ) {
+      if (previousProject && previousProject.id !== projectId) {
         await get().stopDevServer(previousProject.id);
       }
 
       set({
+        chatMessages: [],
+        changeHistory: [],
+        conversationSummaries: [],
         currentProject: project,
+        currentConversation: null,
         devServerStatus: "stopped",
         fileTree: null,
         isLoadingFiles: true,
@@ -211,14 +234,22 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
         lastDeploymentUrl: null,
         projectError: null,
         previewUrl: null,
+        selectedChangeFilePath: null,
         selectedFileContent: "",
         selectedFilePath: null,
+        showArchivedConversations: false,
       });
 
       try {
+        await get().loadProjectConversations(project.id, {
+          ensureConversation: shouldEnsureConversation,
+          initialTitle: options.conversationTitle,
+        });
+
         const fileTree = await projectApi.listFiles(project.id);
 
         set({ fileTree });
+        await get().loadProjectChangeHistory(project.id);
         didLoadFiles = true;
       } catch (error) {
         const message = getProjectErrorMessage(error);

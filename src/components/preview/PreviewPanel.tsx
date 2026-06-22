@@ -2,9 +2,12 @@ import { FormEvent, useEffect, useState } from "react";
 import { useAppStore } from "../../store/appStore";
 import {
   DEFAULT_VERCEL_DEPLOY_TARGET,
-  keyStore,
   VercelDeployTarget,
 } from "../../services/keyStore";
+import {
+  loadProjectEnvConfig,
+  saveProjectVercelConfig,
+} from "../../services/projectEnv";
 import { getProjectErrorMessage, projectApi } from "../../services/projects";
 import { PreviewFrame } from "./PreviewFrame";
 import { PreviewHeader } from "./PreviewHeader";
@@ -72,7 +75,11 @@ export function PreviewPanel() {
   }, [activePreviewTab, hasDeploymentPreview]);
 
   async function openVercelDialog() {
-    const config = await keyStore.getVercelConfig();
+    if (!currentProject) {
+      return;
+    }
+
+    const config = (await loadProjectEnvConfig(currentProject.id)).vercel;
 
     setToken(config?.token ?? "");
     setScope(config?.scope ?? "");
@@ -86,7 +93,11 @@ export function PreviewPanel() {
   }
 
   async function handleDeployClick() {
-    const config = await keyStore.getVercelConfig();
+    if (!currentProject) {
+      return;
+    }
+
+    const config = (await loadProjectEnvConfig(currentProject.id)).vercel;
 
     if (!config?.token) {
       await openVercelDialog();
@@ -151,7 +162,11 @@ export function PreviewPanel() {
       return;
     }
 
-    const savedConfig = await keyStore.saveVercelConfig({
+    if (!currentProject) {
+      return;
+    }
+
+    const savedConfig = await saveProjectVercelConfig(currentProject.id, {
       defaultTarget: target,
       projectName,
       scope,
@@ -172,7 +187,7 @@ export function PreviewPanel() {
   }
 
   return (
-    <section className="relative flex min-h-0 min-w-0 flex-col border-b border-zinc-800 bg-[#0b0b0d]">
+    <section className="relative flex h-full min-h-0 min-w-0 flex-col border-b border-zinc-800 bg-[#0b0b0d]">
       <PreviewHeader
         activePreviewTab={activePreviewTab}
         activePreviewUrl={activePreviewUrl}
@@ -230,3 +245,5 @@ export function PreviewPanel() {
     </section>
   );
 }
+
+

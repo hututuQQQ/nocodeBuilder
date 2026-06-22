@@ -1,5 +1,15 @@
 import type { ProjectFileInput } from "../../services/projects";
 import type {
+  AgentSupabaseSchemaColumn,
+  AgentSupabaseSchemaInput,
+  AgentSupabaseSchemaTable,
+} from "./backendSchema";
+import {
+  isSupportedSupabaseColumnType,
+  isSupportedSupabaseDefaultValue,
+  isValidSupabaseIdentifier,
+} from "./backendSchema";
+import type {
   AgentCommand,
   AgentStepResponse,
   AgentToolCallStep,
@@ -242,6 +252,13 @@ function validateAgentToolCall(value: Record<string, unknown>): AgentToolCallSte
           command: validateAgentCommand(args.command),
         },
       };
+    case "apply_supabase_schema":
+      return {
+        type: "tool_call",
+        tool,
+        rationale,
+        args: validateSupabaseSchemaInput(args),
+      };
   }
 
   throw new Error(`Invalid model response: unknown tool "${tool}".`);
@@ -336,11 +353,155 @@ function validateAgentCommand(value: unknown): AgentCommand {
 
   if (!AGENT_COMMAND_SET.has(command as AgentCommand)) {
     throw new Error(
-      `Model attempted to run a forbidden command: ${String(value ?? "")}`,
+      `Model attempted to run a forbidden command: ${String(value ?? "")}. Allowed commands are ${Array.from(AGENT_COMMAND_SET).join(", ")}. Add dependencies by editing package.json with exact pinned versions instead of running install commands with package names.`,
     );
   }
 
   return command as AgentCommand;
+}
+
+function validateSupabaseSchemaInput(
+  args: Record<string, unknown>,
+): AgentSupabaseSchemaInput {
+  if (!Array.isArray(args.tables) || args.tables.length === 0) {
+    throw new Error("Invalid model response: apply_supabase_schema.tables is required.");
+  }
+
+  if (args.tables.length > 8) {
+    throw new Error(
+      "Invalid model response: apply_supabase_schema may include at most 8 tables.",
+    );
+  }
+
+  const seenTables = new Set<string>();
+  const tables = args.tables.map((table) => {
+    const nextTable = validateSupabaseSchemaTable(table);
+
+    if (seenTables.has(nextTable.name)) {
+      throw new Error(
+        `Invalid model response: duplicate table ${nextTable.name}.`,
+      );
+    }
+
+    seenTables.add(nextTable.name);
+    return nextTable;
+  });
+
+  return {
+    summary: validateSummaryArg(args.summary, "Applied Supabase schema."),
+    tables,
+  };
+}
+
+function validateSupabaseSchemaTable(value: unknown): AgentSupabaseSchemaTable {
+  if (!isRecord(value)) {
+    throw new Error(
+      "Invalid model response: every apply_supabase_schema table must be an object.",
+    );
+  }
+
+  const name = validateSupabaseIdentifier(value.name, "table name");
+
+  if (!Array.isArray(value.columns) || value.columns.length === 0) {
+    throw new Error(`Invalid model response: ${name}.columns is required.`);
+  }
+
+  if (value.columns.length > 32) {
+    throw new Error(
+      `Invalid model response: ${name}.columns may include at most 32 columns.`,
+    );
+  }
+
+  const seenColumns = new Set<string>();
+  const columns = value.columns.map((column) => {
+    const nextColumn = validateSupabaseSchemaColumn(column);
+
+    if (seenColumns.has(nextColumn.name)) {
+      throw new Error(
+        `Invalid model response: duplicate column ${name}.${nextColumn.name}.`,
+      );
+    }
+
+    seenColumns.add(nextColumn.name);
+    return nextColumn;
+  });
+
+  return {
+    columns,
+    enableRls: typeof value.enableRls === "boolean" ? value.enableRls : true,
+    name,
+  };
+}
+
+function validateSupabaseSchemaColumn(value: unknown): AgentSupabaseSchemaColumn {
+  if (!isRecord(value)) {
+    throw new Error(
+      "Invalid model response: every apply_supabase_schema column must be an object.",
+    );
+  }
+
+  const name = validateSupabaseIdentifier(value.name, "column name");
+  const dataType = validateSupabaseColumnType(value.dataType);
+  const primaryKey = value.primaryKey === true;
+  const defaultValue = validateSupabaseDefaultValue(value.defaultValue);
+
+  return {
+    dataType,
+    defaultValue,
+    name,
+    nullable:
+      primaryKey ? false : typeof value.nullable === "boolean" ? value.nullable : true,
+    primaryKey,
+    unique: primaryKey ? false : value.unique === true,
+  };
+}
+
+function validateSupabaseIdentifier(value: unknown, label: string) {
+  const identifier = validateTextArg(value, `apply_supabase_schema ${label}`, 64);
+
+  if (!isValidSupabaseIdentifier(identifier)) {
+    throw new Error(
+      `Invalid model response: apply_supabase_schema ${label} must start with a letter or underscore and contain only letters, numbers, and underscores.`,
+    );
+  }
+
+  return identifier;
+}
+
+function validateSupabaseColumnType(value: unknown) {
+  const dataType = validateTextArg(
+    value,
+    "apply_supabase_schema column dataType",
+    32,
+  ).toLowerCase();
+
+  if (!isSupportedSupabaseColumnType(dataType)) {
+    throw new Error(
+      `Invalid model response: unsupported Supabase column type "${dataType}".`,
+    );
+  }
+
+  return dataType;
+}
+
+function validateSupabaseDefaultValue(value: unknown) {
+  if (typeof value === "undefined" || value === null) {
+    return undefined;
+  }
+
+  const defaultValue = validateStringArg(
+    value,
+    "apply_supabase_schema column defaultValue",
+    80,
+  ).trim();
+
+  if (!isSupportedSupabaseDefaultValue(defaultValue)) {
+    throw new Error(
+      `Invalid model response: unsupported Supabase default value "${defaultValue}".`,
+    );
+  }
+
+  return defaultValue || undefined;
 }
 
 function validateTextArg(value: unknown, label: string, maxLength: number) {
