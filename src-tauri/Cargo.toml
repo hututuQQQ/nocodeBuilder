@@ -21,6 +21,7 @@ tauri-build = { version = "2", features = [] }
 chrono = "0.4"
 futures-util = "0.3"
 flate2 = "1"
+keyring = { version = "4", default-features = false, features = ["v1", "windows-native-keyring-store"] }
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls", "stream"] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }

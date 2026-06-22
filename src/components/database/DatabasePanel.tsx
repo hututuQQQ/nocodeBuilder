@@ -229,8 +229,10 @@ export function DatabasePanel() {
       };
 
       const client = new SupabaseRestClient(draftConfig);
-      await client.testConnection();
-      await client.testDatabaseConnection();
+      await Promise.all([
+        client.testConnection(),
+        client.testDatabaseConnection(),
+      ]);
       const nextConfig = await saveProjectSupabaseConfig(currentProject.id, {
         anonKey: anonKeyDraft,
         dbUrl: dbUrlDraft,

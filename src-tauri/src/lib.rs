@@ -5,14 +5,17 @@ use serde_json::{json, Value};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
+mod app_storage;
 mod commands;
+mod credentials;
 mod projects;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LlmChatCompletionRequest {
     url: String,
-    api_key: String,
+    provider: String,
+    api_key: Option<String>,
     body: Value,
 }
 
@@ -21,7 +24,8 @@ struct LlmChatCompletionRequest {
 struct LlmChatCompletionStreamRequest {
     request_id: String,
     url: String,
-    api_key: String,
+    provider: String,
+    api_key: Option<String>,
     body: Value,
 }
 
@@ -44,6 +48,8 @@ struct LlmStreamEvent {
 async fn llm_chat_completion(
     request: LlmChatCompletionRequest,
 ) -> Result<LlmChatCompletionResponse, String> {
+    let api_key =
+        credentials::resolve_ai_provider_secret(&request.provider, request.api_key.as_deref())?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -51,7 +57,7 @@ async fn llm_chat_completion(
 
     let response = client
         .post(request.url)
-        .bearer_auth(request.api_key)
+        .bearer_auth(api_key)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .json(&request.body)
         .send()
@@ -71,6 +77,8 @@ async fn llm_chat_completion_stream(
     app: AppHandle,
     request: LlmChatCompletionStreamRequest,
 ) -> Result<LlmChatCompletionResponse, String> {
+    let api_key =
+        credentials::resolve_ai_provider_secret(&request.provider, request.api_key.as_deref())?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()
@@ -83,7 +91,7 @@ async fn llm_chat_completion_stream(
 
     let response = client
         .post(request.url)
-        .bearer_auth(request.api_key)
+        .bearer_auth(api_key)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .json(&body)
         .send()
@@ -224,6 +232,10 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            app_storage::read_app_storage,
+            app_storage::write_app_storage,
+            credentials::has_ai_provider_secret,
+            credentials::save_ai_provider_secret,
             llm_chat_completion,
             llm_chat_completion_stream,
             commands::deploy_to_vercel,

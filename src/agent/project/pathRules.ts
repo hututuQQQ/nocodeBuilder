@@ -1,55 +1,24 @@
 import type { FileTree } from "../../services/projects";
-
-const ROOT_ALLOWED_FILES = new Set([
-  "package.json",
-  "next.config.js",
-  "next.config.mjs",
-  "next.config.ts",
-  "postcss.config.js",
-  "postcss.config.mjs",
-  "tailwind.config.js",
-  "tailwind.config.ts",
-  "tsconfig.json",
-  "vercel.json",
-  "middleware.ts",
-]);
-
-const ALLOWED_PROJECT_DIRECTORIES = [
-  "app/",
-  "components/",
-  "lib/",
-  "data/",
-  "public/",
-];
-
-const ALLOWED_TEXT_FILE_EXTENSIONS = [
-  ".css",
-  ".cjs",
-  ".js",
-  ".jsx",
-  ".json",
-  ".md",
-  ".mjs",
-  ".svg",
-  ".ts",
-  ".tsx",
-  ".txt",
-  ".yaml",
-  ".yml",
-];
+import {
+  DEFAULT_PROJECT_POLICY,
+  type ProjectPolicy,
+} from "./projectPolicy";
 
 export function formatProjectFileTree(fileTree: FileTree) {
   return formatFileTree(fileTree);
 }
 
-export function getContextFilePaths(fileTree: FileTree) {
+export function getContextFilePaths(
+  fileTree: FileTree,
+  policy: ProjectPolicy = DEFAULT_PROJECT_POLICY,
+) {
   const paths = flattenProjectFileTree(fileTree)
     .filter((node) => node.kind === "file")
     .map((node) => normalizeProjectPath(node.path))
     .filter((path): path is string => Boolean(path))
-    .filter(isAllowedProjectPath);
+    .filter((path) => isAllowedProjectPath(path, policy));
 
-  return uniquePaths(sortContextPaths(paths));
+  return uniquePaths(sortContextPaths(paths, policy));
 }
 
 export function normalizeProjectPath(value: unknown) {
@@ -77,26 +46,36 @@ export function normalizeProjectPath(value: unknown) {
   return segments.join("/");
 }
 
-export function isAllowedProjectPath(path: string) {
+export function isAllowedProjectPath(
+  path: string,
+  policy: ProjectPolicy = DEFAULT_PROJECT_POLICY,
+) {
   if (path.startsWith(".env") || path.includes("/.env")) {
     return false;
   }
 
   const isAllowedLocation =
-    ROOT_ALLOWED_FILES.has(path) ||
-    ALLOWED_PROJECT_DIRECTORIES.some((directory) => path.startsWith(directory));
+    policy.rootAllowedFiles.includes(path) ||
+    policy.allowedDirectories.some((directory) =>
+      path.startsWith(`${directory}/`),
+    );
 
-  return isAllowedLocation && hasAllowedTextExtension(path);
+  return isAllowedLocation && hasAllowedTextExtension(path, policy);
 }
 
-export function isAllowedProjectSearchPath(path: string) {
-  if (isAllowedProjectPath(path)) {
+export function isAllowedProjectSearchPath(
+  path: string,
+  policy: ProjectPolicy = DEFAULT_PROJECT_POLICY,
+) {
+  if (isAllowedProjectPath(path, policy)) {
     return true;
   }
 
   const directoryPath = path.endsWith("/") ? path : `${path}/`;
 
-  return ALLOWED_PROJECT_DIRECTORIES.includes(directoryPath);
+  return policy.allowedDirectories.some(
+    (directory) => directoryPath === `${directory}/`,
+  );
 }
 
 export function uniquePaths(paths: string[]) {
@@ -110,12 +89,15 @@ export function flattenProjectFileTree(fileTree: FileTree): FileTree[] {
   ];
 }
 
-export function getAllowedFilePaths(fileTree: FileTree) {
+export function getAllowedFilePaths(
+  fileTree: FileTree,
+  policy: ProjectPolicy = DEFAULT_PROJECT_POLICY,
+) {
   return flattenProjectFileTree(fileTree)
     .filter((node) => node.kind === "file")
     .map((node) => normalizeProjectPath(node.path))
     .filter((path): path is string => Boolean(path))
-    .filter(isAllowedProjectPath);
+    .filter((path) => isAllowedProjectPath(path, policy));
 }
 
 function formatFileTree(fileTree: FileTree) {
@@ -135,27 +117,17 @@ function formatFileTree(fileTree: FileTree) {
   return lines.join("\n");
 }
 
-function sortContextPaths(paths: string[]) {
-  const priority = new Map([
-    ["package.json", 0],
-    ["app/layout.tsx", 1],
-    ["app/page.tsx", 2],
-    ["app/globals.css", 3],
-    ["tailwind.config.ts", 4],
-    ["tailwind.config.js", 4],
-    ["tsconfig.json", 5],
-  ]);
-
+function sortContextPaths(paths: string[], policy: ProjectPolicy) {
   return [...paths].sort((left, right) => {
-    const leftPriority = priority.get(left) ?? 10;
-    const rightPriority = priority.get(right) ?? 10;
+    const leftPriority = policy.contextPriorities[left] ?? 10;
+    const rightPriority = policy.contextPriorities[right] ?? 10;
 
     return leftPriority - rightPriority || left.localeCompare(right);
   });
 }
 
-function hasAllowedTextExtension(path: string) {
-  return ALLOWED_TEXT_FILE_EXTENSIONS.some((extension) =>
+function hasAllowedTextExtension(path: string, policy: ProjectPolicy) {
+  return policy.allowedTextExtensions.some((extension) =>
     path.endsWith(extension),
   );
 }

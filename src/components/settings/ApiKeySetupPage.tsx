@@ -59,6 +59,8 @@ export function ApiKeySetupPage({
     useState<TestedProviderSignatures>({});
   const provider = getAiProviderDefinition(providerId);
   const draft = drafts[providerId];
+  const hasStoredApiKey =
+    aiState?.configs[providerId]?.apiKeyConfigured ?? false;
 
   useEffect(() => {
     setProviderId(aiState?.activeProvider ?? DEFAULT_AI_PROVIDER);
@@ -73,10 +75,10 @@ export function ApiKeySetupPage({
   );
   const hasRequiredFields = useMemo(
     () =>
-      draft.apiKey.trim().length > 0 &&
+      (hasStoredApiKey || draft.apiKey.trim().length > 0) &&
       draft.baseUrl.trim().length > 0 &&
       draft.models.length > 0,
-    [draft.apiKey, draft.baseUrl, draft.models.length],
+    [draft.apiKey, draft.baseUrl, draft.models.length, hasStoredApiKey],
   );
   const providerIdsToSave = useMemo(
     () => getProviderIdsToSave(drafts, testedConfigSignatures),
@@ -142,7 +144,7 @@ export function ApiKeySetupPage({
   }
 
   function validateConfig() {
-    if (!draft.apiKey.trim()) {
+    if (!hasStoredApiKey && !draft.apiKey.trim()) {
       return `Enter a ${provider.label} API key.`;
     }
 
@@ -183,7 +185,7 @@ export function ApiKeySetupPage({
       const results = await Promise.all(
         draft.models.map((model) =>
           testModelConnection({
-            apiKey: draft.apiKey.trim(),
+            apiKey: draft.apiKey.trim() || undefined,
             baseUrl: draft.baseUrl.trim(),
             model,
             provider: providerId,
@@ -242,7 +244,7 @@ export function ApiKeySetupPage({
 
       return {
         provider: saveProviderId,
-        apiKey: saveDraft.apiKey.trim(),
+        apiKey: saveDraft.apiKey.trim() || undefined,
         model: saveDraft.model,
         models: saveDraft.models,
         baseUrl: saveDraft.baseUrl.trim(),
@@ -345,7 +347,11 @@ export function ApiKeySetupPage({
                   apiKey,
                 }));
               }}
-              placeholder={provider.apiKeyPlaceholder}
+              placeholder={
+                hasStoredApiKey
+                  ? "Stored in Windows Credential Manager"
+                  : provider.apiKeyPlaceholder
+              }
               type="password"
               value={draft.apiKey}
             />
@@ -476,7 +482,7 @@ async function testModelConnection({
   model,
   provider,
 }: {
-  apiKey: string;
+  apiKey?: string;
   baseUrl: string;
   model: string;
   provider: AiProviderId;
@@ -544,7 +550,7 @@ function createProviderDraft(
       : selectedModels[0];
 
   return {
-    apiKey: config?.apiKey ?? "",
+    apiKey: "",
     baseUrl: config?.baseUrl ?? provider.defaultBaseUrl,
     model: activeModel,
     models: selectedModels,

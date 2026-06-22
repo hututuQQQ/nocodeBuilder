@@ -48,6 +48,8 @@ import type { StoreAccess } from "./storeAccess";
 
 const MAX_AGENT_STEPS = 10;
 const MAX_AGENT_REPAIR_ATTEMPTS = 2;
+const MAX_AGENT_DIAGNOSTIC_CHARS = 6_000;
+const MAX_AGENT_DIAGNOSTIC_LINES = 36;
 
 export async function generateInitialProject(
   store: StoreAccess,
@@ -163,6 +165,7 @@ export async function modifyCurrentProject(
   let didChangeFiles = false;
   let repairAttempts = 0;
   let buildVerified = false;
+  let previewNeedsFinalRefresh = false;
 
   store.set((state) => ({
     isModifyingProject: true,
@@ -346,6 +349,37 @@ export async function modifyCurrentProject(
       ensureCurrentProject(store, project.id);
 
       if (step.type === "answer") {
+        if (shouldRequireProjectActionBeforeAnswer(userRequest, observations)) {
+          const observation: AgentObservation = {
+            content: [
+              "The model tried to answer before inspecting the project.",
+              "For bug, error, broken preview, fix, or change requests, inspect diagnostics and relevant files first, then modify or explain based on observations.",
+              `Proposed answer: ${step.message}`,
+            ].join("\n"),
+            ok: false,
+            step: observations.length + 1,
+            summary: "Answer was not enough for this project action request.",
+            tool: "answer",
+          };
+          observations.push(observation);
+          appendTerminalLog(store, `[agent:error] ${observation.summary}`);
+          updateAgentStatus(
+            activeStream,
+            statusLines,
+            "The model answered too early. Asking it to inspect the project first.",
+          );
+          continue;
+        }
+
+        if (previewNeedsFinalRefresh && buildVerified) {
+          await refreshPreviewAfterFinalAgentChange(
+            store,
+            project.id,
+            activeStream,
+            statusLines,
+          );
+        }
+
         activeStream.completeWithTypewriter(step.message);
         void persistCurrentConversation(store);
 
@@ -356,6 +390,15 @@ export async function modifyCurrentProject(
       }
 
       if (step.type === "finish") {
+        if (previewNeedsFinalRefresh && buildVerified) {
+          await refreshPreviewAfterFinalAgentChange(
+            store,
+            project.id,
+            activeStream,
+            statusLines,
+          );
+        }
+
         const content = formatAgentFinishMessage(step, {
           buildVerified,
           didChangeFiles,
@@ -426,6 +469,7 @@ export async function modifyCurrentProject(
       if (stepChangedFiles) {
         didChangeFiles = true;
         buildVerified = false;
+        previewNeedsFinalRefresh = true;
 
         if (stepChangedPackage) {
           const installCommand = getPreferredProjectCommand(store, "install");
@@ -529,6 +573,15 @@ export async function modifyCurrentProject(
       }
     }
 
+    if (previewNeedsFinalRefresh && buildVerified) {
+      await refreshPreviewAfterFinalAgentChange(
+        store,
+        project.id,
+        activeStream,
+        statusLines,
+      );
+    }
+
     activeStream.failWithTypewriter(
       [
         "I stopped after reaching the agent step limit.",
@@ -587,7 +640,7 @@ async function buildAgentStepContext(
   const backendContext = await buildProjectBackendContext(project.id, {
     includeSchema: hasBackendIntent(backendIntentText),
   });
-  const dynamicContext = buildDynamicAgentContext({
+  const dynamicContext = await buildDynamicAgentContext({
     changeHistory: state.changeHistory,
     fileTree: state.fileTree,
     observations,
@@ -599,6 +652,7 @@ async function buildAgentStepContext(
 
   return {
     backend: backendContext,
+    diagnostics: buildAgentDiagnostics(state.projectError, state.terminalLogs),
     devServerStatus: state.devServerStatus,
     fileTree: state.fileTree ? formatProjectFileTree(state.fileTree) : null,
     memory: dynamicContext.memory,
@@ -609,6 +663,101 @@ async function buildAgentStepContext(
     taskLedger: dynamicContext.taskLedger,
     workingSummary: dynamicContext.workingSummary,
   };
+}
+
+function buildAgentDiagnostics(projectError: string | null, terminalLogs: string[]) {
+  const lines = terminalLogs.slice(-MAX_AGENT_DIAGNOSTIC_LINES);
+  const parts = [
+    projectError ? `Current project error: ${projectError}` : "",
+    lines.length > 0 ? `Recent logs:\n${lines.join("\n")}` : "",
+  ].filter(Boolean);
+
+  if (parts.length === 0) {
+    return null;
+  }
+
+  const diagnostics = parts.join("\n\n").trim();
+
+  if (diagnostics.length <= MAX_AGENT_DIAGNOSTIC_CHARS) {
+    return diagnostics;
+  }
+
+  return diagnostics.slice(-MAX_AGENT_DIAGNOSTIC_CHARS);
+}
+
+function shouldRequireProjectActionBeforeAnswer(
+  userRequest: string,
+  observations: AgentObservation[],
+) {
+  if (observations.length > 0) {
+    return false;
+  }
+
+  return isProjectActionRequest(userRequest);
+}
+
+function isProjectActionRequest(userRequest: string) {
+  return /(?:bug|error|failed|failure|broken|fix|repair|issue|crash|exception|syntax|compile|build|preview|报错|错误|异常|崩溃|失败|修|修复|改|修改|看.*bug|看看.*bug|预览|打不开|没生效)/i.test(
+    userRequest,
+  );
+}
+
+async function refreshPreviewAfterFinalAgentChange(
+  store: StoreAccess,
+  projectId: string,
+  activeStream: AgentStreamController,
+  statusLines: string[],
+) {
+  const state = store.get();
+
+  if (state.currentProject?.id !== projectId) {
+    return;
+  }
+
+  if (state.devServerStatus !== "running") {
+    if (state.previewUrl) {
+      store.get().refreshPreview();
+    }
+    return;
+  }
+
+  updateAgentStatus(
+    activeStream,
+    statusLines,
+    "Refreshing preview with the final verified changes.",
+  );
+  const activityId = activeStream.addActivity({
+    detail: "The final file changes are verified, so the local preview is restarting once.",
+    kind: "preview",
+    title: "Refreshing final preview",
+  });
+  appendTerminalLog(
+    store,
+    "[preview] Refreshing local preview after final agent changes.",
+  );
+
+  await store.get().stopDevServer(projectId);
+
+  if (store.get().currentProject?.id !== projectId) {
+    return;
+  }
+
+  await store.get().startDevServer(projectId);
+
+  const nextState = store.get();
+  const ok =
+    nextState.currentProject?.id === projectId &&
+    nextState.devServerStatus === "running" &&
+    Boolean(nextState.previewUrl);
+
+  activeStream.updateActivity(activityId, {
+    detail: ok
+      ? `Preview restarted at ${nextState.previewUrl}.`
+      : "Preview restart did not complete.",
+    error: ok ? undefined : nextState.projectError ?? "Preview restart failed.",
+    finishActivity: true,
+    status: ok ? "succeeded" : "failed",
+  });
 }
 
 function formatAgentStepLabel(

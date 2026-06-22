@@ -8,13 +8,19 @@ import {
   isKnownProviderModel,
   type AiProviderId,
 } from "./aiProviders";
+import {
+  hasAiProviderSecret,
+  readAppStorageValue,
+  saveAiProviderSecret,
+  writeAppStorageValue,
+} from "./appStorage";
 
 export const VERCEL_DEPLOY_TARGETS = ["preview", "production"] as const;
 export const DEFAULT_VERCEL_DEPLOY_TARGET = "preview";
 
 export type AiProviderConfig = {
   provider: AiProviderId;
-  apiKey: string;
+  apiKeyConfigured: boolean;
   model: string;
   models: string[];
   baseUrl: string;
@@ -23,7 +29,7 @@ export type AiProviderConfig = {
 
 export type AiProviderConfigInput = {
   provider: AiProviderId;
-  apiKey: string;
+  apiKey?: string;
   model?: string;
   models: string[];
   baseUrl: string;
@@ -51,12 +57,17 @@ export interface KeyStore {
   ) => Promise<AiProviderState>;
 }
 
-const AI_PROVIDER_STORAGE_KEY = "ai-web-builder.ai-provider-config.v3";
-const STALE_AI_PROVIDER_STORAGE_KEYS = [
-  "ai-web-builder.ai-provider-config.v2",
-  "ai-web-builder.ai-provider-config.v1",
-  "ai-web-builder.deepseek-config.v1",
-];
+type StoredAiProviderConfig = Omit<AiProviderConfig, "apiKeyConfigured">;
+type StoredAiProviderConfigs = Partial<
+  Record<AiProviderId, StoredAiProviderConfig>
+>;
+type StoredAiProviderState = {
+  activeProvider: AiProviderId;
+  configs: StoredAiProviderConfigs;
+  updatedAt: string;
+};
+
+const AI_PROVIDER_STORAGE_ID = "ai-provider-config";
 
 function createEmptyAiProviderState(): AiProviderState {
   return {
@@ -76,9 +87,9 @@ export function getActiveAiProviderConfig(
   return state.configs[state.activeProvider] ?? null;
 }
 
-function normalizeAiProviderConfig(
+function createStoredConfig(
   config: AiProviderConfigInput,
-): AiProviderConfig {
+): StoredAiProviderConfig {
   const provider = config.provider;
   const models = normalizeModelList(provider, config.models, config.model);
   const model =
@@ -86,11 +97,41 @@ function normalizeAiProviderConfig(
 
   return {
     provider,
-    apiKey: config.apiKey.trim(),
     model,
     models,
     baseUrl: config.baseUrl.trim() || getDefaultAiBaseUrl(provider),
     updatedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeStoredConfig(
+  provider: AiProviderId,
+  config: Partial<StoredAiProviderConfig> | undefined,
+): StoredAiProviderConfig | null {
+  if (!config) {
+    return null;
+  }
+
+  const models = normalizeModelList(
+    provider,
+    Array.isArray(config.models) ? config.models : [],
+    config.model,
+  );
+  const model =
+    typeof config.model === "string" && models.includes(config.model)
+      ? config.model
+      : models[0];
+
+  return {
+    provider,
+    model,
+    models,
+    baseUrl:
+      typeof config.baseUrl === "string" && config.baseUrl.trim()
+        ? config.baseUrl.trim()
+        : getDefaultAiBaseUrl(provider),
+    updatedAt:
+      typeof config.updatedAt === "string" ? config.updatedAt : "",
   };
 }
 
@@ -123,34 +164,51 @@ function normalizeModelList(
   return knownModels.filter((model) => selectedModels.has(model));
 }
 
-function normalizeAiProviderState(
-  state: Partial<AiProviderState>,
-): AiProviderState {
+async function hydrateStoredAiProviderState(
+  state: Partial<StoredAiProviderState> | null,
+): Promise<AiProviderState | null> {
+  if (!state?.configs || typeof state.configs !== "object") {
+    return null;
+  }
+
   const configs: AiProviderConfigs = {};
 
   for (const provider of AI_PROVIDER_IDS) {
-    const config = state.configs?.[provider];
+    const storedConfig = normalizeStoredConfig(provider, state.configs[provider]);
 
-    if (!config || typeof config.apiKey !== "string" || !config.apiKey.trim()) {
+    if (!storedConfig) {
       continue;
     }
 
-    configs[provider] = normalizeAiProviderConfig({
-      provider,
-      apiKey: config.apiKey,
-      baseUrl: config.baseUrl,
-      model: config.model,
-      models: Array.isArray(config.models) ? config.models : [config.model],
-    });
+    let apiKeyConfigured = false;
+
+    try {
+      apiKeyConfigured = await hasAiProviderSecret(provider);
+    } catch {
+      apiKeyConfigured = false;
+    }
+
+    if (apiKeyConfigured) {
+      configs[provider] = {
+        ...storedConfig,
+        apiKeyConfigured,
+      };
+    }
   }
 
+  const fallbackActiveProvider =
+    AI_PROVIDER_IDS.find((provider) => configs[provider]) ??
+    DEFAULT_AI_PROVIDER;
   const activeProvider =
     typeof state.activeProvider === "string" &&
     isAiProviderId(state.activeProvider) &&
     configs[state.activeProvider]
       ? state.activeProvider
-      : (AI_PROVIDER_IDS.find((provider) => configs[provider]) ??
-        DEFAULT_AI_PROVIDER);
+      : fallbackActiveProvider;
+
+  if (!configs[activeProvider]) {
+    return null;
+  }
 
   return {
     activeProvider,
@@ -159,37 +217,101 @@ function normalizeAiProviderState(
   };
 }
 
-function readStoredAiProviderState(value: string | null): AiProviderState | null {
-  if (!value) {
+function readStoredAiProviderState(value: unknown): StoredAiProviderState | null {
+  if (!value || typeof value !== "object") {
     return null;
   }
 
-  try {
-    const parsed = JSON.parse(value) as Partial<AiProviderState>;
+  const parsed = value as Partial<StoredAiProviderState>;
 
-    if (!parsed.configs || typeof parsed.configs !== "object") {
-      return null;
+  if (!parsed.configs || typeof parsed.configs !== "object") {
+    return null;
+  }
+
+  const configs: StoredAiProviderConfigs = {};
+
+  for (const provider of AI_PROVIDER_IDS) {
+    const storedConfig = normalizeStoredConfig(provider, parsed.configs[provider]);
+
+    if (storedConfig) {
+      configs[provider] = storedConfig;
+    }
+  }
+
+  const activeProvider =
+    typeof parsed.activeProvider === "string" &&
+    isAiProviderId(parsed.activeProvider)
+      ? parsed.activeProvider
+      : DEFAULT_AI_PROVIDER;
+
+  return {
+    activeProvider,
+    configs,
+    updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : "",
+  };
+}
+
+async function readPersistedAiProviderState() {
+  const storedState = readStoredAiProviderState(
+    await readAppStorageValue<unknown>(AI_PROVIDER_STORAGE_ID),
+  );
+  return hydrateStoredAiProviderState(storedState);
+}
+
+function createStoredStateFromHydrated(
+  state: AiProviderState,
+): StoredAiProviderState {
+  const configs: StoredAiProviderConfigs = {};
+
+  for (const provider of AI_PROVIDER_IDS) {
+    const config = state.configs[provider];
+
+    if (!config) {
+      continue;
     }
 
-    return normalizeAiProviderState(parsed);
-  } catch {
-    return null;
+    configs[provider] = {
+      provider: config.provider,
+      model: config.model,
+      models: config.models,
+      baseUrl: config.baseUrl,
+      updatedAt: config.updatedAt,
+    };
   }
+
+  return {
+    activeProvider: state.activeProvider,
+    configs,
+    updatedAt: state.updatedAt,
+  };
 }
 
-function removeStaleAiProviderConfigs() {
-  for (const storageKey of STALE_AI_PROVIDER_STORAGE_KEYS) {
-    window.localStorage.removeItem(storageKey);
+async function ensureProviderHasSecret(
+  provider: AiProviderId,
+  config: AiProviderConfigInput,
+  currentState: AiProviderState,
+) {
+  const apiKey = config.apiKey?.trim();
+
+  if (apiKey) {
+    await saveAiProviderSecret(provider, apiKey);
+    return;
   }
+
+  if (currentState.configs[provider]?.apiKeyConfigured) {
+    return;
+  }
+
+  if (await hasAiProviderSecret(provider)) {
+    return;
+  }
+
+  throw new Error(`API key is required for ${getAiProviderDefinition(provider).label}.`);
 }
 
-class LocalStorageKeyStore implements KeyStore {
+class RustKeyStore implements KeyStore {
   async getAiProviderState() {
-    removeStaleAiProviderConfigs();
-
-    const currentState = readStoredAiProviderState(
-      window.localStorage.getItem(AI_PROVIDER_STORAGE_KEY),
-    );
+    const currentState = await readPersistedAiProviderState();
 
     if (currentState) {
       return currentState;
@@ -211,16 +333,21 @@ class LocalStorageKeyStore implements KeyStore {
     activeProvider?: AiProviderId,
   ) {
     const currentState = await this.getAiProviderState();
-    const nextConfigs = configs.map(normalizeAiProviderConfig);
-    const mergedConfigs: AiProviderConfigs = {
-      ...currentState.configs,
-    };
 
-    for (const nextConfig of nextConfigs) {
-      mergedConfigs[nextConfig.provider] = nextConfig;
+    for (const config of configs) {
+      await ensureProviderHasSecret(config.provider, config, currentState);
     }
 
-    const lastConfig = nextConfigs[nextConfigs.length - 1];
+    const currentStoredState = createStoredStateFromHydrated(currentState);
+    const mergedConfigs: StoredAiProviderConfigs = {
+      ...currentStoredState.configs,
+    };
+
+    for (const config of configs) {
+      mergedConfigs[config.provider] = createStoredConfig(config);
+    }
+
+    const lastConfig = configs[configs.length - 1];
     const fallbackActiveProvider =
       AI_PROVIDER_IDS.find((provider) => mergedConfigs[provider]) ??
       DEFAULT_AI_PROVIDER;
@@ -232,20 +359,17 @@ class LocalStorageKeyStore implements KeyStore {
           : mergedConfigs[currentState.activeProvider]
             ? currentState.activeProvider
             : fallbackActiveProvider;
-    const nextState: AiProviderState = {
+    const nextState: StoredAiProviderState = {
       activeProvider: nextActiveProvider,
       configs: mergedConfigs,
       updatedAt: new Date().toISOString(),
     };
 
-    window.localStorage.setItem(
-      AI_PROVIDER_STORAGE_KEY,
-      JSON.stringify(nextState),
-    );
+    await writeAppStorageValue(AI_PROVIDER_STORAGE_ID, nextState);
 
-    return nextState;
+    return (await hydrateStoredAiProviderState(nextState)) ??
+      createEmptyAiProviderState();
   }
 }
 
-// TODO: Replace localStorage with the system Keychain / Credential Manager.
-export const keyStore: KeyStore = new LocalStorageKeyStore();
+export const keyStore: KeyStore = new RustKeyStore();

@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use tauri::{AppHandle, State};
+use tauri::AppHandle;
 
 use crate::projects::resolve_project_dir;
 
@@ -35,7 +35,7 @@ struct DevServerProcess {
 
 pub fn start_dev_server(
     app: AppHandle,
-    registry: State<'_, DevServerRegistry>,
+    registry: DevServerRegistry,
     project_id: String,
 ) -> Result<DevServerInfo, String> {
     let project_dir = resolve_project_dir(&project_id)?;
@@ -157,7 +157,7 @@ pub fn start_dev_server(
             let is_still_running = lock_servers(&registry)?.contains_key(&project_id);
 
             if is_still_running {
-                let _ = stop_dev_server(app.clone(), registry, project_id.clone());
+                let _ = stop_dev_server(app.clone(), &registry, project_id.clone());
             }
 
             Err(format!(
@@ -169,7 +169,7 @@ pub fn start_dev_server(
 
 pub fn stop_dev_server(
     app: AppHandle,
-    registry: State<'_, DevServerRegistry>,
+    registry: &DevServerRegistry,
     project_id: String,
 ) -> Result<(), String> {
     let server = {
@@ -195,7 +195,7 @@ pub fn stop_dev_server(
 
 pub fn stop_all_dev_servers(
     app: AppHandle,
-    registry: State<'_, DevServerRegistry>,
+    registry: &DevServerRegistry,
 ) -> Result<(), String> {
     let servers = {
         let mut servers = lock_servers(&registry)?;
@@ -285,7 +285,7 @@ fn spawn_dev_server_watcher(
 }
 
 fn lock_servers<'a>(
-    registry: &'a State<'_, DevServerRegistry>,
+    registry: &'a DevServerRegistry,
 ) -> Result<std::sync::MutexGuard<'a, HashMap<String, DevServerProcess>>, String> {
     registry
         .servers

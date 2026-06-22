@@ -91,7 +91,6 @@ function App() {
       try {
         const savedState = await keyStore.saveAiProviderConfig({
           provider: targetConfig.provider,
-          apiKey: targetConfig.apiKey,
           baseUrl: targetConfig.baseUrl,
           model: selection.model,
           models: targetConfig.models,

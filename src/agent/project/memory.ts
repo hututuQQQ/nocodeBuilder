@@ -5,11 +5,15 @@ import type {
   ProjectChatMessage,
 } from "./types";
 import {
+  readAppStorageValue,
+  writeAppStorageValue,
+} from "../../services/appStorage";
+import {
   flattenProjectFileTree,
   getAllowedFilePaths,
 } from "./pathRules";
 
-const STORAGE_KEY = "ai-web-builder.projectMemory.v1";
+const PROJECT_MEMORY_STORAGE_ID = "project-memory";
 const MAX_RECENT_CHANGES = 8;
 const MAX_OBSERVATION_SUMMARIES = 10;
 const MAX_FILE_SUMMARIES = 40;
@@ -71,7 +75,9 @@ export type DynamicContext = {
   workingSummary: WorkingSummary;
 };
 
-export function buildDynamicAgentContext({
+type ProjectMemoryStorage = Record<string, ProjectMemoryContext>;
+
+export async function buildDynamicAgentContext({
   changeHistory,
   fileTree,
   observations,
@@ -87,8 +93,8 @@ export function buildDynamicAgentContext({
   readFiles: AgentReadSnapshot[];
   recentMessages: ProjectChatMessage[];
   userRequest: string;
-}): DynamicContext {
-  const storedMemory = loadProjectMemory(project.id);
+}): Promise<DynamicContext> {
+  const storedMemory = await loadProjectMemory(project.id);
   const projectIndex = fileTree
     ? buildProjectIndex(fileTree)
     : storedMemory?.projectIndex ?? createEmptyProjectIndex();
@@ -109,7 +115,11 @@ export function buildDynamicAgentContext({
   const taskLedger = buildTaskLedger(userRequest, observations, workingSummary);
   const compressedObservations = compressObservations(observations);
 
-  saveProjectMemory(project.id, memory);
+  try {
+    await saveProjectMemory(project.id, memory);
+  } catch {
+    // Memory persistence should not block the agent workflow.
+  }
 
   return {
     memory,
@@ -369,42 +379,36 @@ function formatChangeSummary(change: ChangeRecord) {
   );
 }
 
-function loadProjectMemory(projectId: string): ProjectMemoryContext | null {
-  if (typeof localStorage === "undefined") {
-    return null;
-  }
-
+async function loadProjectMemory(projectId: string): Promise<ProjectMemoryContext | null> {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const stored = await readAppStorageValue<ProjectMemoryStorage>(
+      PROJECT_MEMORY_STORAGE_ID,
+    );
 
-    if (!raw) {
-      return null;
-    }
-
-    const parsed = JSON.parse(raw) as Record<string, ProjectMemoryContext>;
-    return parsed[projectId] ?? null;
+    return stored?.[projectId] ?? null;
   } catch {
     return null;
   }
 }
 
-function saveProjectMemory(projectId: string, memory: ProjectMemoryContext) {
-  if (typeof localStorage === "undefined") {
-    return;
-  }
-
+async function saveProjectMemory(projectId: string, memory: ProjectMemoryContext) {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    const parsed = raw ? (JSON.parse(raw) as Record<string, ProjectMemoryContext>) : {};
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({
-        ...parsed,
-        [projectId]: memory,
-      }),
-    );
+    const stored =
+      (await readAppStorageValue<ProjectMemoryStorage>(
+        PROJECT_MEMORY_STORAGE_ID,
+      )) ?? {};
+    await writeAppStorageValue(PROJECT_MEMORY_STORAGE_ID, {
+      ...stored,
+      [projectId]: memory,
+    });
   } catch {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ [projectId]: memory }));
+    try {
+      await writeAppStorageValue(PROJECT_MEMORY_STORAGE_ID, {
+        [projectId]: memory,
+      });
+    } catch {
+      // Ignore cache persistence failures.
+    }
   }
 }
 

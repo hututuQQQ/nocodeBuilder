@@ -8,7 +8,7 @@ export type ChatMessage = {
 export type LlmClientConfig = {
   provider: AiProviderId;
   baseUrl: string;
-  apiKey: string;
+  apiKey?: string;
   model: string;
 };
 

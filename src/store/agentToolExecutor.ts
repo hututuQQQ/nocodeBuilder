@@ -251,10 +251,6 @@ async function executeAgentToolCore(
         rememberReadFile(runState, step.args.path, nextContent);
         ensureCurrentProject(store, project.id);
 
-        store.set((state) => ({
-          previewRefreshKey: state.previewRefreshKey + 1,
-        }));
-
         return {
           didChangeFiles: true,
           didChangePackage: step.args.path === "package.json",
@@ -283,10 +279,6 @@ async function executeAgentToolCore(
         }
         ensureCurrentProject(store, project.id);
 
-        store.set((state) => ({
-          previewRefreshKey: state.previewRefreshKey + 1,
-        }));
-
         return {
           didChangeFiles: true,
           didChangePackage: step.args.files.some(
@@ -313,10 +305,6 @@ async function executeAgentToolCore(
           step.args.summary,
         );
         ensureCurrentProject(store, project.id);
-
-        store.set((state) => ({
-          previewRefreshKey: state.previewRefreshKey + 1,
-        }));
 
         return {
           didChangeFiles: true,

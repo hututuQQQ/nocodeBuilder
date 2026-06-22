@@ -26,7 +26,7 @@ export class ChatCompletionClient {
     this.config = {
       provider: config.provider,
       baseUrl: config.baseUrl.trim(),
-      apiKey: config.apiKey.trim(),
+      apiKey: config.apiKey?.trim(),
       model: config.model.trim(),
     };
     this.provider = getAiProviderDefinition(this.config.provider);
@@ -157,7 +157,7 @@ export class ChatCompletionClient {
   }
 
   private validateConfig() {
-    if (!this.config.apiKey) {
+    if (!isTauriRuntime() && !this.config.apiKey) {
       throw new LlmClientError(
         "api_key",
         `Enter a ${this.provider.label} API key before testing the connection.`,
@@ -182,6 +182,7 @@ export class ChatCompletionClient {
           request: {
             apiKey: this.config.apiKey,
             body,
+            provider: this.config.provider,
             url: this.getChatCompletionsUrl(),
           },
         },
@@ -221,6 +222,7 @@ export class ChatCompletionClient {
           request: {
             apiKey: this.config.apiKey,
             body,
+            provider: this.config.provider,
             requestId,
             url: this.getChatCompletionsUrl(),
           },
