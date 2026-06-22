@@ -17,12 +17,13 @@ import {
 import type { ChatMessage } from "./chatMessages";
 import type { ChangeRecord } from "./changeHistory";
 import { createChatActions } from "./chatStoreActions";
-import { appendLogs } from "./commandLogs";
+import { appendLogs, type CommandRun, type CommandRunLink } from "./commandLogs";
 import { createCommandActions } from "./commandStoreActions";
 import { createConversationActions } from "./conversationStoreActions";
 import { createDeploymentActions } from "./deploymentStoreActions";
 import { createPreviewActions } from "./previewStoreActions";
 import { createProjectActions } from "./projectStoreActions";
+import { createReviewActions } from "./reviewStoreActions";
 
 export type { ChatMessage } from "./chatMessages";
 export type { ChangeRecord, FileChangeSummary } from "./changeHistory";
@@ -31,12 +32,15 @@ type DevServerStatus = "stopped" | "starting" | "running" | "failed";
 
 export type AppState = {
   activeCommand: string | null;
+  activeCommandRunId: string | null;
+  commandRuns: CommandRun[];
   currentProject: ProjectInfo | null;
   devServerStatus: DevServerStatus;
   projects: ProjectInfo[];
   fileTree: FileTree | null;
   selectedFilePath: string | null;
   selectedFileContent: string;
+  selectedChangeFilePath: string | null;
   conversationSummaries: ProjectConversationSummary[];
   currentConversation: ProjectConversation | null;
   chatMessages: ChatMessage[];
@@ -52,6 +56,7 @@ export type AppState = {
   isLoadingConversations: boolean;
   isGeneratingProject: boolean;
   isLoadingFiles: boolean;
+  isRevertingChange: boolean;
   isReadingFile: boolean;
   isRunningCommand: boolean;
   isStartingDevServer: boolean;
@@ -79,16 +84,28 @@ export type AppState = {
     projectId: string,
     options?: { ensureConversation?: boolean; initialTitle?: string },
   ) => Promise<void>;
+  loadProjectChangeHistory: (projectId: string) => Promise<void>;
   loadProjects: () => Promise<void>;
   openProjectFolder: (projectId: string) => Promise<void>;
   openPreviewInBrowser: (url?: string) => Promise<void>;
   readProjectFile: (path: string) => Promise<void>;
   refreshPreview: () => void;
+  acceptAllChanges: () => Promise<void>;
+  acceptChangedFile: (path: string) => Promise<void>;
+  persistProjectChangeHistory: (
+    projectId: string,
+    records: ChangeRecord[],
+  ) => Promise<void>;
+  recordProjectChange: (record: ChangeRecord) => Promise<void>;
+  revertAllChanges: () => Promise<void>;
+  revertChangedFile: (path: string) => Promise<void>;
   runProjectCommand: (
     projectId: string,
     command: string,
+    link?: CommandRunLink,
   ) => Promise<CommandResult | null>;
   selectConversation: (conversationId: string) => Promise<void>;
+  selectReviewFile: (path: string | null) => void;
   selectProject: (
     projectId: string,
     options?: {
@@ -106,12 +123,15 @@ export type AppState = {
 
 const initialState = {
   activeCommand: null,
+  activeCommandRunId: null,
+  commandRuns: [],
   currentProject: null,
   devServerStatus: "stopped" as DevServerStatus,
   projects: [],
   fileTree: null,
   selectedFilePath: null,
   selectedFileContent: "",
+  selectedChangeFilePath: null,
   conversationSummaries: [],
   currentConversation: null,
   chatMessages: [],
@@ -127,6 +147,7 @@ const initialState = {
   isLoadingConversations: false,
   isGeneratingProject: false,
   isLoadingFiles: false,
+  isRevertingChange: false,
   isReadingFile: false,
   isRunningCommand: false,
   isStartingDevServer: false,
@@ -145,12 +166,20 @@ const initialState = {
   | "handleCommandOutput"
   | "handleCommandStatus"
   | "loadProjectConversations"
+  | "loadProjectChangeHistory"
   | "loadProjects"
   | "openProjectFolder"
   | "openPreviewInBrowser"
   | "readProjectFile"
   | "refreshPreview"
+  | "acceptAllChanges"
+  | "acceptChangedFile"
+  | "persistProjectChangeHistory"
+  | "recordProjectChange"
+  | "revertAllChanges"
+  | "revertChangedFile"
   | "runProjectCommand"
+  | "selectReviewFile"
   | "selectConversation"
   | "selectProject"
   | "sendMessage"
@@ -170,6 +199,7 @@ export const useAppStore = create<AppState>((set, get) => {
     ...createDeploymentActions(store),
     ...createPreviewActions(store),
     ...createProjectActions(store),
+    ...createReviewActions(store),
     ...createChatActions(store),
   };
 });

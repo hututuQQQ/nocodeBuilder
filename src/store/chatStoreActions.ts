@@ -14,29 +14,29 @@ export function createChatActions({ get, set }: StoreAccess): ChatActions {
   const store = { get, set };
 
   return {
-    sendMessage: (content) => {
+    sendMessage: async (content) => {
       const message = content.trim();
 
       if (!message) {
-        return Promise.resolve();
+        return;
       }
 
       if (!get().currentProject) {
-        return Promise.resolve();
+        return;
       }
 
       if (get().currentConversation?.archivedAt) {
-        return Promise.resolve();
+        return;
       }
 
       if (!get().currentConversation) {
-        return get().createConversation().then((conversation) => {
-          if (!conversation) {
-            return;
-          }
+        const conversation = await get().createConversation();
 
-          return get().sendMessage(message);
-        });
+        if (!conversation) {
+          return;
+        }
+
+        return get().sendMessage(message);
       }
 
       if (
@@ -52,7 +52,11 @@ export function createChatActions({ get, set }: StoreAccess): ChatActions {
         );
         void persistConversation(store, conversation);
 
-        return Promise.resolve();
+        return;
+      }
+
+      if (get().changeHistory.length > 0) {
+        await get().acceptAllChanges();
       }
 
       const userMessage = createChatMessage("user", message);
@@ -63,7 +67,7 @@ export function createChatActions({ get, set }: StoreAccess): ChatActions {
         terminalLogs: appendLogs(state.terminalLogs, [`[chat] ${message}`]),
       }));
 
-      return modifyCurrentProject(store, message);
+      await modifyCurrentProject(store, message);
     },
   };
 }

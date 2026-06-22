@@ -23,11 +23,61 @@ export type ProjectFileInput = {
   content: string;
 };
 
+export type ProjectFileChangeSummary = {
+  action: "created" | "deleted" | "modified";
+  additions: number;
+  afterContent: string | null;
+  beforeContent: string | null;
+  deletions: number;
+  path: string;
+  revertedAt?: string;
+  sampleAddedLines: string[];
+  sampleRemovedLines: string[];
+  unifiedDiff: string;
+};
+
+export type ProjectChangeRecord = {
+  createdAt: string;
+  files: ProjectFileChangeSummary[];
+  id: string;
+  kind: "agent" | "revert";
+  projectId: string;
+  revertedAt?: string;
+  revertedByChangeId?: string;
+  summary: string;
+};
+
 export type ProjectChatMessage = {
+  activities?: ProjectChatActivity[];
+  activitiesCollapsed?: boolean;
+  activitySummary?: string;
+  animateContent?: boolean;
   id: string;
   isStreaming?: boolean;
   role: "assistant" | "user";
   content: string;
+};
+
+export type ProjectChatActivity = {
+  command?: string;
+  detail?: string;
+  elapsedMs?: number;
+  error?: string;
+  finishedAt?: string;
+  id: string;
+  kind:
+    | "command"
+    | "database"
+    | "file"
+    | "preview"
+    | "thinking"
+    | "tool"
+    | "verification";
+  outputLineCount?: number;
+  outputPreview?: string[];
+  startedAt?: string;
+  status: "failed" | "pending" | "running" | "succeeded";
+  title: string;
 };
 
 export type ProjectConversationSummary = {
@@ -142,6 +192,19 @@ export const projectApi = {
 
   openProjectFolder(projectId: string) {
     return invoke<void>("open_project_folder", { projectId });
+  },
+
+  listProjectChangeHistory(projectId: string) {
+    return invoke<ProjectChangeRecord[]>("list_project_change_history", {
+      projectId,
+    });
+  },
+
+  saveProjectChangeHistory(
+    projectId: string,
+    records: ProjectChangeRecord[],
+  ) {
+    return invoke<void>("save_project_change_history", { projectId, records });
   },
 
   listProjectConversations(projectId: string, includeArchived = false) {

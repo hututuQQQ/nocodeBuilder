@@ -5,6 +5,7 @@ export type FileChangeSummary = {
   beforeContent: string | null;
   deletions: number;
   path: string;
+  revertedAt?: string;
   sampleAddedLines: string[];
   sampleRemovedLines: string[];
   unifiedDiff: string;
@@ -14,7 +15,18 @@ export type ChangeRecord = {
   id: string;
   createdAt: string;
   files: FileChangeSummary[];
+  kind: "agent" | "revert";
   projectId: string;
+  revertedAt?: string;
+  revertedByChangeId?: string;
+  summary: string;
+};
+
+export const MAX_CHANGE_HISTORY_RECORDS = 50;
+
+export type PendingReviewFile = FileChangeSummary & {
+  lastChangedAt: string;
+  recordIds: string[];
   summary: string;
 };
 
@@ -34,9 +46,73 @@ export function createChangeRecord(
         file.content,
       ),
     ),
+    kind: "agent",
     projectId,
     summary,
   };
+}
+
+export function createFileChangeSummary(
+  path: string,
+  beforeContent: string | null,
+  afterContent: string | null,
+): FileChangeSummary {
+  return summarizeFileChange(path, beforeContent, afterContent);
+}
+
+export function getPendingReviewFiles(records: ChangeRecord[]): PendingReviewFile[] {
+  const filesByPath = new Map<
+    string,
+    {
+      afterContent: string | null;
+      beforeContent: string | null;
+      lastChangedAt: string;
+      path: string;
+      recordIds: string[];
+      summary: string;
+    }
+  >();
+  const orderedRecords = records
+    .filter((record) => record.kind !== "revert" && !record.revertedAt)
+    .slice()
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+
+  for (const record of orderedRecords) {
+    for (const file of record.files) {
+      if (file.revertedAt) {
+        continue;
+      }
+
+      const current = filesByPath.get(file.path);
+
+      filesByPath.set(file.path, {
+        afterContent: file.afterContent,
+        beforeContent: current?.beforeContent ?? file.beforeContent,
+        lastChangedAt: record.createdAt,
+        path: file.path,
+        recordIds: [...(current?.recordIds ?? []), record.id],
+        summary: record.summary,
+      });
+    }
+  }
+
+  return Array.from(filesByPath.values())
+    .map((file) => ({
+      ...createFileChangeSummary(
+        file.path,
+        file.beforeContent,
+        file.afterContent,
+      ),
+      lastChangedAt: file.lastChangedAt,
+      recordIds: file.recordIds,
+      summary: file.summary,
+    }))
+    .filter((file) => file.beforeContent !== file.afterContent)
+    .sort(
+      (left, right) =>
+        right.lastChangedAt.localeCompare(left.lastChangedAt) ||
+        left.path.localeCompare(right.path),
+    );
 }
 
 export function formatChangeRecordMessage(summary: string, record: ChangeRecord) {
@@ -93,6 +169,7 @@ function summarizeFileChange(
     beforeContent,
     deletions,
     path,
+    revertedAt: undefined,
     sampleAddedLines: sampleChangedLines(afterLines, beforeLines),
     sampleRemovedLines: beforeContent === null ? [] : sampleChangedLines(beforeLines, afterLines),
     unifiedDiff: createUnifiedDiff(path, beforeContent, afterContent),

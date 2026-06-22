@@ -1,3 +1,4 @@
+mod change_commands;
 mod conversation_commands;
 mod file_commands;
 mod metadata;
@@ -6,7 +7,8 @@ mod types;
 mod workspace;
 
 use types::{
-    FileTree, ProjectConversation, ProjectConversationSummary, ProjectFileInput, ProjectInfo,
+    FileTree, ProjectChangeRecord, ProjectConversation, ProjectConversationSummary,
+    ProjectFileInput, ProjectInfo,
 };
 
 pub(crate) use workspace::resolve_project_dir;
@@ -49,6 +51,21 @@ pub fn delete_files(project_id: String, paths: Vec<String>) -> Result<(), String
 #[tauri::command]
 pub fn open_project_folder(project_id: String) -> Result<(), String> {
     project_commands::open_project_folder(project_id)
+}
+
+#[tauri::command]
+pub fn list_project_change_history(
+    project_id: String,
+) -> Result<Vec<ProjectChangeRecord>, String> {
+    change_commands::list_project_change_history(project_id)
+}
+
+#[tauri::command]
+pub fn save_project_change_history(
+    project_id: String,
+    records: Vec<ProjectChangeRecord>,
+) -> Result<(), String> {
+    change_commands::save_project_change_history(project_id, records)
 }
 
 #[tauri::command]

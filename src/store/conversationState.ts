@@ -3,11 +3,12 @@ import type {
   ProjectConversationSummary,
 } from "../services/projects";
 import { getProjectErrorMessage, projectApi } from "../services/projects";
-import type { ChatMessage } from "./chatMessages";
+import type { ChatActivity, ChatMessage } from "./chatMessages";
 import { appendLogs } from "./commandLogs";
 import type { StoreAccess } from "./storeAccess";
 
 const DEFAULT_CONVERSATION_TITLE = "New chat";
+const MAX_PERSISTED_ACTIVITY_OUTPUT_LINES = 6;
 const saveQueues = new Map<string, Promise<void>>();
 
 export function conversationToSummary(
@@ -54,6 +55,25 @@ export function replaceConversationMessage(
   messageId: string,
   content: string,
   isStreaming: boolean,
+  options: Partial<
+    Pick<
+      ChatMessage,
+      "activities" | "activitiesCollapsed" | "activitySummary" | "animateContent"
+    >
+  > = {},
+) {
+  return updateConversationMessage(store, messageId, (message) => ({
+    ...message,
+    ...options,
+    content,
+    isStreaming,
+  }));
+}
+
+export function updateConversationMessage(
+  store: StoreAccess,
+  messageId: string,
+  updater: (message: ChatMessage) => ChatMessage,
 ) {
   return updateCurrentConversationMessages(store, (messages) => {
     let didReplace = false;
@@ -63,26 +83,14 @@ export function replaceConversationMessage(
       }
 
       didReplace = true;
-      return {
-        ...message,
-        content,
-        isStreaming,
-      };
+      return updater(message);
     });
 
     if (didReplace) {
       return nextMessages;
     }
 
-    return [
-      ...messages,
-      {
-        id: messageId,
-        content,
-        isStreaming,
-        role: "assistant",
-      },
-    ];
+    return nextMessages;
   });
 }
 
@@ -208,12 +216,49 @@ export function stripStreamingState(
 ): ProjectConversation {
   return {
     ...conversation,
-    messages: conversation.messages.map((message) => ({
-      content: message.content,
-      id: message.id,
-      role: message.role,
-    })),
+    messages: conversation.messages.map((message) => {
+      const activities = sanitizePersistedActivities(
+        (message as ChatMessage).activities,
+      );
+
+      return {
+        ...(activities ? { activities } : {}),
+        ...((message as ChatMessage).activitiesCollapsed
+          ? { activitiesCollapsed: true }
+          : {}),
+        ...((message as ChatMessage).activitySummary
+          ? { activitySummary: (message as ChatMessage).activitySummary }
+          : {}),
+        content: message.content,
+        id: message.id,
+        role: message.role,
+      };
+    }),
   };
+}
+
+function sanitizePersistedActivities(activities?: ChatActivity[]) {
+  const persisted = (activities ?? [])
+    .filter((activity) => activity.kind !== "thinking")
+    .filter((activity) => activity.status === "succeeded" || activity.status === "failed")
+    .map((activity) => ({
+      command: activity.command,
+      detail: activity.detail,
+      elapsedMs: activity.elapsedMs,
+      error: activity.error,
+      finishedAt: activity.finishedAt,
+      id: activity.id,
+      kind: activity.kind,
+      outputLineCount: activity.outputLineCount,
+      outputPreview: activity.outputPreview?.slice(
+        -MAX_PERSISTED_ACTIVITY_OUTPUT_LINES,
+      ),
+      startedAt: activity.startedAt,
+      status: activity.status,
+      title: activity.title,
+    }));
+
+  return persisted.length > 0 ? persisted : undefined;
 }
 
 function deriveTitleFromMessages(messages: ChatMessage[]) {

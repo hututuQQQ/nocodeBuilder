@@ -1,9 +1,23 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import {
+  Bot,
+  Brain,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  CircleDashed,
+  Database,
+  FileText,
   Loader2,
+  MonitorPlay,
   SendHorizontal,
+  TerminalSquare,
+  Wrench,
+  XCircle,
 } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
+import type { ChatActivity, ChatMessage } from "../../store/chatMessages";
+import { formatElapsedTime } from "../../store/commandLogs";
 import type { ConfiguredModelOption } from "../../App";
 import {
   getAiProviderDefinition,
@@ -27,6 +41,10 @@ export function ChatPanel({
 }: ChatPanelProps) {
   const [draft, setDraft] = useState("");
   const [modelError, setModelError] = useState<string | null>(null);
+  const [now, setNow] = useState(Date.now());
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const shouldStickToBottomRef = useRef(true);
   const chatMessages = useAppStore((state) => state.chatMessages);
   const currentConversation = useAppStore(
     (state) => state.currentConversation,
@@ -55,6 +73,38 @@ export function ChatPanel({
     configuredModelOptions.length > 0
       ? configuredModelOptions
       : [activeSelection];
+
+  const hasRunningActivity = chatMessages.some((message) =>
+    message.activities?.some((activity) => activity.status === "running"),
+  );
+
+  useEffect(() => {
+    if (!hasRunningActivity) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => setNow(Date.now()), 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, [hasRunningActivity]);
+
+  useEffect(() => {
+    if (shouldStickToBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ block: "end" });
+    }
+  }, [chatMessages]);
+
+  function handleMessageScroll() {
+    const container = scrollContainerRef.current;
+
+    if (!container) {
+      return;
+    }
+
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    shouldStickToBottomRef.current = distanceFromBottom < 80;
+  }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -145,7 +195,11 @@ export function ChatPanel({
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
+      <div
+        className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5"
+        onScroll={handleMessageScroll}
+        ref={scrollContainerRef}
+      >
         {!currentProject ? (
           <div className="grid h-full place-items-center">
             <div className="max-w-[320px] rounded-md border border-dashed border-zinc-800 bg-zinc-900/30 px-4 py-6 text-center text-sm leading-6 text-zinc-500">
@@ -164,24 +218,15 @@ export function ChatPanel({
             </div>
           </div>
         ) : (
-          chatMessages.map((message) => (
-          <article
-            className={`max-w-[86%] whitespace-pre-wrap rounded-md border px-4 py-3 text-sm leading-6 ${
-              message.role === "user"
-                ? "ml-auto border-teal-400/30 bg-teal-400/10 text-teal-50"
-                : message.isStreaming
-                  ? "border-blue-400/30 bg-blue-400/10 text-blue-100"
-                  : "border-zinc-800 bg-zinc-900/70 text-zinc-300"
-            }`}
-            key={message.id}
-          >
-            <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500">
-              {message.role}
-            </div>
-            {message.content}
-          </article>
-          ))
+          chatMessages.map((message) =>
+            message.role === "user" ? (
+              <UserMessage key={message.id} message={message} />
+            ) : (
+              <AssistantMessage key={message.id} message={message} now={now} />
+            ),
+          )
         )}
+        <div ref={messagesEndRef} />
       </div>
 
       <form
@@ -229,4 +274,305 @@ function decodeModelSelection(value: string): ConfiguredModelOption {
     provider: provider as AiProviderId,
     model: modelParts.join(":"),
   };
+}
+
+function UserMessage({ message }: { message: ChatMessage }) {
+  return (
+    <article className="ml-auto max-w-[86%] whitespace-pre-wrap rounded-md border border-teal-400/30 bg-teal-400/10 px-4 py-3 text-sm leading-6 text-teal-50">
+      <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-teal-200/70">
+        user
+      </div>
+      {message.content}
+    </article>
+  );
+}
+
+function AssistantMessage({
+  message,
+  now,
+}: {
+  message: ChatMessage;
+  now: number;
+}) {
+  const hasContent = message.content.trim().length > 0;
+  const [isExpanded, setIsExpanded] = useState(!message.activitiesCollapsed);
+  const activities = message.activities ?? [];
+  const shouldShowActivitySummary =
+    activities.length > 0 && message.activitiesCollapsed;
+  const visibleActivities =
+    message.activitiesCollapsed && !isExpanded ? [] : activities;
+
+  useEffect(() => {
+    if (message.activitiesCollapsed) {
+      setIsExpanded(false);
+    }
+  }, [message.activitiesCollapsed, message.id]);
+
+  return (
+    <article className="max-w-[92%] text-sm leading-6 text-zinc-300">
+      <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500">
+        <Bot size={14} aria-hidden="true" />
+        assistant
+      </div>
+      {shouldShowActivitySummary ? (
+        <button
+          className="mb-2 flex w-full max-w-full items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950/70 px-3 py-2 text-left text-xs text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-200"
+          onClick={() => setIsExpanded((current) => !current)}
+          type="button"
+        >
+          {isExpanded ? (
+            <ChevronDown size={14} aria-hidden="true" />
+          ) : (
+            <ChevronRight size={14} aria-hidden="true" />
+          )}
+          <span className="truncate">
+            Process: {message.activitySummary ?? summarizeChatActivities(activities)}
+          </span>
+        </button>
+      ) : null}
+      {visibleActivities.length > 0 ? (
+        <div className="space-y-2">
+          {visibleActivities.map((activity) => (
+            <ActivityRow activity={activity} key={activity.id} now={now} />
+          ))}
+        </div>
+      ) : null}
+      {hasContent ? (
+        <div className="mt-3 whitespace-pre-wrap rounded-md border border-zinc-800 bg-zinc-900/70 px-4 py-3">
+          <TypewriterText
+            active={Boolean(message.animateContent)}
+            text={message.content}
+          />
+        </div>
+      ) : message.isStreaming && !message.activities?.length ? (
+        <div className="mt-3 flex items-center gap-2 rounded-md border border-blue-400/30 bg-blue-400/10 px-4 py-3 text-blue-100">
+          <Loader2 size={15} className="animate-spin" aria-hidden="true" />
+          Working
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function summarizeChatActivities(activities: ChatActivity[]) {
+  const visibleActivities = activities.filter(
+    (activity) => activity.kind !== "thinking",
+  );
+  const failedCount = visibleActivities.filter(
+    (activity) => activity.status === "failed",
+  ).length;
+  const parts = [`${visibleActivities.length} step(s)`];
+
+  if (failedCount > 0) {
+    parts.push(`${failedCount} failed`);
+  }
+
+  return parts.join(", ");
+}
+
+function ActivityRow({
+  activity,
+  now,
+}: {
+  activity: ChatActivity;
+  now: number;
+}) {
+  const elapsedMs = getActivityElapsedMs(activity, now);
+  const elapsedText = formatElapsedTime(elapsedMs);
+  const preview = activity.outputPreview ?? [];
+  const statusTone =
+    activity.status === "failed"
+      ? "text-red-300"
+      : activity.status === "succeeded"
+        ? "text-emerald-300"
+        : "text-blue-300";
+
+  return (
+    <div className="rounded-md border border-zinc-800 bg-zinc-950/70 px-3 py-2">
+      <div className="flex min-w-0 items-start gap-3">
+        <div className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-md border border-zinc-800 bg-zinc-900 text-zinc-400">
+          <ActivityKindIcon activity={activity} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="truncate font-medium text-zinc-100">
+              {activity.title}
+            </span>
+            <span className={`ml-auto flex shrink-0 items-center gap-1 text-xs ${statusTone}`}>
+              <ActivityStatusIcon status={activity.status} />
+              {formatActivityStatus(activity.status)}
+            </span>
+          </div>
+          <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500">
+            {activity.command ? (
+              <code className="max-w-full truncate rounded bg-zinc-900 px-1.5 py-0.5 text-[11px] text-zinc-300">
+                {activity.command}
+              </code>
+            ) : null}
+            {elapsedText ? <span>{elapsedText}</span> : null}
+          </div>
+          {activity.detail ? (
+            <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-zinc-400">
+              {activity.detail}
+            </p>
+          ) : null}
+          {activity.error ? (
+            <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-red-300">
+              {activity.error}
+            </p>
+          ) : null}
+          {preview.length > 0 ? (
+            <details className="mt-2 text-xs text-zinc-500">
+              <summary className="cursor-pointer select-none text-zinc-400 outline-none">
+                Output preview
+                {activity.outputLineCount
+                  ? ` (${activity.outputLineCount.toLocaleString()} line${
+                      activity.outputLineCount === 1 ? "" : "s"
+                    })`
+                  : ""}
+              </summary>
+              <pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap rounded border border-zinc-800 bg-[#08080a] p-2 font-mono text-[11px] leading-5 text-zinc-400">
+                {preview.join("\n")}
+              </pre>
+            </details>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ActivityKindIcon({ activity }: { activity: ChatActivity }) {
+  if (activity.kind === "thinking") {
+    return <Brain size={15} aria-hidden="true" />;
+  }
+
+  if (activity.kind === "command") {
+    return <TerminalSquare size={15} aria-hidden="true" />;
+  }
+
+  if (activity.kind === "file") {
+    return <FileText size={15} aria-hidden="true" />;
+  }
+
+  if (activity.kind === "database") {
+    return <Database size={15} aria-hidden="true" />;
+  }
+
+  if (activity.kind === "preview") {
+    return <MonitorPlay size={15} aria-hidden="true" />;
+  }
+
+  if (activity.kind === "verification") {
+    return <CheckCircle2 size={15} aria-hidden="true" />;
+  }
+
+  return <Wrench size={15} aria-hidden="true" />;
+}
+
+function ActivityStatusIcon({
+  status,
+}: {
+  status: ChatActivity["status"];
+}) {
+  if (status === "failed") {
+    return <XCircle size={13} aria-hidden="true" />;
+  }
+
+  if (status === "succeeded") {
+    return <CheckCircle2 size={13} aria-hidden="true" />;
+  }
+
+  return <CircleDashed size={13} className="animate-spin" aria-hidden="true" />;
+}
+
+function formatActivityStatus(status: ChatActivity["status"]) {
+  if (status === "failed") {
+    return "Failed";
+  }
+
+  if (status === "succeeded") {
+    return "Done";
+  }
+
+  if (status === "pending") {
+    return "Queued";
+  }
+
+  return "Running";
+}
+
+function getActivityElapsedMs(activity: ChatActivity, now: number) {
+  if (typeof activity.elapsedMs === "number") {
+    return activity.elapsedMs;
+  }
+
+  if (activity.status !== "running" || !activity.startedAt) {
+    return undefined;
+  }
+
+  const startedAt = new Date(activity.startedAt).getTime();
+
+  if (!Number.isFinite(startedAt)) {
+    return undefined;
+  }
+
+  return Math.max(0, now - startedAt);
+}
+
+function TypewriterText({
+  active,
+  text,
+}: {
+  active: boolean;
+  text: string;
+}) {
+  const prefersReducedMotion = usePrefersReducedMotion();
+  const [visibleText, setVisibleText] = useState(
+    active && !prefersReducedMotion ? "" : text,
+  );
+
+  useEffect(() => {
+    if (!active || prefersReducedMotion) {
+      setVisibleText(text);
+      return;
+    }
+
+    const characters = Array.from(text);
+    const step = Math.max(1, Math.ceil(characters.length / 90));
+    let index = 0;
+    setVisibleText("");
+
+    const intervalId = window.setInterval(() => {
+      index = Math.min(characters.length, index + step);
+      setVisibleText(characters.slice(0, index).join(""));
+
+      if (index >= characters.length) {
+        window.clearInterval(intervalId);
+      }
+    }, 16);
+
+    return () => window.clearInterval(intervalId);
+  }, [active, prefersReducedMotion, text]);
+
+  return <>{visibleText}</>;
+}
+
+function usePrefersReducedMotion() {
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    setPrefersReducedMotion(mediaQuery.matches);
+
+    function handleChange(event: MediaQueryListEvent) {
+      setPrefersReducedMotion(event.matches);
+    }
+
+    mediaQuery.addEventListener("change", handleChange);
+
+    return () => mediaQuery.removeEventListener("change", handleChange);
+  }, []);
+
+  return prefersReducedMotion;
 }

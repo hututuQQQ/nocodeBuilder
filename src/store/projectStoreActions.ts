@@ -134,13 +134,15 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
           await get().selectProject(nextCurrentProject.id);
         } else {
           set({
+            changeHistory: [],
             currentProject: null,
             chatMessages: [],
             conversationSummaries: [],
-            currentConversation: null,
-            devServerStatus: "stopped",
-            fileTree: null,
-            lastDeploymentUrl: null,
+          currentConversation: null,
+          devServerStatus: "stopped",
+          fileTree: null,
+          selectedChangeFilePath: null,
+          lastDeploymentUrl: null,
             previewUrl: null,
             selectedFileContent: "",
             selectedFilePath: null,
@@ -221,6 +223,7 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
 
       set({
         chatMessages: [],
+        changeHistory: [],
         conversationSummaries: [],
         currentProject: project,
         currentConversation: null,
@@ -231,6 +234,7 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
         lastDeploymentUrl: null,
         projectError: null,
         previewUrl: null,
+        selectedChangeFilePath: null,
         selectedFileContent: "",
         selectedFilePath: null,
         showArchivedConversations: false,
@@ -245,6 +249,7 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
         const fileTree = await projectApi.listFiles(project.id);
 
         set({ fileTree });
+        await get().loadProjectChangeHistory(project.id);
         didLoadFiles = true;
       } catch (error) {
         const message = getProjectErrorMessage(error);
