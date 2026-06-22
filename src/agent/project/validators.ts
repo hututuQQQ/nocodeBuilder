@@ -26,6 +26,10 @@ import {
   validateGeneratedPackageJson,
   validatePackageJsonContent,
 } from "./packageValidation";
+import {
+  DEFAULT_PROJECT_POLICY,
+  type ProjectPolicy,
+} from "./projectPolicy";
 import { isRecord } from "./records";
 import {
   AGENT_COMMANDS,
@@ -33,22 +37,16 @@ import {
   isAgentToolName,
 } from "./toolRegistry";
 
-const REQUIRED_GENERATED_FILES = [
-  "package.json",
-  "app/layout.tsx",
-  "app/page.tsx",
-  "app/globals.css",
-];
-
 const AGENT_COMMAND_SET = new Set<AgentCommand>(AGENT_COMMANDS);
 
 export function validateGeneratedProjectResponse(
   value: unknown,
+  policy: ProjectPolicy = DEFAULT_PROJECT_POLICY,
 ): GenerateProjectResponse {
-  const response = validateProjectFileResponse(value, "write_files");
+  const response = validateProjectFileResponse(value, "write_files", policy);
   const paths = new Set(response.files.map((file) => file.path));
 
-  for (const requiredPath of REQUIRED_GENERATED_FILES) {
+  for (const requiredPath of policy.requiredFiles) {
     if (!paths.has(requiredPath)) {
       throw new Error(
         `Invalid model response: generated project is missing ${requiredPath}.`,
@@ -56,24 +54,28 @@ export function validateGeneratedProjectResponse(
     }
   }
 
-  validateGeneratedPackageJson(response.files);
+  validateGeneratedPackageJson(response.files, policy);
   return response;
 }
 
 export function validateModifyProjectResponse(
   value: unknown,
+  policy: ProjectPolicy = DEFAULT_PROJECT_POLICY,
 ): ModifyProjectResponse {
-  const response = validateProjectFileResponse(value, "modify_files");
+  const response = validateProjectFileResponse(value, "modify_files", policy);
   const packageFile = response.files.find((file) => file.path === "package.json");
 
   if (packageFile) {
-    validatePackageJsonContent(packageFile.content);
+    validatePackageJsonContent(packageFile.content, policy);
   }
 
   return response;
 }
 
-export function validateAgentStepResponse(value: unknown): AgentStepResponse {
+export function validateAgentStepResponse(
+  value: unknown,
+  policy: ProjectPolicy = DEFAULT_PROJECT_POLICY,
+): AgentStepResponse {
   if (!isRecord(value)) {
     throw new Error("Invalid model response: root value must be a JSON object.");
   }
@@ -118,7 +120,7 @@ export function validateAgentStepResponse(value: unknown): AgentStepResponse {
         throw new Error("Invalid model response: every tool call must be an object.");
       }
 
-      return validateAgentToolCall(call);
+      return validateAgentToolCall(call, policy);
     });
     const unsafeCall = calls.find((call) => {
       const definition = getAgentToolDefinition(call.tool);
@@ -147,10 +149,13 @@ export function validateAgentStepResponse(value: unknown): AgentStepResponse {
     );
   }
 
-  return validateAgentToolCall(value);
+  return validateAgentToolCall(value, policy);
 }
 
-function validateAgentToolCall(value: Record<string, unknown>): AgentToolCallStep {
+function validateAgentToolCall(
+  value: Record<string, unknown>,
+  policy: ProjectPolicy,
+): AgentToolCallStep {
   const tool = typeof value.tool === "string" ? value.tool : "";
 
   if (!isAgentToolName(tool)) {
@@ -180,7 +185,7 @@ function validateAgentToolCall(value: Record<string, unknown>): AgentToolCallSte
         tool,
         rationale,
         args: {
-          paths: validatePathArray(args.paths, "read_files.paths"),
+          paths: validatePathArray(args.paths, "read_files.paths", policy),
           offset: validateOptionalInteger(args.offset, "read_files.offset", 1, 20_000),
           limit: validateOptionalInteger(args.limit, "read_files.limit", 1, 800),
         },
@@ -192,7 +197,11 @@ function validateAgentToolCall(value: Record<string, unknown>): AgentToolCallSte
         rationale,
         args: {
           query: validateTextArg(args.query, "grep_files.query", 240),
-          paths: validateOptionalSearchPathArray(args.paths, "grep_files.paths"),
+          paths: validateOptionalSearchPathArray(
+            args.paths,
+            "grep_files.paths",
+            policy,
+          ),
           maxResults: validateOptionalInteger(args.maxResults, "grep_files.maxResults", 1, 100),
           contextLines: validateOptionalInteger(args.contextLines, "grep_files.contextLines", 0, 3),
           caseSensitive:
@@ -215,7 +224,7 @@ function validateAgentToolCall(value: Record<string, unknown>): AgentToolCallSte
         tool,
         rationale,
         args: {
-          path: validateSinglePath(args.path, "edit_file.path"),
+          path: validateSinglePath(args.path, "edit_file.path", policy),
           old_string: validateTextArg(args.old_string, "edit_file.old_string", 80_000),
           new_string: validateStringArg(args.new_string, "edit_file.new_string", 100_000),
           replace_all:
@@ -229,7 +238,7 @@ function validateAgentToolCall(value: Record<string, unknown>): AgentToolCallSte
         tool,
         rationale,
         args: {
-          files: validateProjectFiles(args.files, "write_files.files"),
+          files: validateProjectFiles(args.files, "write_files.files", policy),
           summary: validateSummaryArg(args.summary, "Updated project files."),
         },
       };
@@ -239,7 +248,7 @@ function validateAgentToolCall(value: Record<string, unknown>): AgentToolCallSte
         tool,
         rationale,
         args: {
-          paths: validatePathArray(args.paths, "delete_files.paths"),
+          paths: validatePathArray(args.paths, "delete_files.paths", policy),
           summary: validateSummaryArg(args.summary, "Deleted project files."),
         },
       };
@@ -264,12 +273,20 @@ function validateAgentToolCall(value: Record<string, unknown>): AgentToolCallSte
   throw new Error(`Invalid model response: unknown tool "${tool}".`);
 }
 
-function validateSinglePath(value: unknown, label: string) {
-  const paths = validatePathArray([value], label);
+function validateSinglePath(
+  value: unknown,
+  label: string,
+  policy: ProjectPolicy,
+) {
+  const paths = validatePathArray([value], label, policy);
   return paths[0];
 }
 
-function validatePathArray(value: unknown, label: string) {
+function validatePathArray(
+  value: unknown,
+  label: string,
+  policy: ProjectPolicy,
+) {
   if (!Array.isArray(value) || value.length === 0) {
     throw new Error(`Invalid model response: ${label} must be a non-empty array.`);
   }
@@ -282,7 +299,7 @@ function validatePathArray(value: unknown, label: string) {
     value.map((item) => {
       const path = normalizeProjectPath(item);
 
-      if (!path || !isAllowedProjectPath(path)) {
+      if (!path || !isAllowedProjectPath(path, policy)) {
         throw new Error(
           `Model attempted to use a forbidden path: ${String(item ?? "")}`,
         );
@@ -293,7 +310,11 @@ function validatePathArray(value: unknown, label: string) {
   );
 }
 
-function validateOptionalSearchPathArray(value: unknown, label: string) {
+function validateOptionalSearchPathArray(
+  value: unknown,
+  label: string,
+  policy: ProjectPolicy,
+) {
   if (typeof value === "undefined") {
     return undefined;
   }
@@ -310,7 +331,7 @@ function validateOptionalSearchPathArray(value: unknown, label: string) {
     value.map((item) => {
       const path = normalizeProjectPath(item);
 
-      if (!path || !isAllowedProjectSearchPath(path)) {
+      if (!path || !isAllowedProjectSearchPath(path, policy)) {
         throw new Error(
           `Model attempted to search a forbidden path: ${String(item ?? "")}`,
         );
@@ -321,7 +342,11 @@ function validateOptionalSearchPathArray(value: unknown, label: string) {
   );
 }
 
-function validateProjectFiles(value: unknown, label: string) {
+function validateProjectFiles(
+  value: unknown,
+  label: string,
+  policy: ProjectPolicy,
+) {
   const response = validateProjectFileResponse(
     {
       type: "modify_files",
@@ -329,6 +354,7 @@ function validateProjectFiles(value: unknown, label: string) {
       files: value,
     },
     "modify_files",
+    policy,
   );
 
   if (response.files.length > 16) {
@@ -338,7 +364,7 @@ function validateProjectFiles(value: unknown, label: string) {
   const packageFile = response.files.find((file) => file.path === "package.json");
 
   if (packageFile) {
-    validatePackageJsonContent(packageFile.content);
+    validatePackageJsonContent(packageFile.content, policy);
   }
 
   return response.files;
@@ -567,6 +593,7 @@ function validateGlobPattern(value: unknown) {
 function validateProjectFileResponse<TType extends "write_files" | "modify_files">(
   value: unknown,
   expectedType: TType,
+  policy: ProjectPolicy,
 ): TType extends "write_files" ? GenerateProjectResponse : ModifyProjectResponse {
   if (!isRecord(value)) {
     throw new Error("Invalid model response: root value must be a JSON object.");
@@ -593,7 +620,7 @@ function validateProjectFileResponse<TType extends "write_files" | "modify_files
 
     const path = normalizeProjectPath(file.path);
 
-    if (!path || !isAllowedProjectPath(path)) {
+    if (!path || !isAllowedProjectPath(path, policy)) {
       throw new Error(
         `Model attempted to write a forbidden path: ${String(file.path ?? "")}`,
       );
