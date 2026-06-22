@@ -23,6 +23,7 @@ import {
   getAiProviderDefinition,
   type AiProviderId,
 } from "../../services/aiProviders";
+import { AgentRunPanel } from "./AgentRunPanel";
 
 type ChatPanelProps = {
   activeProvider: AiProviderId;
@@ -216,6 +217,7 @@ export function ChatPanel({
         onScroll={handleMessageScroll}
         ref={scrollContainerRef}
       >
+        <AgentRunPanel />
         {!currentProject ? (
           <div className="grid h-full place-items-center">
             <div className="max-w-[320px] rounded-md border border-dashed border-zinc-800 bg-zinc-900/30 px-4 py-6 text-center text-sm leading-6 text-zinc-500">

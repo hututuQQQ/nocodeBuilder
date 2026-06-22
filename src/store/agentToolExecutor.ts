@@ -42,6 +42,7 @@ export type AgentRunState = {
 };
 
 export type AgentToolResult = {
+  changedFiles?: string[];
   didChangeFiles?: boolean;
   didChangePackage?: boolean;
   observation: AgentObservation;
@@ -252,6 +253,7 @@ async function executeAgentToolCore(
         ensureCurrentProject(store, project.id);
 
         return {
+          changedFiles: changeRecord.files.map((file) => file.path),
           didChangeFiles: true,
           didChangePackage: step.args.path === "package.json",
           observation: createAgentObservation({
@@ -280,6 +282,7 @@ async function executeAgentToolCore(
         ensureCurrentProject(store, project.id);
 
         return {
+          changedFiles: changeRecord.files.map((file) => file.path),
           didChangeFiles: true,
           didChangePackage: step.args.files.some(
             (file) => file.path === "package.json",
@@ -307,6 +310,7 @@ async function executeAgentToolCore(
         ensureCurrentProject(store, project.id);
 
         return {
+          changedFiles: changeRecord.files.map((file) => file.path),
           didChangeFiles: true,
           observation: createAgentObservation({
             content: formatChangeRecordMessage(step.args.summary, changeRecord),

@@ -119,7 +119,7 @@ export type AgentStepResponse =
   | AgentToolCallStep
   | AgentToolBatchStep
   | {
-      type: "finish";
+      type: "finish_candidate";
       summary: string;
       verification?: string;
     };

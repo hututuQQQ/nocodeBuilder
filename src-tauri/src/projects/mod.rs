@@ -54,9 +54,7 @@ pub fn open_project_folder(project_id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn list_project_change_history(
-    project_id: String,
-) -> Result<Vec<ProjectChangeRecord>, String> {
+pub fn list_project_change_history(project_id: String) -> Result<Vec<ProjectChangeRecord>, String> {
     change_commands::list_project_change_history(project_id)
 }
 

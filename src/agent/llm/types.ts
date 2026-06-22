@@ -55,4 +55,5 @@ export type RawChatCompletionResponse = {
 
 export type ChatJsonOptions = {
   onDelta?: (delta: string) => void;
+  signal?: AbortSignal;
 };

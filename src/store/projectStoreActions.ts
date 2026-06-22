@@ -134,18 +134,23 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
           await get().selectProject(nextCurrentProject.id);
         } else {
           set({
-            changeHistory: [],
-            currentProject: null,
+            agentEvents: [],
+            agentRuns: [],
             chatMessages: [],
+            changeHistory: [],
             conversationSummaries: [],
-          currentConversation: null,
-          devServerStatus: "stopped",
-          fileTree: null,
-          selectedChangeFilePath: null,
-          lastDeploymentUrl: null,
+            currentAgentRun: null,
+            currentConversation: null,
+            currentProject: null,
+            currentVerificationReport: null,
+            devServerStatus: "stopped",
+            fileTree: null,
+            lastDeploymentUrl: null,
             previewUrl: null,
+            selectedChangeFilePath: null,
             selectedFileContent: "",
             selectedFilePath: null,
+            selectedSiteNodeId: null,
             showArchivedConversations: false,
           });
         }
@@ -224,8 +229,12 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
       set({
         chatMessages: [],
         changeHistory: [],
+        agentEvents: [],
+        agentRuns: [],
         conversationSummaries: [],
+        currentAgentRun: null,
         currentProject: project,
+        currentVerificationReport: null,
         currentConversation: null,
         devServerStatus: "stopped",
         fileTree: null,
@@ -235,6 +244,7 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
         projectError: null,
         previewUrl: null,
         selectedChangeFilePath: null,
+        selectedSiteNodeId: null,
         selectedFileContent: "",
         selectedFilePath: null,
         showArchivedConversations: false,
@@ -250,6 +260,7 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
 
         set({ fileTree });
         await get().loadProjectChangeHistory(project.id);
+        await get().loadAgentRuns(project.id);
         didLoadFiles = true;
       } catch (error) {
         const message = getProjectErrorMessage(error);

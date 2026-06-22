@@ -25,6 +25,7 @@ export async function requestProjectGeneration({
   onDelta,
   policy = DEFAULT_PROJECT_POLICY,
   projectName,
+  signal,
   userPrompt,
 }: {
   backendContext?: AgentStepContext["backend"];
@@ -32,13 +33,14 @@ export async function requestProjectGeneration({
   onDelta?: (delta: string) => void;
   policy?: ProjectPolicy;
   projectName: string;
+  signal?: AbortSignal;
   userPrompt: string;
 }) {
   const client = createProjectChatClient(config);
 
   const response = await client.chatJson<unknown>(
     buildGenerateProjectMessages(projectName, userPrompt, backendContext, policy),
-    { onDelta },
+    { onDelta, signal },
   );
 
   return validateGeneratedProjectResponse(response, policy);
@@ -49,19 +51,21 @@ export async function requestProjectModification({
   context,
   onDelta,
   policy = DEFAULT_PROJECT_POLICY,
+  signal,
   userRequest,
 }: {
   config: AiProviderConfig;
   context: ModificationContext;
   onDelta?: (delta: string) => void;
   policy?: ProjectPolicy;
+  signal?: AbortSignal;
   userRequest: string;
 }) {
   const client = createProjectChatClient(config);
 
   const response = await client.chatJson<unknown>(
     buildModifyProjectMessages(context, userRequest, policy),
-    { onDelta },
+    { onDelta, signal },
   );
 
   return validateModifyProjectResponse(response, policy);
@@ -72,19 +76,21 @@ export async function requestAgentStep({
   context,
   onDelta,
   policy = DEFAULT_PROJECT_POLICY,
+  signal,
   userRequest,
 }: {
   config: AiProviderConfig;
   context: AgentStepContext;
   onDelta?: (delta: string) => void;
   policy?: ProjectPolicy;
+  signal?: AbortSignal;
   userRequest: string;
 }) {
   const client = createProjectChatClient(config);
 
   const response = await client.chatJson<unknown>(
     buildAgentStepMessages(context, userRequest, policy),
-    { onDelta },
+    { onDelta, signal },
   );
 
   return validateAgentStepResponse(response, policy);

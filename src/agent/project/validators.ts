@@ -91,13 +91,13 @@ export function validateAgentStepResponse(
     };
   }
 
-  if (value.type === "finish") {
+  if (value.type === "finish" || value.type === "finish_candidate") {
     if (typeof value.summary !== "string" || !value.summary.trim()) {
-      throw new Error("Invalid model response: finish.summary is required.");
+      throw new Error("Invalid model response: finish_candidate.summary is required.");
     }
 
     return {
-      type: "finish",
+      type: "finish_candidate",
       summary: value.summary.trim(),
       verification:
         typeof value.verification === "string" && value.verification.trim()
@@ -145,7 +145,7 @@ export function validateAgentStepResponse(
 
   if (value.type !== "tool_call") {
     throw new Error(
-      'Invalid model response: type must be "answer", "tool_call", "tool_calls", or "finish".',
+      'Invalid model response: type must be "answer", "tool_call", "tool_calls", or "finish_candidate".',
     );
   }
 

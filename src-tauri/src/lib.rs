@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
+mod agent_storage;
 mod app_storage;
 mod commands;
 mod credentials;
@@ -234,6 +235,19 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_storage::read_app_storage,
             app_storage::write_app_storage,
+            agent_storage::append_agent_event,
+            agent_storage::create_agent_run,
+            agent_storage::get_agent_run,
+            agent_storage::get_latest_verification_report,
+            agent_storage::list_agent_events,
+            agent_storage::list_agent_runs,
+            agent_storage::read_site_source_map,
+            agent_storage::read_site_spec,
+            agent_storage::save_verification_report,
+            agent_storage::transition_agent_run,
+            agent_storage::write_agent_artifact,
+            agent_storage::write_site_source_map,
+            agent_storage::write_site_spec,
             credentials::has_ai_provider_secret,
             credentials::save_ai_provider_secret,
             llm_chat_completion,

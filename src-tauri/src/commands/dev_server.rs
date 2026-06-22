@@ -193,10 +193,7 @@ pub fn stop_dev_server(
     Ok(())
 }
 
-pub fn stop_all_dev_servers(
-    app: AppHandle,
-    registry: &DevServerRegistry,
-) -> Result<(), String> {
+pub fn stop_all_dev_servers(app: AppHandle, registry: &DevServerRegistry) -> Result<(), String> {
     let servers = {
         let mut servers = lock_servers(&registry)?;
         servers.drain().collect::<Vec<_>>()

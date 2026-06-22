@@ -16,12 +16,8 @@ pub fn read_app_storage(key: String) -> Result<Option<Value>, String> {
         return Ok(None);
     }
 
-    let content = fs::read_to_string(&path).map_err(|error| {
-        format!(
-            "app-storage: failed to read '{}': {error}",
-            path.display()
-        )
-    })?;
+    let content = fs::read_to_string(&path)
+        .map_err(|error| format!("app-storage: failed to read '{}': {error}", path.display()))?;
     let value = serde_json::from_str::<Value>(&content)
         .map_err(|error| format!("app-storage: failed to parse stored JSON: {error}"))?;
 
@@ -45,12 +41,8 @@ pub fn write_app_storage(key: String, value: Value) -> Result<(), String> {
     let content = serde_json::to_string_pretty(&value)
         .map_err(|error| format!("app-storage: failed to serialize JSON: {error}"))?;
 
-    fs::write(&path, content).map_err(|error| {
-        format!(
-            "app-storage: failed to write '{}': {error}",
-            path.display()
-        )
-    })
+    fs::write(&path, content)
+        .map_err(|error| format!("app-storage: failed to write '{}': {error}", path.display()))
 }
 
 fn storage_file_path(key: &str) -> Result<PathBuf, String> {

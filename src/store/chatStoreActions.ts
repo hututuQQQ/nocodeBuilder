@@ -43,20 +43,20 @@ export function createChatActions({ get, set }: StoreAccess): ChatActions {
         get().isModifyingProject ||
         get().isGeneratingProject
       ) {
-        const conversation = appendConversationMessage(
-          store,
-          createChatMessage(
-            "assistant",
-            "I am still applying the previous change. Please wait for it to finish before sending another request.",
-          ),
-        );
+        const userMessage = createChatMessage("user", message);
+        const conversation = appendConversationMessage(store, userMessage);
         void persistConversation(store, conversation);
+        await get().sendAgentSteering(message);
 
         return;
       }
 
       if (get().changeHistory.length > 0) {
-        await get().acceptAllChanges();
+        set((state) => ({
+          terminalLogs: appendLogs(state.terminalLogs, [
+            "[chat] Continuing from the current draft; pending changes were not auto-accepted.",
+          ]),
+        }));
       }
 
       const userMessage = createChatMessage("user", message);

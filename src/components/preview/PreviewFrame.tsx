@@ -1,4 +1,6 @@
+import { useEffect } from "react";
 import { MonitorPlay } from "lucide-react";
+import { useAppStore } from "../../store/appStore";
 import { PreviewTab } from "./previewPanelTypes";
 
 type PreviewFrameProps = {
@@ -14,6 +16,23 @@ export function PreviewFrame({
   deploymentRefreshKey,
   previewRefreshKey,
 }: PreviewFrameProps) {
+  const setSelectedSiteNode = useAppStore((state) => state.setSelectedSiteNode);
+
+  useEffect(() => {
+    function handlePreviewMessage(event: MessageEvent) {
+      if (!isPreviewBridgeMessage(event.data)) {
+        return;
+      }
+
+      if (event.data.type === "node-selected") {
+        setSelectedSiteNode(event.data.nodeId);
+      }
+    }
+
+    window.addEventListener("message", handlePreviewMessage);
+    return () => window.removeEventListener("message", handlePreviewMessage);
+  }, [setSelectedSiteNode]);
+
   return (
     <div className="grid min-h-0 flex-1 place-items-center p-5">
       {activePreviewUrl ? (
@@ -41,5 +60,22 @@ export function PreviewFrame({
         </div>
       )}
     </div>
+  );
+}
+
+function isPreviewBridgeMessage(
+  value: unknown,
+): value is { nodeId: string; source: "nocode-builder-preview"; type: "node-selected" } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+
+  return (
+    record.source === "nocode-builder-preview" &&
+    record.type === "node-selected" &&
+    typeof record.nodeId === "string" &&
+    record.nodeId.length > 0
   );
 }
