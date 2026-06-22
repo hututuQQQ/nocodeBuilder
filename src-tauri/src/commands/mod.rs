@@ -2,6 +2,7 @@ mod command_runner;
 mod command_whitelist;
 mod dev_server;
 mod events;
+mod node_runtime;
 mod preview;
 mod process;
 mod supabase;
