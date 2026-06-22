@@ -1,4 +1,12 @@
 import type { ChatMessage as LlmChatMessage } from "../llm/types";
+import {
+  DEFAULT_PROJECT_POLICY,
+  formatAllowedPathsForPrompt,
+  formatCorePackageVersionRule,
+  formatPackageJsonRequirementsForPrompt,
+  formatRequiredFilesForPrompt,
+  type ProjectPolicy,
+} from "./projectPolicy";
 import type { AgentStepContext, ModificationContext } from "./types";
 import { formatAgentToolListForPrompt } from "./toolRegistry";
 
@@ -8,14 +16,15 @@ export function buildGenerateProjectMessages(
   projectName: string,
   userPrompt: string,
   backendContext?: AgentStepContext["backend"],
+  policy: ProjectPolicy = DEFAULT_PROJECT_POLICY,
 ): LlmChatMessage[] {
   return [
     {
       role: "system",
       content: [
-        "You are a senior full-stack Next.js App Router project generator.",
+        policy.generatorRole,
         "Generate a complete, runnable web project from the user's prompt.",
-        "The project must use Next.js App Router, React, TypeScript, and Tailwind CSS.",
+        policy.stackRequirement,
         "Return complete file contents, not diffs.",
         "You must output JSON only. Do not output Markdown or explanations.",
         "Keep the project deployable on Vercel without extra manual file edits.",
@@ -35,37 +44,19 @@ export function buildGenerateProjectMessages(
         "The response shape must strictly match:",
         '{"type":"write_files","summary":"string","files":[{"path":"package.json","content":"string"}]}',
         "",
-        "Required files:",
-        "- package.json",
-        "- app/layout.tsx",
-        "- app/page.tsx",
-        "- app/globals.css",
+        ...formatRequiredFilesForPrompt(policy),
         "",
-        "package.json requirements:",
-        "- scripts.dev must run next dev",
-        "- scripts.build must run next build",
-        "- scripts.start must run next start",
-        "- dependencies must include at least: next 14.2.35, react 18.3.1, react-dom 18.3.1",
-        "- devDependencies must include at least: typescript 5.4.5, tailwindcss 3.4.17, postcss 8.4.49, autoprefixer 10.4.20, @types/node 20.14.11, @types/react 18.3.3, @types/react-dom 18.3.0",
+        ...formatPackageJsonRequirementsForPrompt(policy),
         "- Extra dependencies are allowed only when the feature needs them. Prefer native fetch for Supabase REST route handlers to avoid unnecessary dependencies.",
-        "- Dependency versions must be pinned exact strings. Do not use ^, ~, >=, latest, *, x ranges, or tag names.",
         "",
-        "Allowed paths:",
-        "- Root config files: package.json, next.config.*, postcss.config.*, tailwind.config.*, tsconfig.json, vercel.json, middleware.ts",
-        "- app/**",
-        "- components/**",
-        "- lib/**",
-        "- data/**",
-        "- public/** text assets such as .svg, .txt, .json, .md",
-        "- Files must be text files: .ts, .tsx, .js, .jsx, .mjs, .cjs, .css, .json, .md, .txt, .yaml, .yml, or .svg",
-        "- Forbidden: node_modules, .next, dist, .env files, absolute paths, and ../ paths",
+        ...formatAllowedPathsForPrompt("Allowed paths:", policy),
       ].join("\n"),
     },
     {
       role: "user",
       content: JSON.stringify(
         {
-          task: "Generate a complete Next.js App Router project.",
+          task: policy.generationTask,
           backendContext: backendContext ?? null,
           projectName,
           userPrompt,
@@ -80,13 +71,14 @@ export function buildGenerateProjectMessages(
 export function buildModifyProjectMessages(
   context: ModificationContext,
   userRequest: string,
+  policy: ProjectPolicy = DEFAULT_PROJECT_POLICY,
 ): LlmChatMessage[] {
   return [
     {
       role: "system",
       content: [
-        "You are a full-stack Next.js App Router project modification agent.",
-        "The current project is a generated Next.js App Router project.",
+        policy.modifierRole,
+        `The current project is a generated ${policy.label} project.`,
         "You can modify frontend, App Router route handlers, server-only lib files, and project text assets inside the current project.",
         "You must return complete file contents based on the user request, not diffs.",
         "You must output JSON only. Do not output Markdown or explanations.",
@@ -100,7 +92,7 @@ export function buildModifyProjectMessages(
         "If you add or remove dependencies, return a complete updated package.json.",
         "If you need a dependency, add it to package.json with an exact pinned version. Never run install commands with package names.",
         "package.json must keep pinned exact dependency versions. Do not use ^, ~, >=, latest, *, x ranges, or tag names.",
-        "Keep the core versions exactly pinned as: next 14.2.35, react 18.3.1, react-dom 18.3.1, typescript 5.4.5, tailwindcss 3.4.17, postcss 8.4.49, autoprefixer 10.4.20, @types/node 20.14.11, @types/react 18.3.3, @types/react-dom 18.3.0.",
+        formatCorePackageVersionRule(policy),
         "Do not create .env, .env.local, or .env.example files unless the user explicitly asks for them.",
         "Never include real API keys, secrets, tokens, or credentials in generated files.",
         "Match the user's language for the response summary. If the user request is Chinese, write summary in Simplified Chinese.",
@@ -109,22 +101,14 @@ export function buildModifyProjectMessages(
         "The response shape must strictly match:",
         '{"type":"modify_files","summary":"string","files":[{"path":"app/page.tsx","content":"string"}]}',
         "",
-        "Path restrictions:",
-        "- You may modify package.json and root Next/Tailwind/TypeScript/Vercel config files",
-        "- You may modify app/**",
-        "- You may modify components/**",
-        "- You may modify lib/**",
-        "- You may modify data/**",
-        "- You may modify public/** text assets such as .svg, .txt, .json, .md",
-        "- Files must be text files: .ts, .tsx, .js, .jsx, .mjs, .cjs, .css, .json, .md, .txt, .yaml, .yml, or .svg",
-        "- Forbidden: node_modules, .next, dist, .env files, files outside the project, absolute paths, and ../ paths",
+        ...formatAllowedPathsForPrompt("Path restrictions:", policy),
       ].join("\n"),
     },
     {
       role: "user",
       content: JSON.stringify(
         {
-          task: "Modify the existing Next.js project according to the user request.",
+          task: policy.modificationTask,
           userRequest,
           projectContext: {
             backend: context.backend ?? null,
@@ -139,7 +123,7 @@ export function buildModifyProjectMessages(
             "Return only the files that need to be written.",
             "Each returned file must contain the complete final file content.",
             "Preserve useful existing code and content unless the user asked to replace it.",
-            "Prefer React, TypeScript, Tailwind CSS, Next.js App Router, and lucide-react when available.",
+            policy.preferredStackInstruction,
             "The project must keep compiling after the change.",
             "Write the summary in the same language as userRequest.",
             "Use the same language as userRequest for newly created visible UI text when that is reasonable.",
@@ -155,12 +139,13 @@ export function buildModifyProjectMessages(
 export function buildAgentStepMessages(
   context: AgentStepContext,
   userRequest: string,
+  policy: ProjectPolicy = DEFAULT_PROJECT_POLICY,
 ): LlmChatMessage[] {
   return [
     {
       role: "system",
       content: [
-        "You are a careful project agent for a generated Next.js App Router app.",
+        policy.agentRole,
         "You operate in a plan-act-observe loop. You may only act by returning one JSON object that matches the protocol.",
         "Do not claim that a tool succeeded until an observation says it succeeded.",
         "Choose the smallest useful next step. If you need information, call read/list/search tools. If the task is complete, return finish.",
@@ -185,7 +170,7 @@ export function buildAgentStepMessages(
         "If Supabase is not configured, make the app ready for backend wiring with clear server-side placeholders and avoid pretending mock data is persisted.",
         "If the user explicitly asks for AI, chat, assistant, agent, or content generation features, use the Vercel AI SDK with the `ai` package and an appropriate provider package inside App Router route handlers.",
         "If you modify package.json, keep pinned exact dependency versions. Do not use ^, ~, >=, latest, *, x ranges, or tag names.",
-        "Keep the core versions exactly pinned as: next 14.2.35, react 18.3.1, react-dom 18.3.1, typescript 5.4.5, tailwindcss 3.4.17, postcss 8.4.49, autoprefixer 10.4.20, @types/node 20.14.11, @types/react 18.3.3, @types/react-dom 18.3.0.",
+        formatCorePackageVersionRule(policy),
         "Never run npm install, pnpm install, npm add, pnpm add, or similar commands with package names. To add packages, edit package.json; the host automatically installs after package.json changes.",
         "Prefer native fetch for Supabase REST route handlers to avoid unnecessary dependencies. Add dependencies only when truly needed.",
         "Match the user's language for summaries and newly created visible UI text when reasonable.",
@@ -193,15 +178,7 @@ export function buildAgentStepMessages(
         "Available tools:",
         formatAgentToolListForPrompt(),
         "",
-        "Allowed file paths:",
-        "- Root config files: package.json, next.config.*, postcss.config.*, tailwind.config.*, tsconfig.json, vercel.json, middleware.ts",
-        "- app/**",
-        "- components/**",
-        "- lib/**",
-        "- data/**",
-        "- public/** text assets such as .svg, .txt, .json, .md",
-        "- Files must be text files: .ts, .tsx, .js, .jsx, .mjs, .cjs, .css, .json, .md, .txt, .yaml, .yml, or .svg",
-        "- Forbidden: node_modules, .next, dist, .env files, files outside the project, absolute paths, and ../ paths",
+        ...formatAllowedPathsForPrompt("Allowed file paths:", policy),
         "",
         "Response protocol:",
         '{"type":"answer","message":"string"}',
