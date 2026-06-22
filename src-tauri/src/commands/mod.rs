@@ -28,12 +28,18 @@ pub async fn run_command(
 }
 
 #[tauri::command]
-pub fn start_dev_server(
+pub async fn start_dev_server(
     app: AppHandle,
     registry: State<'_, DevServerRegistry>,
     project_id: String,
 ) -> Result<DevServerInfo, String> {
-    dev_server::start_dev_server(app, registry, project_id)
+    let registry = registry.inner().clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        dev_server::start_dev_server(app, registry, project_id)
+    })
+    .await
+    .map_err(|error| format!("command: failed to join dev server task: {error}"))?
 }
 
 #[tauri::command]
@@ -42,14 +48,14 @@ pub fn stop_dev_server(
     registry: State<'_, DevServerRegistry>,
     project_id: String,
 ) -> Result<(), String> {
-    dev_server::stop_dev_server(app, registry, project_id)
+    dev_server::stop_dev_server(app, registry.inner(), project_id)
 }
 
 pub fn stop_all_dev_servers(
     app: AppHandle,
     registry: State<'_, DevServerRegistry>,
 ) -> Result<(), String> {
-    dev_server::stop_all_dev_servers(app, registry)
+    dev_server::stop_all_dev_servers(app, registry.inner())
 }
 
 #[tauri::command]

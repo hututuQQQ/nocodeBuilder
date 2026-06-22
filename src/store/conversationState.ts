@@ -62,12 +62,37 @@ export function replaceConversationMessage(
     >
   > = {},
 ) {
-  return updateConversationMessage(store, messageId, (message) => ({
-    ...message,
-    ...options,
-    content,
-    isStreaming,
-  }));
+  return updateCurrentConversationMessages(store, (messages) => {
+    let didReplace = false;
+    const nextMessages = messages.map((message) => {
+      if (message.id !== messageId) {
+        return message;
+      }
+
+      didReplace = true;
+      return {
+        ...message,
+        ...options,
+        content,
+        isStreaming,
+      };
+    });
+
+    if (didReplace) {
+      return nextMessages;
+    }
+
+    return [
+      ...nextMessages,
+      {
+        ...options,
+        content,
+        id: messageId,
+        isStreaming,
+        role: "assistant",
+      },
+    ];
+  });
 }
 
 export function updateConversationMessage(

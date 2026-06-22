@@ -13,6 +13,7 @@ import {
 import type { StoreAccess } from "./storeAccess";
 
 const MAX_ACTIVITY_OUTPUT_PREVIEW_LINES = 6;
+const MAX_STREAMING_MODEL_CONTENT_CHARS = 20_000;
 
 export type AgentStreamController = {
   addActivity: (activity: AgentActivityInput) => string;
@@ -63,6 +64,7 @@ export function startStreamingAgentMessage(
   });
   let receivedChars = 0;
   let lastUpdateAt = 0;
+  let streamedContent = "";
 
   appendConversationMessage(store, message);
 
@@ -126,7 +128,48 @@ export function startStreamingAgentMessage(
     }));
   }
 
+  function appendModelDelta(delta: string) {
+    if (!delta) {
+      return;
+    }
+
+    receivedChars += delta.length;
+    streamedContent += delta;
+    const now = Date.now();
+
+    if (now - lastUpdateAt <= 120) {
+      return;
+    }
+
+    lastUpdateAt = now;
+    updateConversationMessage(store, message.id, (currentMessage) => ({
+      ...currentMessage,
+      content: formatStreamingModelContent(streamedContent),
+      isStreaming: true,
+    }));
+    update("Model is planning the next step.");
+  }
+
+  function flushModelContent() {
+    if (!streamedContent) {
+      return;
+    }
+
+    updateConversationMessage(store, message.id, (currentMessage) => ({
+      ...currentMessage,
+      content: formatStreamingModelContent(streamedContent),
+      isStreaming: true,
+    }));
+  }
+
   function finish(status: ChatActivityStatus, content: string) {
+    flushModelContent();
+
+    const finalContent =
+      content.trim() ||
+      formatStreamingModelContent(streamedContent).trim() ||
+      "The agent finished, but the model did not return a visible message.";
+
     updateActivity(thinkingActivityId, {
       detail: status === "failed" ? "Workflow failed." : "Workflow complete.",
       finishActivity: true,
@@ -136,7 +179,7 @@ export function startStreamingAgentMessage(
       .get()
       .chatMessages.find((chatMessage) => chatMessage.id === message.id)
       ?.activities;
-    replaceConversationMessage(store, message.id, content, false, {
+    replaceConversationMessage(store, message.id, finalContent, false, {
       activities,
       activitiesCollapsed: true,
       activitySummary: summarizeActivities(activities ?? []),
@@ -149,24 +192,8 @@ export function startStreamingAgentMessage(
     completeWithTypewriter: (content) => finish("succeeded", content),
     failWithTypewriter: (content) => finish("failed", content),
     messageId: message.id,
-    onDelta: (delta) => {
-      receivedChars += delta.length;
-      const now = Date.now();
-
-      if (now - lastUpdateAt > 180) {
-        lastUpdateAt = now;
-        update("Model is planning the next step.");
-      }
-    },
-    onModelDelta: (delta) => {
-      receivedChars += delta.length;
-      const now = Date.now();
-
-      if (now - lastUpdateAt > 180) {
-        lastUpdateAt = now;
-        update("Model is planning the next step.");
-      }
-    },
+    onDelta: appendModelDelta,
+    onModelDelta: appendModelDelta,
     setStatus: (status) => update(status),
     updateActivity,
   };
@@ -197,6 +224,17 @@ function formatStreamingStatus(status: string, receivedChars: number) {
   }
 
   return `${status}\nReceived ${receivedChars.toLocaleString()} internal characters.`;
+}
+
+function formatStreamingModelContent(content: string) {
+  if (content.length <= MAX_STREAMING_MODEL_CONTENT_CHARS) {
+    return content;
+  }
+
+  return [
+    "[Model stream truncated. Showing latest output.]",
+    content.slice(-MAX_STREAMING_MODEL_CONTENT_CHARS),
+  ].join("\n");
 }
 
 function createActivityId(kind: ChatActivityKind) {

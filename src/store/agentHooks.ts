@@ -34,7 +34,7 @@ export function runPostToolUseHooks(
 
   if (result.didChangeFiles) {
     notes.push(
-      "PostToolUse: refreshed file state. Preview updates only if it is already running.",
+      "PostToolUse: refreshed file state. Preview updates after the final verified change.",
     );
   }
 

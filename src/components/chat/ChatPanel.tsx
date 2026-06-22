@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 import {
   Bot,
   Brain,
@@ -108,13 +108,29 @@ export function ChatPanel({
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    submitDraft();
+  }
 
+  function submitDraft() {
     if (!canSend) {
       return;
     }
 
     void sendMessage(draft);
     setDraft("");
+  }
+
+  function handleDraftKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (
+      event.key !== "Enter" ||
+      event.shiftKey ||
+      event.nativeEvent.isComposing
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    submitDraft();
   }
 
   async function handleChangeModel(selection: ConfiguredModelOption) {
@@ -236,6 +252,7 @@ export function ChatPanel({
         <textarea
           className="h-20 min-h-20 flex-1 resize-none rounded-md border border-zinc-800 bg-zinc-900 px-3 py-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/10"
           disabled={!canChat || isBusy}
+          onKeyDown={handleDraftKeyDown}
           onChange={(event) => setDraft(event.currentTarget.value)}
           placeholder={
             !currentProject
@@ -296,6 +313,14 @@ function AssistantMessage({
 }) {
   const hasContent = message.content.trim().length > 0;
   const [isExpanded, setIsExpanded] = useState(!message.activitiesCollapsed);
+  const shouldCollapseContent = shouldCollapseAssistantContent(message);
+  const [isContentExpanded, setIsContentExpanded] = useState(
+    !shouldCollapseContent,
+  );
+  const isContentCollapsed = shouldCollapseContent && !isContentExpanded;
+  const displayedContent = isContentCollapsed
+    ? formatCollapsedAssistantContent(message.content, Boolean(message.isStreaming))
+    : message.content;
   const activities = message.activities ?? [];
   const shouldShowActivitySummary =
     activities.length > 0 && message.activitiesCollapsed;
@@ -307,6 +332,10 @@ function AssistantMessage({
       setIsExpanded(false);
     }
   }, [message.activitiesCollapsed, message.id]);
+
+  useEffect(() => {
+    setIsContentExpanded(!shouldCollapseContent);
+  }, [message.id, shouldCollapseContent]);
 
   return (
     <article className="max-w-[92%] text-sm leading-6 text-zinc-300">
@@ -338,11 +367,18 @@ function AssistantMessage({
         </div>
       ) : null}
       {hasContent ? (
-        <div className="mt-3 whitespace-pre-wrap rounded-md border border-zinc-800 bg-zinc-900/70 px-4 py-3">
+        <div
+          className={`relative mt-3 whitespace-pre-wrap rounded-md border border-zinc-800 bg-zinc-900/70 px-4 py-3 ${
+            isContentCollapsed ? "max-h-44 overflow-hidden" : ""
+          }`}
+        >
           <TypewriterText
             active={Boolean(message.animateContent)}
-            text={message.content}
+            text={displayedContent}
           />
+          {isContentCollapsed ? (
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-14 bg-gradient-to-t from-zinc-900 to-transparent" />
+          ) : null}
         </div>
       ) : message.isStreaming && !message.activities?.length ? (
         <div className="mt-3 flex items-center gap-2 rounded-md border border-blue-400/30 bg-blue-400/10 px-4 py-3 text-blue-100">
@@ -350,8 +386,96 @@ function AssistantMessage({
           Working
         </div>
       ) : null}
+      {hasContent && shouldCollapseContent ? (
+        <button
+          className="mt-2 flex w-full max-w-full items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950/70 px-3 py-2 text-left text-xs text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-200"
+          onClick={() => setIsContentExpanded((current) => !current)}
+          type="button"
+        >
+          {message.isStreaming ? (
+            <Loader2 size={14} className="animate-spin" aria-hidden="true" />
+          ) : isContentExpanded ? (
+            <ChevronDown size={14} aria-hidden="true" />
+          ) : (
+            <ChevronRight size={14} aria-hidden="true" />
+          )}
+          <span className="truncate">
+            {isContentExpanded
+              ? "Collapse generated output"
+              : summarizeAssistantContent(message.content)}
+          </span>
+        </button>
+      ) : null}
     </article>
   );
+}
+
+function shouldCollapseAssistantContent(message: ChatMessage) {
+  if (!message.content.trim()) {
+    return false;
+  }
+
+  const lineCount = countContentLines(message.content);
+
+  return (
+    message.isStreaming ||
+    message.content.length > 1200 ||
+    lineCount > 18 ||
+    message.content.includes("Changed files:") ||
+    message.content.includes("Diff preview:") ||
+    /^[-+]{3} [ab]\//m.test(message.content) ||
+    /```/.test(message.content)
+  );
+}
+
+function summarizeAssistantContent(content: string) {
+  const lineCount = countContentLines(content);
+  const charCount = content.length.toLocaleString();
+
+  return `Generated output: ${lineCount.toLocaleString()} line${
+    lineCount === 1 ? "" : "s"
+  }, ${charCount} chars`;
+}
+
+function formatCollapsedAssistantContent(content: string, isStreaming: boolean) {
+  if (!isStreaming) {
+    return trimCollapsedContentHead(content);
+  }
+
+  const latest = trimCollapsedContentTail(content);
+
+  if (latest === content) {
+    return latest;
+  }
+
+  return [
+    "[Streaming latest output]",
+    latest,
+  ].join("\n");
+}
+
+function trimCollapsedContentHead(content: string) {
+  const maxChars = 2_400;
+
+  if (content.length <= maxChars) {
+    return content;
+  }
+
+  return `${content.slice(0, maxChars)}\n\n[Output continues. Expand to view all.]`;
+}
+
+function trimCollapsedContentTail(content: string) {
+  const maxChars = 2_800;
+
+  if (content.length <= maxChars) {
+    return content;
+  }
+
+  return content.slice(-maxChars);
+}
+
+function countContentLines(content: string) {
+  return Math.max(1, content.split(/\r?\n/).length);
 }
 
 function summarizeChatActivities(activities: ChatActivity[]) {

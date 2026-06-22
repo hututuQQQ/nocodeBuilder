@@ -151,6 +151,7 @@ export type ProjectChatMessage = {
 
 export type AgentStepContext = {
   backend: ProjectBackendContext | null;
+  diagnostics: string | null;
   devServerStatus: string;
   fileTree: string | null;
   memory: ProjectMemoryContext | null;

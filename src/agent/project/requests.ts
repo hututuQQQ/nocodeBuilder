@@ -93,7 +93,6 @@ export async function requestAgentStep({
 function createProjectChatClient(config: AiProviderConfig) {
   return new ChatCompletionClient({
     provider: config.provider,
-    apiKey: config.apiKey,
     baseUrl: config.baseUrl,
     model: config.model,
   });
