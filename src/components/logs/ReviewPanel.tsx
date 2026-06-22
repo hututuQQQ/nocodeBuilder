@@ -65,7 +65,7 @@ export function ReviewPanel({
 
   return (
     <div className="grid h-full min-h-[180px] min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] overflow-hidden rounded-md border border-zinc-800 bg-zinc-950">
-      <header className="flex min-h-12 items-center gap-3 border-b border-zinc-800 px-3 py-2">
+      <header className="flex min-h-12 flex-wrap items-center gap-3 border-b border-zinc-800 px-3 py-2">
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-medium text-zinc-100">
             Pending review
@@ -107,7 +107,7 @@ export function ReviewPanel({
         <div className="mb-2 text-xs font-medium text-zinc-500">
           Changed files
         </div>
-        <div className="flex min-w-0 gap-2 overflow-x-auto pb-1">
+        <div className="flex min-w-0 gap-2 overflow-x-auto overscroll-x-contain pb-1 [scrollbar-gutter:stable]">
           {pendingFiles.map((file) => (
             <button
               className={`flex min-h-12 min-w-[190px] max-w-[280px] items-start gap-2 rounded-md border px-2.5 py-2 text-left text-xs transition ${
@@ -160,21 +160,21 @@ function DiffPane({
   const languageLabel = getLanguageLabel(language, file.path);
 
   return (
-    <div className="grid min-h-0 min-w-0 grid-rows-[40px_minmax(0,1fr)]">
-      <div className="flex items-center gap-3 border-b border-zinc-800 px-3">
+    <div className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden">
+      <div className="flex min-w-0 flex-wrap items-center gap-2 border-b border-zinc-800 px-3 py-1.5">
         <div className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-300">
-          {file.path}
+            {file.path}
         </div>
-        <span className="shrink-0 text-xs text-zinc-500">
-          {file.action} +{file.additions} / -{file.deletions}
+        <span className="shrink-0 rounded border border-zinc-800 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-500">
+            {file.action} +{file.additions} / -{file.deletions}
         </span>
         {languageLabel ? (
-          <span className="shrink-0 rounded border border-zinc-800 px-2 py-1 text-[10px] uppercase tracking-wide text-zinc-500">
+          <span className="shrink-0 rounded border border-zinc-800 bg-zinc-900 px-2 py-1 text-[10px] uppercase tracking-wide text-zinc-500">
             {languageLabel}
           </span>
         ) : null}
         <button
-          className="flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-emerald-400/25 bg-emerald-400/10 px-2 text-xs text-emerald-100 transition hover:border-emerald-300/50 disabled:cursor-not-allowed disabled:text-zinc-600"
+          className="ml-auto flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-emerald-400/25 bg-emerald-400/10 px-2 text-xs text-emerald-100 transition hover:border-emerald-300/50 disabled:cursor-not-allowed disabled:text-zinc-600"
           disabled={isRevertingChange}
           onClick={() => void onAcceptFile(file.path)}
           type="button"
@@ -196,7 +196,7 @@ function DiffPane({
           Revert file
         </button>
       </div>
-      <div className="min-h-0 min-w-0">
+      <div className="min-h-0 min-w-0 overflow-hidden">
         <DiffEditor
           height="100%"
           language={language}
@@ -219,9 +219,15 @@ function DiffPane({
             originalEditable: false,
             readOnly: true,
             renderSideBySide: true,
+            scrollbar: {
+              alwaysConsumeMouseWheel: false,
+              horizontal: "visible",
+              useShadows: true,
+              vertical: "visible",
+            },
             scrollBeyondLastLine: false,
             smoothScrolling: true,
-            wordWrap: "on",
+            wordWrap: "off",
           }}
           theme="nocode-dark"
         />

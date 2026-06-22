@@ -162,7 +162,11 @@ export function LogsPanel() {
         ) : null}
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-4">
+      <div
+        className={`min-h-0 flex-1 p-4 ${
+          activeTab === "review" ? "overflow-hidden" : "overflow-y-auto"
+        }`}
+      >
         {activeTab === "files" ? (
           <FilesWorkspace
             currentProjectName={currentProject?.name ?? null}
