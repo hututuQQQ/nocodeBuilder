@@ -6,6 +6,10 @@ import {
   requestAgentStep,
   requestProjectGeneration,
 } from "../agent/projectModifier";
+import {
+  buildProjectBackendContext,
+  hasBackendIntent,
+} from "../agent/project/backendContext";
 import { buildDynamicAgentContext } from "../agent/project/memory";
 import { keyStore } from "../services/keyStore";
 import {
@@ -68,7 +72,11 @@ export async function generateInitialProject(
       throw new Error("Configure your AI provider first.");
     }
 
+    const backendContext = await buildProjectBackendContext(project.id, {
+      includeSchema: hasBackendIntent(projectPrompt),
+    });
     const response = await requestProjectGeneration({
+      backendContext,
       config,
       onDelta: stream.onDelta,
       projectName: project.name,
@@ -192,7 +200,11 @@ export async function modifyCurrentProject(
         "No editable files found. Generating a full project.",
       );
 
+      const backendContext = await buildProjectBackendContext(project.id, {
+        includeSchema: hasBackendIntent(userRequest),
+      });
       const response = await requestProjectGeneration({
+        backendContext,
         config,
         onDelta: activeStream.onDelta,
         projectName: project.name,
@@ -242,18 +254,47 @@ export async function modifyCurrentProject(
         `Planning step ${stepIndex}.`,
       );
 
-      const step = await requestAgentStep({
-        config,
-        context: buildAgentStepContext(
-          store,
-          project,
-          observations,
-          runState,
+      let step: AgentStepResponse;
+
+      try {
+        step = await requestAgentStep({
+          config,
+          context: await buildAgentStepContext(
+            store,
+            project,
+            observations,
+            runState,
+            userRequest,
+          ),
+          onDelta: activeStream.onDelta,
           userRequest,
-        ),
-        onDelta: activeStream.onDelta,
-        userRequest,
-      });
+        });
+      } catch (error) {
+        const message = getProjectErrorMessage(error);
+
+        if (!isRecoverableAgentPlanningError(message)) {
+          throw error;
+        }
+
+        const observation: AgentObservation = {
+          content: [
+            message,
+            "Do not run install commands with package names. If a dependency is needed, edit package.json with an exact pinned version; the host will run the project install command automatically after package.json changes.",
+          ].join("\n"),
+          ok: false,
+          step: observations.length + 1,
+          summary: "Agent proposed a forbidden package install command.",
+          tool: "run_command",
+        };
+        observations.push(observation);
+        appendTerminalLog(store, `[agent:error] ${observation.summary}`);
+        updateAgentStatus(
+          activeStream,
+          statusLines,
+          "The agent proposed a forbidden install command. Asking it to repair the plan.",
+        );
+        continue;
+      }
       ensureCurrentProject(store, project.id);
 
       if (step.type === "answer") {
@@ -433,7 +474,7 @@ export async function modifyCurrentProject(
   }
 }
 
-function buildAgentStepContext(
+async function buildAgentStepContext(
   store: StoreAccess,
   project: ProjectInfo,
   observations: AgentObservation[],
@@ -449,6 +490,13 @@ function buildAgentStepContext(
       role: message.role,
       content: message.content,
     }));
+  const backendIntentText = [
+    userRequest,
+    ...recentMessages.map((message) => message.content),
+  ].join("\n");
+  const backendContext = await buildProjectBackendContext(project.id, {
+    includeSchema: hasBackendIntent(backendIntentText),
+  });
   const dynamicContext = buildDynamicAgentContext({
     changeHistory: state.changeHistory,
     fileTree: state.fileTree,
@@ -460,6 +508,7 @@ function buildAgentStepContext(
   });
 
   return {
+    backend: backendContext,
     devServerStatus: state.devServerStatus,
     fileTree: state.fileTree ? formatProjectFileTree(state.fileTree) : null,
     memory: dynamicContext.memory,
@@ -480,6 +529,10 @@ function formatAgentStepLabel(
   }
 
   return formatAgentToolLabel(step);
+}
+
+function isRecoverableAgentPlanningError(message: string) {
+  return message.includes("Model attempted to run a forbidden command:");
 }
 
 function formatAgentFinishMessage(

@@ -36,7 +36,7 @@ export function PreviewFrame({
             No preview running
           </p>
           <p className="mt-1 text-xs text-zinc-600">
-            Generated Next.js apps will appear here.
+            Start preview when you want to load the generated app.
           </p>
         </div>
       )}

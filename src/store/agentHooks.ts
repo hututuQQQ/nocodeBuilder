@@ -33,7 +33,9 @@ export function runPostToolUseHooks(
   const notes: string[] = [];
 
   if (result.didChangeFiles) {
-    notes.push("PostToolUse: refreshed file state and preview after file changes.");
+    notes.push(
+      "PostToolUse: refreshed file state. Preview updates only if it is already running.",
+    );
   }
 
   if (step.tool === "edit_file" || step.tool === "write_files") {

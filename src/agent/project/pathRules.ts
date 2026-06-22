@@ -34,6 +34,8 @@ const ALLOWED_TEXT_FILE_EXTENSIONS = [
   ".ts",
   ".tsx",
   ".txt",
+  ".yaml",
+  ".yml",
 ];
 
 export function formatProjectFileTree(fileTree: FileTree) {

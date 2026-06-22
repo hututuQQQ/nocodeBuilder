@@ -52,7 +52,7 @@ export function VercelDeployDialog({
               Vercel Deploy
             </h3>
             <p className="mt-1 text-xs text-zinc-500">
-              Token stays in builder settings and is never written to project files.
+              Token is saved to the current project .env file.
             </p>
           </div>
           <button
@@ -165,3 +165,5 @@ export function VercelDeployDialog({
     </div>
   );
 }
+
+

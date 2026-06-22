@@ -10,15 +10,18 @@ const MAX_RECENT_MESSAGES = 8;
 const MAX_CONTEXT_FILE_CHARS = 80_000;
 
 export function buildModificationContext({
+  backend,
   chatMessages,
   fileContents,
   fileTree,
 }: {
+  backend?: ModificationContext["backend"];
   chatMessages: ProjectChatMessage[];
   fileContents: ProjectContextFile[];
   fileTree: FileTree;
 }): ModificationContext {
   return {
+    backend,
     fileTree: formatProjectFileTree(fileTree),
     files: fileContents.map((file) => ({
       path: file.path,

@@ -4,6 +4,7 @@ import {
   AgentToolCallStep,
   formatProjectFileTree,
 } from "../agent/projectModifier";
+import { applySupabaseSchema } from "../agent/project/backendContext";
 import {
   getAllowedFilePaths,
 } from "../agent/project/pathRules";
@@ -333,6 +334,19 @@ async function executeAgentToolCore(
             observationStep,
             "Ran requested command.",
           ),
+        };
+      }
+      case "apply_supabase_schema": {
+        const result = await applySupabaseSchema(project.id, step.args);
+
+        return {
+          observation: createAgentObservation({
+            content: JSON.stringify(result, null, 2),
+            ok: true,
+            step: observationStep,
+            summary: step.args.summary,
+            tool: step.tool,
+          }),
         };
       }
       case "start_dev_server": {
@@ -736,6 +750,8 @@ export function formatAgentToolLabel(step: AgentToolCallStep) {
       return `delete_files ${step.args.paths.join(", ")}`;
     case "run_command":
       return `run_command ${step.args.command}`;
+    case "apply_supabase_schema":
+      return `apply_supabase_schema ${step.args.tables.map((table) => table.name).join(", ")}`;
     default:
       return step.tool;
   }

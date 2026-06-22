@@ -56,7 +56,11 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
         return;
       }
 
-      await get().startDevServer(project.id);
+      set((state) => ({
+        terminalLogs: appendLogs(state.terminalLogs, [
+          `[project] ${project.name} is ready. Start preview manually when needed.`,
+        ]),
+      }));
     },
 
     createProject: async (projectName, projectPrompt) => {
@@ -203,7 +207,7 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
     selectProject: async (projectId, options = {}) => {
       const project = get().projects.find((item) => item.id === projectId);
       const previousProject = get().currentProject;
-      const shouldStartDevServer = options.startDevServer ?? true;
+      const shouldStartDevServer = options.startDevServer ?? false;
       const shouldEnsureConversation = options.ensureConversation ?? true;
       let didLoadFiles = false;
 

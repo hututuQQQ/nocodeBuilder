@@ -5,7 +5,10 @@ import {
   buildGenerateProjectMessages,
   buildModifyProjectMessages,
 } from "./prompts";
-import type { AgentStepContext, ModificationContext } from "./types";
+import type {
+  AgentStepContext,
+  ModificationContext,
+} from "./types";
 import {
   validateAgentStepResponse,
   validateGeneratedProjectResponse,
@@ -13,11 +16,13 @@ import {
 } from "./validators";
 
 export async function requestProjectGeneration({
+  backendContext,
   config,
   onDelta,
   projectName,
   userPrompt,
 }: {
+  backendContext?: AgentStepContext["backend"];
   config: AiProviderConfig;
   onDelta?: (delta: string) => void;
   projectName: string;
@@ -31,7 +36,7 @@ export async function requestProjectGeneration({
   });
 
   const response = await client.chatJson<unknown>(
-    buildGenerateProjectMessages(projectName, userPrompt),
+    buildGenerateProjectMessages(projectName, userPrompt, backendContext),
     { onDelta },
   );
 

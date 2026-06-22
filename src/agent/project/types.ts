@@ -4,6 +4,8 @@ import type {
   TaskLedger,
   WorkingSummary,
 } from "./memory";
+import type { AgentSupabaseSchemaInput } from "./backendSchema";
+import type { ProjectBackendContext } from "./backendContext";
 
 export type GenerateProjectResponse = {
   type: "write_files";
@@ -95,6 +97,12 @@ export type AgentToolCallStep =
       tool: "refresh_preview";
       rationale: string;
       args: Record<string, never>;
+    }
+  | {
+      type: "tool_call";
+      tool: "apply_supabase_schema";
+      rationale: string;
+      args: AgentSupabaseSchemaInput;
     };
 
 export type AgentToolBatchStep = {
@@ -142,6 +150,7 @@ export type ProjectChatMessage = {
 };
 
 export type AgentStepContext = {
+  backend: ProjectBackendContext | null;
   devServerStatus: string;
   fileTree: string | null;
   memory: ProjectMemoryContext | null;
@@ -159,6 +168,7 @@ export type ProjectContextFile = {
 };
 
 export type ModificationContext = {
+  backend?: ProjectBackendContext | null;
   fileTree: string;
   files: ProjectContextFile[];
   recentMessages: ProjectChatMessage[];
