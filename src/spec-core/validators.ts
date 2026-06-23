@@ -106,6 +106,18 @@ export function validateDevelopmentSpec(spec: DevelopmentSpec): DevelopmentSpec 
     assertIsoTimestamp(spec.cancelledAt, "Spec cancelledAt");
   }
 
+  if (spec.status !== "completed" && spec.completedAt !== undefined) {
+    throw new Error("Spec completedAt is only valid for completed Specs.");
+  }
+
+  if (spec.status !== "cancelled" && spec.cancelledAt !== undefined) {
+    throw new Error("Spec cancelledAt is only valid for cancelled Specs.");
+  }
+
+  if (spec.status === "cancelled" && !spec.cancelledAt) {
+    throw new Error("Cancelled Spec requires cancelledAt.");
+  }
+
   if (spec.failureMessage !== undefined && typeof spec.failureMessage !== "string") {
     throw new Error("Spec failureMessage must be a string.");
   }

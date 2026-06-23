@@ -119,6 +119,29 @@ describe("Spec validators", () => {
     ).toThrow(/finalVerification/i);
   });
 
+  it("rejects lifecycle timestamps that contradict Spec status", () => {
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec(),
+        completedAt: "2026-06-24T00:01:00Z",
+      }),
+    ).toThrow(/completedAt is only valid/i);
+
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec(),
+        cancelledAt: "2026-06-24T00:01:00Z",
+      }),
+    ).toThrow(/cancelledAt is only valid/i);
+
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec(),
+        status: "cancelled",
+      }),
+    ).toThrow(/requires cancelledAt/i);
+  });
+
   it("requires revision versions to be consecutive", () => {
     const spec = createSpec();
     const secondRevision = {
