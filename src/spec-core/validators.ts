@@ -171,6 +171,19 @@ export function validateDevelopmentSpec(value: unknown): DevelopmentSpec {
     }
   });
 
+  const currentRevision = validatedRevisions.find(
+    (revision) => revision.id === currentRevisionId,
+  );
+
+  if (!currentRevision) {
+    throw new Error("Spec currentRevisionId must reference a revision.");
+  }
+
+  validateSpecTaskStateConsistency(
+    status as DevelopmentSpec["status"],
+    currentRevision,
+  );
+
   return value as DevelopmentSpec;
 }
 
@@ -515,6 +528,32 @@ function validatePersistedTask(value: unknown): SpecTask {
     status: status as SpecTask["status"],
     title: readRequiredString(value.title, "Spec task.title", 240),
   };
+}
+
+function validateSpecTaskStateConsistency(
+  status: DevelopmentSpec["status"],
+  currentRevision: SpecRevision,
+) {
+  const taskMissingPassedRun = currentRevision.tasks.find(
+    (task) => task.status !== "passed" || !task.runId,
+  );
+
+  if ((status === "completed" || status === "verifying") && taskMissingPassedRun) {
+    throw new Error(
+      `${formatSpecStatus(status)} Spec requires all current revision tasks to be passed with runId.`,
+    );
+  }
+
+  if (
+    ["completed", "failed", "cancelled"].includes(status) &&
+    currentRevision.tasks.some((task) => task.status === "running")
+  ) {
+    throw new Error("Terminal Spec cannot include running tasks.");
+  }
+}
+
+function formatSpecStatus(status: DevelopmentSpec["status"]) {
+  return `${status.charAt(0).toUpperCase()}${status.slice(1)}`;
 }
 
 function validateFinalVerification(finalVerification: unknown) {

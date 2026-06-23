@@ -155,6 +155,108 @@ describe("Spec validators", () => {
     ).toThrow(/finalVerification/i);
   });
 
+  it("requires completed specs to have passed task run evidence", () => {
+    const completedSpec = {
+      ...createSpec(),
+      completedAt: "2026-06-24T00:01:00Z",
+      finalVerification: {
+        checkedAt: "2026-06-24T00:01:00Z",
+        command: "npm run build",
+        output: "ok",
+        success: true,
+      },
+      status: "completed" as const,
+    };
+
+    expect(() => validateDevelopmentSpec(completedSpec)).toThrow(
+      /completed spec requires all current revision tasks/i,
+    );
+
+    expect(() =>
+      validateDevelopmentSpec(
+        createCompletedSpec({
+          tasks: [
+            {
+              ...createGeneratedPayload().tasks[0],
+              status: "passed",
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/completed spec requires all current revision tasks/i);
+
+    expect(validateDevelopmentSpec(createCompletedSpec())).toBeDefined();
+  });
+
+  it("requires verifying specs to have passed task run evidence", () => {
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec(),
+        status: "verifying",
+      }),
+    ).toThrow(/verifying spec requires all current revision tasks/i);
+
+    expect(
+      validateDevelopmentSpec(
+        createSpec({
+          tasks: [
+            {
+              ...createGeneratedPayload().tasks[0],
+              runId: "run-1",
+              status: "passed",
+            },
+          ],
+        }),
+      ),
+    ).toBeDefined();
+  });
+
+  it("rejects terminal specs that still contain a running task", () => {
+    expect(() =>
+      validateDevelopmentSpec(
+        {
+          ...createSpec({
+            tasks: [
+              {
+                ...createGeneratedPayload().tasks[0],
+                runId: "run-1",
+                status: "running",
+              },
+            ],
+          }),
+          failureMessage: "Orchestration failed.",
+          status: "failed",
+        },
+      ),
+    ).toThrow(/terminal spec cannot include running tasks/i);
+  });
+
+  it("requires initial build specs to include a foundation task", () => {
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec(),
+        kind: "initial_build",
+      }),
+    ).toThrow(/foundation project creation task/i);
+
+    expect(
+      validateDevelopmentSpec({
+        ...createSpec({
+          tasks: [
+            {
+              ...createGeneratedPayload().tasks[0],
+              expectedFiles: ["package.json", "app/page.tsx"],
+              objective: "Scaffold the initial Next.js app foundation.",
+              title: "Initial scaffold",
+              status: "pending",
+            },
+          ],
+        }),
+        kind: "initial_build",
+      }),
+    ).toBeDefined();
+  });
+
   it("rejects lifecycle timestamps that contradict Spec status", () => {
     expect(() =>
       validateDevelopmentSpec({
@@ -388,6 +490,31 @@ function createSpec(
     revisions: [revision],
     status: "review",
     updatedAt: "2026-06-24T00:00:00Z",
+  };
+}
+
+function createCompletedSpec(
+  overrides: Partial<DevelopmentSpec["revisions"][number]> = {},
+): DevelopmentSpec {
+  return {
+    ...createSpec({
+      tasks: [
+        {
+          ...createGeneratedPayload().tasks[0],
+          runId: "run-1",
+          status: "passed",
+        },
+      ],
+      ...overrides,
+    }),
+    completedAt: "2026-06-24T00:01:00Z",
+    finalVerification: {
+      checkedAt: "2026-06-24T00:01:00Z",
+      command: "npm run build",
+      output: "ok",
+      success: true,
+    },
+    status: "completed",
   };
 }
 
