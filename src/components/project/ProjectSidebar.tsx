@@ -354,16 +354,13 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                         visibleConversations.map((conversation) => {
                           const isSelected =
                             currentConversation?.id === conversation.id;
-                          const hasIteration = conversationSummaries.some(
-                            (summary) => summary.kind === "iteration",
-                          );
                           const archiveDisabled =
                             conversation.kind === "initial_build" &&
-                            !hasIteration &&
                             !isInitialBuildCompleted(
                               conversation,
                               currentConversation,
                               currentSpec,
+                              historicalSpecs,
                             );
 
                           return (
@@ -471,7 +468,10 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                   New Project
                 </h2>
                 <p className="mt-1 text-xs text-zinc-500">
-                  Development mode / Spec Coding
+                  Development mode
+                </p>
+                <p className="mt-1 text-xs font-medium text-teal-100">
+                  Spec Coding
                 </p>
               </div>
               <button
@@ -512,7 +512,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
               value={projectPrompt}
             />
             <p className="mt-2 text-xs leading-5 text-zinc-500">
-              New projects begin with a specification review. Code is generated only after approval.
+              New projects begin with requirements, design, and tasks. Code is generated only after approval.
             </p>
 
             {projectError ? (
@@ -562,7 +562,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                   New Iteration
                 </h2>
                 <p className="mt-1 text-xs text-zinc-500">
-                  Choose Chat or Spec
+                  Initial mode
                 </p>
               </div>
               <button
@@ -605,7 +605,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
               className="mb-2 mt-4 block text-xs font-medium text-zinc-400"
               htmlFor="iteration-title"
             >
-              Title
+              Iteration title
             </label>
             <input
               className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/10"
@@ -625,7 +625,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                   className="mb-2 mt-4 block text-xs font-medium text-zinc-400"
                   htmlFor="iteration-brief"
                 >
-                  Spec brief
+                  Brief
                 </label>
                 <textarea
                   className="h-28 min-h-28 w-full resize-none rounded-md border border-zinc-800 bg-zinc-900 px-3 py-3 text-sm leading-5 text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-blue-400/60 focus:ring-2 focus:ring-blue-400/10"
@@ -660,7 +660,6 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                   isExecutingSpec ||
                   isVerifyingSpec ||
                   isSwitchingIterationMode ||
-                  !newIterationTitle.trim() ||
                   (newIterationMode === "spec" && !newIterationBrief.trim())
                 }
                 type="submit"
@@ -710,12 +709,25 @@ function isInitialBuildCompleted(
   summary: ProjectConversationSummary,
   currentConversation: ProjectConversation | null,
   currentSpec: DevelopmentSpec | null,
+  historicalSpecs: DevelopmentSpec[],
 ) {
-  return (
-    summary.kind === "initial_build" &&
-    currentConversation?.id === summary.id &&
-    currentSpec?.id === summary.activeSpecId &&
-    currentSpec.status === "completed"
+  if (summary.kind !== "initial_build" || !summary.activeSpecId) {
+    return false;
+  }
+
+  return Boolean(
+    (
+      currentConversation?.id === summary.id &&
+      currentSpec?.id === summary.activeSpecId &&
+      currentSpec.status === "completed"
+    ) ||
+      historicalSpecs.some(
+        (spec) =>
+          spec.id === summary.activeSpecId &&
+          spec.conversationId === summary.id &&
+          spec.projectId === summary.projectId &&
+          spec.status === "completed",
+      )
   );
 }
 
