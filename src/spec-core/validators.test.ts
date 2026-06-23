@@ -213,9 +213,51 @@ describe("Spec validators", () => {
           ],
         }),
       ),
-    ).toThrow(/completed spec requires all current revision tasks/i);
+    ).toThrow(/status passed requires runId/i);
 
     expect(validateDevelopmentSpec(createCompletedSpec())).toBeDefined();
+  });
+
+  it("requires running and passed tasks to persist runId", () => {
+    expect(() =>
+      validateDevelopmentSpec(
+        createSpec({
+          tasks: [
+            {
+              ...createGeneratedPayload().tasks[0],
+              status: "running",
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/status running requires runId/i);
+
+    expect(() =>
+      validateDevelopmentSpec(
+        createSpec({
+          tasks: [
+            {
+              ...createGeneratedPayload().tasks[0],
+              status: "passed",
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/status passed requires runId/i);
+
+    expect(
+      validateDevelopmentSpec(
+        createSpec({
+          tasks: [
+            {
+              ...createGeneratedPayload().tasks[0],
+              runId: "run-1",
+              status: "running",
+            },
+          ],
+        }),
+      ),
+    ).toBeDefined();
   });
 
   it("requires verifying specs to have passed task run evidence", () => {
