@@ -722,9 +722,15 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
       }
 
       const activeRun = get().currentAgentRun;
+      const activeSpecRun =
+        activeRun &&
+        !isTerminalRunStatus(activeRun.status) &&
+        isRunForSpec(activeRun, spec)
+          ? activeRun
+          : null;
       const executionLocked =
         ["approved", "building", "verifying"].includes(spec.status) ||
-        hasActiveRun(get());
+        Boolean(activeSpecRun);
 
       if (executionLocked && !options.cancelActiveSpec) {
         set({
@@ -740,9 +746,8 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         let nextSpec = spec;
 
         if (executionLocked) {
-          const runForCancellation = activeRun && !isTerminalRunStatus(activeRun.status)
-            ? activeRun
-            : await loadRunningSpecRun(store, project.id, spec);
+          const runForCancellation =
+            activeSpecRun ?? await loadRunningSpecRun(store, project.id, spec);
 
           if (runForCancellation) {
             if (!isRunForSpec(runForCancellation, spec)) {
