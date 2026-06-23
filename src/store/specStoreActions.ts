@@ -616,12 +616,25 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         let nextSpec = spec;
 
         if (executionLocked) {
-          if (activeRun && !isTerminalRunStatus(activeRun.status)) {
-            if (!isRunForSpec(activeRun, spec)) {
+          const runForCancellation = activeRun && !isTerminalRunStatus(activeRun.status)
+            ? activeRun
+            : await loadRunningSpecRun(store, project.id, spec);
+
+          if (runForCancellation) {
+            if (!isRunForSpec(runForCancellation, spec)) {
               throw new Error("Active AgentRun does not belong to the current Spec task.");
             }
 
-            const latestRun = await get().cancelCurrentAgentRunAndWait();
+            if (
+              isTerminalRunStatus(runForCancellation.status) &&
+              runForCancellation.status !== "cancelled"
+            ) {
+              throw new Error("AgentRun cancellation did not reach cancelled state.");
+            }
+
+            const latestRun = runForCancellation.status === "cancelled"
+              ? runForCancellation
+              : await get().cancelCurrentAgentRunAndWait();
 
             if (latestRun?.status !== "cancelled") {
               throw new Error("AgentRun cancellation did not reach cancelled state.");
@@ -655,6 +668,32 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
       }
     },
   };
+}
+
+async function loadRunningSpecRun(
+  store: StoreAccess,
+  projectId: string,
+  spec: DevelopmentSpec,
+) {
+  const revision = getCurrentSpecRevision(spec);
+  const runningTask = revision.tasks.find((task) => task.status === "running");
+
+  if (!runningTask?.runId) {
+    return null;
+  }
+
+  const run = await agentRuntimeApi.getRun(projectId, runningTask.runId);
+
+  if (!run) {
+    throw new Error(`AgentRun ${runningTask.runId} was not found.`);
+  }
+
+  store.set((state) => ({
+    agentRuns: [run, ...state.agentRuns.filter((item) => item.id !== run.id)],
+    currentAgentRun: run,
+  }));
+
+  return run;
 }
 
 async function executeSpecTasks(store: StoreAccess, specId: string) {

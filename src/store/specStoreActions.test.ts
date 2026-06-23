@@ -587,6 +587,62 @@ describe("spec store actions", () => {
     expect(store.get().currentSpec).toBeNull();
   });
 
+  it("loads a persisted running AgentRun before cancelling and switching to Chat", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-active",
+          status: "running",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    const conversation = createConversation("project-1", {
+      activeSpecId: spec.id,
+      conversationId: spec.conversationId,
+      mode: "spec",
+      specIds: [spec.id],
+      title: "Spec iteration",
+    });
+    const persistedRun = createRun("run-active", {
+      contract: createSpecRunContract(spec, revision.tasks[0]),
+      status: "planning",
+    });
+    const cancelCurrentAgentRunAndWait = vi.fn(async () =>
+      createRun("run-active", {
+        contract: createSpecRunContract(spec, revision.tasks[0]),
+        status: "cancelled",
+      }),
+    );
+
+    fake.agentRuns.set("run-active", persistedRun);
+    const store = createStore({
+      cancelCurrentAgentRunAndWait,
+      currentAgentRun: null,
+      currentConversation: conversation,
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.switchCurrentIterationToChat({ cancelActiveSpec: true });
+
+    expect(cancelCurrentAgentRunAndWait).toHaveBeenCalledTimes(1);
+    expect(fake.saveSpec).toHaveBeenCalled();
+    expect(fake.switchProjectConversationMode).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({
+        activeSpecId: null,
+        conversationId: conversation.id,
+        targetMode: "chat",
+      }),
+    );
+    expect(store.get().currentConversation?.mode).toBe("chat");
+  });
+
   it("keeps Spec mode when cancellation does not reach cancelled", async () => {
     const revision = createExecutableRevision({
       tasks: [
@@ -859,6 +915,7 @@ describe("spec store actions", () => {
 
 function createStore(patch: Partial<StoreState> = {}) {
   let state: StoreState = {
+    agentRuns: [],
     cancelCurrentAgentRunAndWait: vi.fn(async () => null),
     changeHistory: [],
     chatMessages: [],
@@ -1182,6 +1239,7 @@ type RuntimeInput = {
 };
 
 type StoreState = {
+  agentRuns: AgentRun[];
   cancelCurrentAgentRunAndWait: () => Promise<AgentRun | null>;
   changeHistory: unknown[];
   chatMessages: ProjectConversation["messages"];
