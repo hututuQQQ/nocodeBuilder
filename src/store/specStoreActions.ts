@@ -17,6 +17,7 @@ import type {
   SpecTask,
 } from "../spec-core/types";
 import {
+  canRetrySpecVerification,
   getCurrentSpecRevision,
   computeAcceptanceResults,
   validateSpecForApproval,
@@ -484,12 +485,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
     retrySpecVerification: async () => {
       const spec = get().currentSpec;
 
-      if (
-        !spec ||
-        spec.status !== "blocked" ||
-        !hasAllTasksPassed(spec) ||
-        spec.finalVerification?.success !== false
-      ) {
+      if (!spec || !canRetrySpecVerification(spec)) {
         return;
       }
 
@@ -1473,12 +1469,6 @@ function isRunForSpec(
     Boolean(runningTask) &&
     runningTask?.id === run.contract.source.taskId
   );
-}
-
-function hasAllTasksPassed(spec: DevelopmentSpec) {
-  const revision = getCurrentSpecRevision(spec);
-
-  return revision.tasks.every((task) => task.status === "passed" && task.runId);
 }
 
 function isTerminalRunStatus(status: string) {

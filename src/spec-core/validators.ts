@@ -43,6 +43,16 @@ export function getCurrentSpecRevision(spec: DevelopmentSpec): SpecRevision {
   return revision;
 }
 
+export function canRetrySpecVerification(spec: DevelopmentSpec): boolean {
+  if (spec.status !== "blocked" || spec.finalVerification?.success !== false) {
+    return false;
+  }
+
+  return getCurrentSpecRevision(spec).tasks.every(
+    (task) => task.status === "passed" && Boolean(task.runId),
+  );
+}
+
 export function validateGeneratedSpecRevisionPayload(
   value: unknown,
 ): GeneratedSpecRevisionPayload {

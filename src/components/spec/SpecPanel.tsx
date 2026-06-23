@@ -21,7 +21,10 @@ import type {
   SpecRevision,
   SpecTask,
 } from "../../spec-core/types";
-import { getCurrentSpecRevision } from "../../spec-core/validators";
+import {
+  canRetrySpecVerification,
+  getCurrentSpecRevision,
+} from "../../spec-core/validators";
 import { AgentRunPanel } from "../chat/AgentRunPanel";
 import { IterationModeSwitch } from "../iteration/IterationModeSwitch";
 
@@ -525,7 +528,7 @@ function BuildView({
               Final build passed
             </p>
           ) : null}
-          {spec.status === "blocked" || spec.status === "failed" ? (
+          {canRetrySpecVerification(spec) ? (
             <button
               className="mt-3 flex h-9 w-full items-center justify-center gap-2 rounded-md border border-blue-400/30 bg-blue-400/10 px-3 text-sm font-medium text-blue-100 transition hover:border-blue-300/60 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
               disabled={busy}

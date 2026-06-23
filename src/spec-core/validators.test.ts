@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DevelopmentSpec } from "./types";
 import {
+  canRetrySpecVerification,
   computeAcceptanceResults,
   validateDevelopmentSpec,
   validateGeneratedSpecRevisionPayload,
@@ -190,6 +191,52 @@ describe("Spec validators", () => {
         revisions: [...spec.revisions, secondRevision],
       }),
     ).toThrow(/consecutive/i);
+  });
+
+  it("gates verification retry on failed final verification evidence", () => {
+    const retryable = {
+      ...createSpec({
+        tasks: [
+          {
+            ...createGeneratedPayload().tasks[0],
+            runId: "run-1",
+            status: "passed",
+          },
+        ],
+      }),
+      failureMessage: "Final npm run build failed.",
+      finalVerification: {
+        checkedAt: "2026-06-24T00:01:00Z",
+        command: "npm run build",
+        output: "failed",
+        success: false,
+      },
+      status: "blocked" as const,
+    };
+
+    expect(canRetrySpecVerification(retryable)).toBe(true);
+    expect(canRetrySpecVerification({
+      ...retryable,
+      status: "failed",
+    })).toBe(false);
+    expect(canRetrySpecVerification({
+      ...retryable,
+      finalVerification: undefined,
+    })).toBe(false);
+    expect(canRetrySpecVerification({
+      ...retryable,
+      revisions: [
+        {
+          ...retryable.revisions[0],
+          tasks: [
+            {
+              ...retryable.revisions[0].tasks[0],
+              status: "pending",
+            },
+          ],
+        },
+      ],
+    })).toBe(false);
   });
 
   it("computes acceptance results from task and report evidence", () => {
