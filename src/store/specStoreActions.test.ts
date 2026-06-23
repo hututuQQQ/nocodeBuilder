@@ -809,6 +809,33 @@ describe("spec store actions", () => {
     );
   });
 
+  it("does not approve while the revision action is busy", async () => {
+    const revision = createExecutableRevision();
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "review",
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: spec.id,
+        conversationId: spec.conversationId,
+        mode: "spec",
+        specIds: [spec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: spec,
+      isRevisingSpec: true,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.approveAndExecuteCurrentSpec();
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(fake.runSpecTaskRuntime).not.toHaveBeenCalled();
+    expect(store.get().currentSpec?.status).toBe("review");
+  });
+
   it("restores review state when a revision request fails", async () => {
     fake.requestSpecRevision.mockRejectedValue(new Error("revision failed"));
     const revision = createExecutableRevision();

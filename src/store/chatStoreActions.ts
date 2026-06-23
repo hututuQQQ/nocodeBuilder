@@ -40,6 +40,16 @@ export function createChatActions({ get, set }: StoreAccess): ChatActions {
       }
 
       if (get().currentConversation?.mode === "spec") {
+        if (get().isRevisingSpec) {
+          set((state) => ({
+            projectError: "Wait for the Spec revision to finish before sending messages.",
+            terminalLogs: appendLogs(state.terminalLogs, [
+              "[spec] Message blocked while revision is in progress.",
+            ]),
+          }));
+          return;
+        }
+
         await handleSpecConversationMessage(store, message);
         return;
       }

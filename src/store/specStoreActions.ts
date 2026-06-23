@@ -402,7 +402,8 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         !spec ||
         conversation.mode !== "spec" ||
         conversation.activeSpecId !== spec.id ||
-        get().isExecutingSpec
+        get().isExecutingSpec ||
+        get().isRevisingSpec
       ) {
         return;
       }
