@@ -11,6 +11,7 @@ export const INITIAL_BUILD_ITERATION_GATE_ERROR =
 type InitialBuildGateState = {
   conversationSummaries: ProjectConversationSummary[];
   currentProject: { id: string } | null;
+  initialBuildSpec?: DevelopmentSpec | null;
   currentSpec: DevelopmentSpec | null;
   historicalSpecs: DevelopmentSpec[];
 };
@@ -28,11 +29,7 @@ export function hasCompletedInitialBuildEvidence(
   );
   const initialBuild = findInitialBuildSummary(summaries);
 
-  if (hasCompletedInitialBuildSpecEvidence(state, projectId, initialBuild)) {
-    return true;
-  }
-
-  return summaries.some((summary) => summary.kind === "iteration");
+  return hasCompletedInitialBuildSpecEvidence(state, projectId, initialBuild);
 }
 
 export async function ensureInitialBuildCompletedForIteration(
@@ -94,7 +91,7 @@ function findInitialBuildSpec(
   }
 
   return (
-    [state.currentSpec, ...state.historicalSpecs].find(
+    [state.initialBuildSpec, state.currentSpec, ...state.historicalSpecs].find(
       (spec) => spec?.id === summary.activeSpecId,
     ) ?? null
   );

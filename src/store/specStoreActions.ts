@@ -91,7 +91,11 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
           return;
         }
 
-        set({ currentSpec: spec });
+        set({
+          currentSpec: spec,
+          initialBuildSpec:
+            spec.kind === "initial_build" ? spec : get().initialBuildSpec,
+        });
         await get().loadConversationSpecHistory();
         if (["approved", "building", "verifying"].includes(spec.status)) {
           void get().continueCurrentSpecExecution();
@@ -211,6 +215,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
             conversationToSummary(conversation),
           ),
           currentConversation: conversation,
+          initialBuildSpec: spec,
           currentSpec: spec,
           historicalSpecs: [spec],
           showArchivedConversations: false,
@@ -1125,6 +1130,8 @@ async function saveSpecToStore(store: StoreAccess, spec: DevelopmentSpec) {
       state.currentSpec?.id === saved.id || state.currentConversation?.activeSpecId === saved.id
         ? saved
         : state.currentSpec,
+    initialBuildSpec:
+      saved.kind === "initial_build" ? saved : state.initialBuildSpec,
     historicalSpecs: upsertSpec(state.historicalSpecs, saved),
   }));
 
@@ -1177,6 +1184,8 @@ function applyConversationAndSpec(
       conversationToSummary(conversation),
     ),
     currentConversation: conversation,
+    initialBuildSpec:
+      spec?.kind === "initial_build" ? spec : state.initialBuildSpec,
     currentSpec: spec,
     historicalSpecs: spec ? upsertSpec(state.historicalSpecs, spec) : state.historicalSpecs,
   }));

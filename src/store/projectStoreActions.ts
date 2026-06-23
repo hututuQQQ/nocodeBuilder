@@ -98,6 +98,7 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
             currentConversation: null,
             currentProject:
               state.currentProject?.id === project.id ? null : state.currentProject,
+            initialBuildSpec: null,
             currentSpec: null,
             historicalSpecs: [],
             projects: state.projects.filter((item) => item.id !== project.id),
@@ -151,6 +152,7 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
             currentAgentRun: null,
             currentConversation: null,
             currentProject: null,
+            initialBuildSpec: null,
             currentSpec: null,
             currentVerificationReport: null,
             devServerStatus: "stopped",
@@ -245,6 +247,7 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
         currentAgentApproval: null,
         currentAgentRun: null,
         currentProject: project,
+        initialBuildSpec: null,
         currentSpec: null,
         currentVerificationReport: null,
         currentConversation: null,

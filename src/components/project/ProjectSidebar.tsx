@@ -40,6 +40,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
     (state) => state.currentConversation,
   );
   const currentSpec = useAppStore((state) => state.currentSpec);
+  const initialBuildSpec = useAppStore((state) => state.initialBuildSpec);
   const historicalSpecs = useAppStore((state) => state.historicalSpecs);
   const createFeatureSpecIteration = useAppStore(
     (state) => state.createFeatureSpecIteration,
@@ -242,6 +243,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                   project.id,
                   conversationSummaries,
                   currentProject,
+                  initialBuildSpec,
                   currentSpec,
                   historicalSpecs,
                 );
@@ -683,6 +685,7 @@ function canCreateIterationForCurrentProject(
   projectId: string,
   summaries: ProjectConversationSummary[],
   currentProject: { id: string } | null,
+  initialBuildSpec: DevelopmentSpec | null,
   currentSpec: DevelopmentSpec | null,
   historicalSpecs: DevelopmentSpec[],
 ) {
@@ -690,6 +693,7 @@ function canCreateIterationForCurrentProject(
     {
       conversationSummaries: summaries,
       currentProject,
+      initialBuildSpec,
       currentSpec,
       historicalSpecs,
     },

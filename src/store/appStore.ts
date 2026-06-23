@@ -61,6 +61,7 @@ export type AppState = {
   selectedSiteNodeId: string | null;
   conversationSummaries: ProjectConversationSummary[];
   currentConversation: ProjectConversation | null;
+  initialBuildSpec: DevelopmentSpec | null;
   currentSpec: DevelopmentSpec | null;
   historicalSpecs: DevelopmentSpec[];
   chatMessages: ChatMessage[];
@@ -201,6 +202,7 @@ const initialState = {
   selectedSiteNodeId: null,
   conversationSummaries: [],
   currentConversation: null,
+  initialBuildSpec: null,
   currentSpec: null,
   historicalSpecs: [],
   chatMessages: [],

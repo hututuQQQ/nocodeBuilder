@@ -49,9 +49,14 @@ export function createConversationActions({
         const activeSummaries = summaries.filter(
           (summary) => !summary.archivedAt,
         );
+        const initialBuildSpec = await readInitialBuildSpecForGate(
+          projectId,
+          summaries.find((summary) => summary.kind === "initial_build") ?? null,
+        );
 
         set({
           conversationSummaries: summaries,
+          initialBuildSpec,
         });
 
         if (canKeepCurrent) {
@@ -64,11 +69,6 @@ export function createConversationActions({
           await get().selectConversation(summaryToOpen.id);
           return;
         }
-
-        const initialBuildSpec = await readInitialBuildSpecForGate(
-          projectId,
-          summaries.find((summary) => summary.kind === "initial_build") ?? null,
-        );
 
         set({
           chatMessages: [],
@@ -153,6 +153,7 @@ export function createConversationActions({
             conversationToSummary(conversation),
           ),
           currentConversation: conversation,
+          initialBuildSpec: state.initialBuildSpec,
           currentSpec: null,
           historicalSpecs: [],
           showArchivedConversations: false,
@@ -324,7 +325,7 @@ export function createConversationActions({
       set({ showArchivedConversations: showArchived });
 
       if (!project) {
-        set({ conversationSummaries: [] });
+        set({ conversationSummaries: [], initialBuildSpec: null });
         return;
       }
 

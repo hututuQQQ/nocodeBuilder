@@ -86,6 +86,45 @@ describe("conversation store actions", () => {
     expect(store.get().loadCurrentSpec).toHaveBeenCalledTimes(1);
   });
 
+  it("loads completed Initial Build evidence while opening a later iteration", async () => {
+    const initialBuild = createSummary({
+      activeSpecId: "spec-initial",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      title: "Initial build",
+    });
+    const iteration = createSummary({
+      id: "conversation-iteration",
+      kind: "iteration",
+      mode: "chat",
+      title: "Follow-up",
+    });
+    const completedSpec = createSpec({
+      conversationId: "conversation-initial",
+      id: "spec-initial",
+      status: "completed",
+    });
+    const conversation = createConversation({
+      id: "conversation-iteration",
+      kind: "iteration",
+      mode: "chat",
+      title: "Follow-up",
+    });
+    fake.listProjectConversations.mockResolvedValue([iteration, initialBuild]);
+    fake.readProjectConversation.mockResolvedValue(conversation);
+    fake.readSpec.mockResolvedValue(completedSpec);
+    const store = createStore();
+    const actions = createConversationActions(store as never);
+    store.set(actions as unknown as Partial<StoreState>);
+
+    await actions.loadProjectConversations("project-1");
+
+    expect(fake.readSpec).toHaveBeenCalledWith("project-1", "spec-initial");
+    expect(store.get().initialBuildSpec).toEqual(completedSpec);
+    expect(store.get().currentConversation).toEqual(conversation);
+  });
+
   it("keeps archived completed Initial Spec evidence when no active iterations exist", async () => {
     const archivedInitialBuild = createSummary({
       activeSpecId: "spec-initial",
@@ -387,6 +426,7 @@ function createStore(patch: Partial<StoreState> = {}) {
       path: "D:/projects/project-1",
       updatedAt: "2026-01-01T00:00:00.000Z",
     },
+    initialBuildSpec: null,
     currentSpec: null,
     historicalSpecs: [],
     isExecutingSpec: false,
@@ -490,6 +530,7 @@ type StoreState = {
     path: string;
     updatedAt: string;
   } | null;
+  initialBuildSpec: unknown | null;
   currentSpec: unknown | null;
   historicalSpecs: unknown[];
   isExecutingSpec: boolean;
