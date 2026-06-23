@@ -334,6 +334,10 @@ fn validate_approved_revision_immutability(existing: &Value, next: &Value) -> Re
         .ok_or_else(|| "spec: revisions is required".to_string())?;
 
     for existing_revision in existing_revisions {
+        let revision_id = read_required_string(existing_revision, "id")?;
+        let next_revision = find_revision_by_id(next_revisions, revision_id)
+            .ok_or_else(|| "spec: existing revisions cannot be removed".to_string())?;
+
         if existing_revision
             .get("approvedAt")
             .and_then(Value::as_str)
@@ -342,23 +346,21 @@ fn validate_approved_revision_immutability(existing: &Value, next: &Value) -> Re
             continue;
         }
 
-        let revision_id = read_required_string(existing_revision, "id")?;
-        let next_revision = next_revisions
-            .iter()
-            .find(|revision| {
-                revision
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| id == revision_id)
-            })
-            .ok_or_else(|| "spec: approved revisions cannot be removed".to_string())?;
-
         if approved_revision_plan(existing_revision)? != approved_revision_plan(next_revision)? {
             return Err("spec: approved revision plan fields are immutable".to_string());
         }
     }
 
     Ok(())
+}
+
+fn find_revision_by_id<'a>(revisions: &'a [Value], revision_id: &str) -> Option<&'a Value> {
+    revisions.iter().find(|revision| {
+        revision
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id == revision_id)
+    })
 }
 
 fn approved_revision_plan(revision: &Value) -> Result<Value, String> {
@@ -473,6 +475,86 @@ mod tests {
         });
 
         assert!(validate_approved_revision_immutability(&existing, &next).is_err());
+    }
+
+    #[test]
+    fn revisions_cannot_remove_unapproved_existing_revision() {
+        let existing = json!({
+            "revisions": [{
+                "id": "rev-1",
+                "version": 1,
+                "brief": "Draft",
+                "requirements": {"goal": "A"},
+                "design": {"summary": "B"},
+                "tasks": [{"id": "task-1", "title": "Task"}]
+            }]
+        });
+        let next = json!({
+            "revisions": []
+        });
+
+        let error = validate_approved_revision_immutability(&existing, &next)
+            .expect_err("existing revision removal should fail");
+
+        assert!(error.contains("existing revisions cannot be removed"));
+    }
+
+    #[test]
+    fn unapproved_revision_can_be_approved() {
+        let existing = json!({
+            "revisions": [{
+                "id": "rev-1",
+                "version": 1,
+                "brief": "Draft",
+                "requirements": {"goal": "A"},
+                "design": {"summary": "B"},
+                "tasks": [{"id": "task-1", "title": "Task"}]
+            }]
+        });
+        let next = json!({
+            "revisions": [{
+                "id": "rev-1",
+                "version": 1,
+                "brief": "Draft",
+                "approvedAt": "2026-01-01T00:00:00Z",
+                "requirements": {"goal": "A"},
+                "design": {"summary": "B"},
+                "tasks": [{"id": "task-1", "title": "Task"}]
+            }]
+        });
+
+        assert!(validate_approved_revision_immutability(&existing, &next).is_ok());
+    }
+
+    #[test]
+    fn approved_revision_rejects_approved_at_change() {
+        let existing = json!({
+            "revisions": [{
+                "id": "rev-1",
+                "version": 1,
+                "brief": "Build it",
+                "approvedAt": "2026-01-01T00:00:00Z",
+                "requirements": {"goal": "A"},
+                "design": {"summary": "B"},
+                "tasks": [{"id": "task-1", "title": "Task"}]
+            }]
+        });
+        let next = json!({
+            "revisions": [{
+                "id": "rev-1",
+                "version": 1,
+                "brief": "Build it",
+                "approvedAt": "2026-01-02T00:00:00Z",
+                "requirements": {"goal": "A"},
+                "design": {"summary": "B"},
+                "tasks": [{"id": "task-1", "title": "Task"}]
+            }]
+        });
+
+        let error = validate_approved_revision_immutability(&existing, &next)
+            .expect_err("approvedAt mutation should fail");
+
+        assert!(error.contains("approved revision plan fields are immutable"));
     }
 
     #[test]
