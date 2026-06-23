@@ -194,17 +194,39 @@ fn write_spec_value(project_dir: &Path, spec_id: &str, spec: &Value) -> Result<(
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
     ));
 
-    replace_file_atomically(&tmp_path, &path, &backup_path, false)
+    replace_file_atomically(
+        &tmp_path,
+        &path,
+        &backup_path,
+        ReplaceFailureInjection::None,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReplaceFailureInjection {
+    None,
+    Backup,
+    Replace,
+    Restore,
 }
 
 fn replace_file_atomically(
     tmp_path: &Path,
     path: &Path,
     backup_path: &Path,
-    inject_replace_failure: bool,
+    failure_injection: ReplaceFailureInjection,
 ) -> Result<(), String> {
     if !path.exists() {
-        return fs::rename(tmp_path, path).map_err(|error| {
+        let move_result = if failure_injection == ReplaceFailureInjection::Replace {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "injected initial move failure",
+            ))
+        } else {
+            fs::rename(tmp_path, path)
+        };
+
+        return move_result.map_err(|error| {
             let _ = fs::remove_file(tmp_path);
             format!(
                 "spec: failed to move spec into place '{}': {error}",
@@ -213,7 +235,16 @@ fn replace_file_atomically(
         });
     }
 
-    fs::rename(path, backup_path).map_err(|backup_error| {
+    let backup_result = if failure_injection == ReplaceFailureInjection::Backup {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "injected backup failure",
+        ))
+    } else {
+        fs::rename(path, backup_path)
+    };
+
+    backup_result.map_err(|backup_error| {
         let _ = fs::remove_file(tmp_path);
         format!(
             "spec: failed to back up existing spec '{}': {backup_error}",
@@ -221,7 +252,10 @@ fn replace_file_atomically(
         )
     })?;
 
-    let replace_result = if inject_replace_failure {
+    let replace_result = if matches!(
+        failure_injection,
+        ReplaceFailureInjection::Replace | ReplaceFailureInjection::Restore
+    ) {
         Err(std::io::Error::new(
             std::io::ErrorKind::Other,
             "injected replace failure",
@@ -236,7 +270,14 @@ fn replace_file_atomically(
             Ok(())
         }
         Err(error) => {
-            let restore_result = fs::rename(backup_path, path);
+            let restore_result = if failure_injection == ReplaceFailureInjection::Restore {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "injected restore failure",
+                ))
+            } else {
+                fs::rename(backup_path, path)
+            };
             let _ = fs::remove_file(tmp_path);
 
             if let Err(restore_error) = restore_result {
@@ -435,12 +476,33 @@ mod tests {
     }
 
     #[test]
-    fn atomic_replace_restores_previous_file_on_replace_failure() {
-        let root = std::env::temp_dir().join(format!(
-            "spec-storage-test-{}",
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        ));
-        fs::create_dir_all(&root).expect("create temp root");
+    fn atomic_replace_cleans_tmp_on_initial_move_failure() {
+        let root = create_temp_root();
+        let path = root.join("spec.json");
+        let tmp_path = root.join(".spec.tmp");
+        let backup_path = root.join(".spec.bak");
+
+        fs::write(&tmp_path, "new").expect("write new");
+
+        let error = replace_file_atomically(
+            &tmp_path,
+            &path,
+            &backup_path,
+            ReplaceFailureInjection::Replace,
+        )
+        .expect_err("initial move should fail");
+
+        assert!(error.contains("failed to move spec into place"));
+        assert!(!path.exists());
+        assert!(!tmp_path.exists());
+        assert!(!backup_path.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn atomic_replace_keeps_previous_file_on_backup_failure() {
+        let root = create_temp_root();
         let path = root.join("spec.json");
         let tmp_path = root.join(".spec.tmp");
         let backup_path = root.join(".spec.bak");
@@ -448,10 +510,79 @@ mod tests {
         fs::write(&path, "old").expect("write old");
         fs::write(&tmp_path, "new").expect("write new");
 
-        assert!(replace_file_atomically(&tmp_path, &path, &backup_path, true).is_err());
+        let error = replace_file_atomically(
+            &tmp_path,
+            &path,
+            &backup_path,
+            ReplaceFailureInjection::Backup,
+        )
+        .expect_err("backup should fail");
+
+        assert!(error.contains("failed to back up existing spec"));
+        assert_eq!(fs::read_to_string(&path).expect("read old"), "old");
+        assert!(!tmp_path.exists());
+        assert!(!backup_path.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn atomic_replace_restores_previous_file_on_replace_failure() {
+        let root = create_temp_root();
+        let path = root.join("spec.json");
+        let tmp_path = root.join(".spec.tmp");
+        let backup_path = root.join(".spec.bak");
+
+        fs::write(&path, "old").expect("write old");
+        fs::write(&tmp_path, "new").expect("write new");
+
+        assert!(replace_file_atomically(
+            &tmp_path,
+            &path,
+            &backup_path,
+            ReplaceFailureInjection::Replace,
+        )
+        .is_err());
         assert_eq!(fs::read_to_string(&path).expect("read restored"), "old");
         assert!(!backup_path.exists());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn atomic_replace_reports_restore_failure_clearly() {
+        let root = create_temp_root();
+        let path = root.join("spec.json");
+        let tmp_path = root.join(".spec.tmp");
+        let backup_path = root.join(".spec.bak");
+
+        fs::write(&path, "old").expect("write old");
+        fs::write(&tmp_path, "new").expect("write new");
+
+        let error = replace_file_atomically(
+            &tmp_path,
+            &path,
+            &backup_path,
+            ReplaceFailureInjection::Restore,
+        )
+        .expect_err("restore should fail");
+
+        assert!(error.contains("failed to restore previous spec"));
+        assert!(!tmp_path.exists());
+        assert_eq!(
+            fs::read_to_string(&backup_path).expect("read backup"),
+            "old"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn create_temp_root() -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "spec-storage-test-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        root
     }
 }

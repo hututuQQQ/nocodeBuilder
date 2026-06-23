@@ -1448,3 +1448,8 @@ function createId(prefix: string) {
 export function canSwitchSpecStatusToChat(spec: DevelopmentSpec | null) {
   return !spec || isTerminalSpecStatus(spec.status) || ["drafting", "review", "revising"].includes(spec.status);
 }
+
+export const __specStoreActionsTestUtils = {
+  markBlockedDownstreamTasks,
+  restoreRetryableTaskGraph,
+};
