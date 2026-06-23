@@ -837,6 +837,44 @@ describe("spec store actions", () => {
     expect(store.get().projectError).toBe("revision failed");
   });
 
+  it("does not revive a cancelled Spec when a stale revision request fails", async () => {
+    const revision = createExecutableRevision();
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "review",
+    });
+    const cancelledSpec = createSpec({
+      cancelledAt: "2026-01-01T00:01:00.000Z",
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "cancelled",
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: spec.id,
+        conversationId: spec.conversationId,
+        mode: "spec",
+        modeChangedAt: "2026-01-01T00:00:00.000Z",
+        specIds: [spec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: spec,
+    });
+    fake.requestSpecRevision.mockImplementation(async () => {
+      store.set({ currentSpec: cancelledSpec });
+      throw new Error("revision failed");
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.reviseCurrentSpec("Tighten the requirements");
+
+    expect(fake.saveSpec).toHaveBeenCalledTimes(1);
+    expect(store.get().currentSpec?.status).toBe("cancelled");
+    expect(store.get().currentSpec?.cancelledAt).toBe(cancelledSpec.cancelledAt);
+    expect(store.get().projectError).toBe("revision failed");
+  });
+
   it("discards stale revision responses after the active Spec changes", async () => {
     const revision = createExecutableRevision();
     const spec = createSpec({

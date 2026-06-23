@@ -320,10 +320,19 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
 
     reviseCurrentSpec: async (feedback) => {
       const project = get().currentProject;
+      const conversation = get().currentConversation;
       const spec = get().currentSpec;
       const message = feedback.trim();
 
-      if (!project || !spec || spec.status !== "review" || !message) {
+      if (
+        !project ||
+        !conversation ||
+        !spec ||
+        conversation.mode !== "spec" ||
+        conversation.activeSpecId !== spec.id ||
+        spec.status !== "review" ||
+        !message
+      ) {
         return;
       }
 
@@ -335,16 +344,15 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
       }
 
       set({ isRevisingSpec: true, projectError: null });
+      const revisionSnapshot = {
+        conversationId: conversation.id,
+        currentRevisionId: spec.currentRevisionId,
+        modeChangedAt: conversation.modeChangedAt,
+        projectId: project.id,
+        specId: spec.id,
+      };
 
       try {
-        const conversation = get().currentConversation;
-        const revisionSnapshot = {
-          conversationId: conversation?.id,
-          currentRevisionId: spec.currentRevisionId,
-          modeChangedAt: conversation?.modeChangedAt,
-          projectId: project.id,
-          specId: spec.id,
-        };
         const revisingSpec = transitionSpecStatus(spec, "revising");
         await saveSpecToStore(store, revisingSpec);
 
@@ -374,7 +382,9 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
 
         await saveSpecToStore(store, nextSpec);
       } catch (error) {
-        await saveSpecToStore(store, spec).catch(() => undefined);
+        if (isCurrentSpecSnapshot(store, revisionSnapshot)) {
+          await saveSpecToStore(store, spec).catch(() => undefined);
+        }
         recordSpecError(set, error);
       } finally {
         set({ isRevisingSpec: false });
