@@ -108,11 +108,12 @@ export function createAgentRunActions({ get, set }: StoreAccess): AgentRunAction
         return null;
       }
 
+      assertCurrentSpecRunControl(get(), run);
+
       if (isTerminalRun(run)) {
         return run;
       }
 
-      assertCurrentSpecRunControl(get(), run);
       await get().cancelCurrentAgentRun();
       return waitForTerminalRun(store, project.id, run.id);
     },
@@ -374,6 +375,7 @@ function isCurrentSpecRun(state: AppState, run: AgentRun) {
     source.specId === spec.id &&
     source.revisionId === revision?.id &&
     Boolean(runningTask) &&
+    runningTask?.runId === run.id &&
     source.taskId === runningTask?.id
   );
 }

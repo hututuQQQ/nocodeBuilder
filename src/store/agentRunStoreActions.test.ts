@@ -129,6 +129,42 @@ describe("agent run store actions", () => {
     expect(fake.events.map((event) => event.type)).toEqual(["run.cancel_requested"]);
   });
 
+  it("waits for active cancellation to reach a terminal cancelled run", async () => {
+    fake.activeController = true;
+    const run = createRun("run-active-wait", {
+      contract: createSpecContract("modify"),
+      conversationId: "conversation-1",
+      phase: "planning",
+      status: "planning",
+    });
+    fake.runs.set(run.id, run);
+    const store = createStore({
+      currentAgentRun: run,
+      currentConversation: createSpecConversation(),
+      currentSpec: createSpec({ runId: run.id }),
+    });
+    const actions = createAgentRunActions(store as never);
+    store.set({
+      cancelCurrentAgentRun: actions.cancelCurrentAgentRun,
+    } as Partial<StoreState>);
+
+    const resultPromise = actions.cancelCurrentAgentRunAndWait();
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+
+    fake.runs.set(run.id, {
+      ...fake.runs.get(run.id)!,
+      completedAt: "2026-01-01T00:01:00.000Z",
+      phase: "cancelled",
+      status: "cancelled",
+    });
+
+    const result = await resultPromise;
+
+    expect(result?.status).toBe("cancelled");
+    expect(store.get().currentAgentRun?.status).toBe("cancelled");
+    expect(fake.events.map((event) => event.type)).toEqual(["run.cancel_requested"]);
+  });
+
   it("recovers any inactive non-terminal run instead of only paused runs", async () => {
     const run = createRun("run-planning", { status: "planning", phase: "planning" });
     fake.runs.set(run.id, run);
@@ -158,7 +194,7 @@ describe("agent run store actions", () => {
       continueCurrentSpecExecution,
       currentAgentRun: run,
       currentConversation: createSpecConversation(),
-      currentSpec: createSpec(),
+      currentSpec: createSpec({ runId: run.id }),
     });
     const actions = createAgentRunActions(store as never);
 
@@ -194,7 +230,7 @@ describe("agent run store actions", () => {
       currentAgentApproval: approval,
       currentAgentRun: run,
       currentConversation: createSpecConversation(),
-      currentSpec: createSpec(),
+      currentSpec: createSpec({ runId: run.id }),
     });
     const actions = createAgentRunActions(store as never);
 
@@ -290,6 +326,68 @@ describe("agent run store actions", () => {
     expect(store.get().projectError).toContain(
       "does not belong to the current Spec task",
     );
+  });
+
+  it("does not control a stale Spec run for the current task when the runId differs", async () => {
+    const run = createRun("run-stale-task", {
+      contract: createSpecContract("modify"),
+      conversationId: "conversation-1",
+      phase: "planning",
+      status: "planning",
+    });
+    fake.runs.set(run.id, run);
+    const store = createStore({
+      currentAgentRun: run,
+      currentConversation: createSpecConversation(),
+      currentSpec: createSpec({ runId: "run-current-task" }),
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await actions.cancelCurrentAgentRun();
+    await actions.sendAgentSteering("continue");
+
+    expect(fake.events).toHaveLength(0);
+    expect(store.get().currentAgentRun?.status).toBe("planning");
+    expect(store.get().projectError).toContain(
+      "does not belong to the current Spec task",
+    );
+  });
+
+  it("does not treat a terminal Spec run from another task as a valid cancel result", async () => {
+    const run = createRun("run-other-terminal", {
+      completedAt: "2026-01-01T00:01:00.000Z",
+      contract: {
+        ...compileTaskContract({
+          objective: "Spec run",
+          taskType: "component_edit",
+        }),
+        source: {
+          acceptanceCriteriaIds: ["criterion-1"],
+          executionMode: "modify",
+          mode: "spec",
+          requirementIds: ["story-1"],
+          revisionId: "rev-1",
+          specId: "spec-1",
+          taskId: "task-other",
+        },
+      },
+      conversationId: "conversation-1",
+      phase: "cancelled",
+      status: "cancelled",
+    });
+    fake.runs.set(run.id, run);
+    const store = createStore({
+      currentAgentRun: run,
+      currentConversation: createSpecConversation(),
+      currentSpec: createSpec(),
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await expect(actions.cancelCurrentAgentRunAndWait()).rejects.toThrow(
+      "AgentRun does not belong to the current Spec task.",
+    );
+
+    expect(fake.events).toHaveLength(0);
   });
 });
 
@@ -430,7 +528,7 @@ function createSpecConversation(): ProjectConversation {
   };
 }
 
-function createSpec(): DevelopmentSpec {
+function createSpec(patch: Partial<{ runId: string }> = {}): DevelopmentSpec {
   return {
     conversationId: "conversation-1",
     createdAt: "2026-01-01T00:00:00.000Z",
@@ -480,7 +578,7 @@ function createSpec(): DevelopmentSpec {
             id: "task-1",
             objective: "Run current task",
             requirementIds: ["story-1"],
-            runId: "run-current-task",
+            runId: patch.runId ?? "run-current-task",
             status: "running",
             title: "Current task",
           },

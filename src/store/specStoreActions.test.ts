@@ -899,6 +899,53 @@ describe("spec store actions", () => {
     expect(store.get().projectError).toBe("Running task is missing its AgentRun id.");
   });
 
+  it("does not cancel a stale AgentRun whose id is not the running task runId", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-current",
+          status: "running",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    const cancelCurrentAgentRunAndWait = vi.fn(async () =>
+      createRun("run-stale", {
+        contract: createSpecRunContract(spec, revision.tasks[0]),
+        status: "cancelled",
+      }),
+    );
+    const store = createStore({
+      cancelCurrentAgentRunAndWait,
+      currentAgentRun: createRun("run-stale", {
+        contract: createSpecRunContract(spec, revision.tasks[0]),
+      }),
+      currentConversation: createConversation("project-1", {
+        activeSpecId: spec.id,
+        conversationId: spec.conversationId,
+        mode: "spec",
+        specIds: [spec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.switchCurrentIterationToChat({ cancelActiveSpec: true });
+
+    expect(cancelCurrentAgentRunAndWait).not.toHaveBeenCalled();
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(fake.switchProjectConversationMode).not.toHaveBeenCalled();
+    expect(store.get().currentConversation?.mode).toBe("spec");
+    expect(store.get().projectError).toBe(
+      "Active AgentRun does not belong to the current Spec task.",
+    );
+  });
+
   it("keeps Spec mode when cancellation does not reach cancelled", async () => {
     const revision = createExecutableRevision({
       tasks: [

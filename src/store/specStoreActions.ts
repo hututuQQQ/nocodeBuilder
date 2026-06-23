@@ -1485,6 +1485,7 @@ function isRunForSpec(
     run.contract.source.specId === spec.id &&
     run.contract.source.revisionId === revision.id &&
     Boolean(runningTask) &&
+    runningTask?.runId === run.id &&
     runningTask?.id === run.contract.source.taskId
   );
 }
