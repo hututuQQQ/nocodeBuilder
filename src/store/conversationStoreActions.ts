@@ -11,6 +11,11 @@ import {
   conversationToSummary,
   upsertConversationSummary,
 } from "./conversationState";
+import {
+  ensureInitialBuildCompletedForIteration,
+  INITIAL_BUILD_ITERATION_GATE_ERROR,
+  readInitialBuildSpecForGate,
+} from "./initialBuildGate";
 import type { StoreAccess } from "./storeAccess";
 
 type ConversationActions = Pick<
@@ -33,10 +38,9 @@ export function createConversationActions({
       set({ isLoadingConversations: true, projectError: null });
 
       try {
-        const includeArchived = get().showArchivedConversations;
         const summaries = await projectApi.listProjectConversations(
           projectId,
-          includeArchived,
+          true,
         );
         const currentConversation = get().currentConversation;
         const canKeepCurrent =
@@ -61,11 +65,16 @@ export function createConversationActions({
           return;
         }
 
+        const initialBuildSpec = await readInitialBuildSpecForGate(
+          projectId,
+          summaries.find((summary) => summary.kind === "initial_build") ?? null,
+        );
+
         set({
           chatMessages: [],
           currentConversation: null,
           currentSpec: null,
-          historicalSpecs: [],
+          historicalSpecs: initialBuildSpec ? [initialBuildSpec] : [],
         });
       } catch (error) {
         const message = getProjectErrorMessage(error);
@@ -111,21 +120,22 @@ export function createConversationActions({
         return null;
       }
 
-      if (
-        conversationInput.kind === "iteration" &&
-        !canCreateIterationFromState(get(), targetProjectId)
-      ) {
-        const message =
-          "conversation: initial build must complete before creating iterations";
+      if (conversationInput.kind === "iteration") {
+        try {
+          await ensureInitialBuildCompletedForIteration(
+            targetProjectId,
+            get(),
+          );
+        } catch {
+          set((state) => ({
+            projectError: INITIAL_BUILD_ITERATION_GATE_ERROR,
+            terminalLogs: appendLogs(state.terminalLogs, [
+              "[conversation] New iteration blocked until Initial Spec completes.",
+            ]),
+          }));
 
-        set((state) => ({
-          projectError: message,
-          terminalLogs: appendLogs(state.terminalLogs, [
-            "[conversation] New iteration blocked until Initial Spec completes.",
-          ]),
-        }));
-
-        return null;
+          return null;
+        }
       }
 
       set({ isCreatingConversation: true, projectError: null });
@@ -139,9 +149,7 @@ export function createConversationActions({
         set((state) => ({
           chatMessages: conversation.messages,
           conversationSummaries: upsertConversationSummary(
-            state.conversationSummaries.filter(
-              (summary) => !summary.archivedAt,
-            ),
+            state.conversationSummaries,
             conversationToSummary(conversation),
           ),
           currentConversation: conversation,
@@ -234,18 +242,14 @@ export function createConversationActions({
 
         if (!isCurrentConversation) {
           set({
-            conversationSummaries: get().showArchivedConversations
-              ? nextSummaries
-              : nextSummaries.filter((summary) => !summary.archivedAt),
+            conversationSummaries: nextSummaries,
           });
           return;
         }
 
         set({
           chatMessages: [],
-          conversationSummaries: nextSummaries.filter(
-            (summary) => !summary.archivedAt,
-          ),
+          conversationSummaries: nextSummaries,
           currentConversation: null,
           currentSpec: null,
           historicalSpecs: [],
@@ -345,31 +349,6 @@ function isSpecWorkflowBusy(state: AppState) {
       state.isExecutingSpec ||
       state.isVerifyingSpec ||
       state.isSwitchingIterationMode,
-  );
-}
-
-function canCreateIterationFromState(state: AppState, projectId: string) {
-  if (state.currentProject?.id !== projectId) {
-    return false;
-  }
-
-  const projectSummaries = state.conversationSummaries.filter(
-    (summary) => summary.projectId === projectId,
-  );
-
-  if (projectSummaries.some((summary) => summary.kind === "iteration")) {
-    return true;
-  }
-
-  const initialBuild = projectSummaries.find(
-    (summary) => summary.kind === "initial_build",
-  );
-
-  return Boolean(
-    initialBuild &&
-      state.currentConversation?.id === initialBuild.id &&
-      state.currentSpec?.id === initialBuild.activeSpecId &&
-      state.currentSpec.status === "completed",
   );
 }
 

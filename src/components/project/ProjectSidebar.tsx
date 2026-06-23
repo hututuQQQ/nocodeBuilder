@@ -16,6 +16,7 @@ import type { ProjectConversation, ProjectConversationSummary } from "../../serv
 import type { DevelopmentSpec } from "../../spec-core/types";
 import { useAppStore } from "../../store/appStore";
 import { selectConversationList } from "../../store/conversationStoreActions";
+import { hasCompletedInitialBuildEvidence } from "../../store/initialBuildGate";
 
 type ProjectSidebarProps = {
   onOpenSettings: () => void;
@@ -39,6 +40,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
     (state) => state.currentConversation,
   );
   const currentSpec = useAppStore((state) => state.currentSpec);
+  const historicalSpecs = useAppStore((state) => state.historicalSpecs);
   const createFeatureSpecIteration = useAppStore(
     (state) => state.createFeatureSpecIteration,
   );
@@ -237,9 +239,11 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
               const canCreateIteration =
                 !isCurrent ||
                 canCreateIterationForCurrentProject(
+                  project.id,
                   conversationSummaries,
-                  currentConversation,
+                  currentProject,
                   currentSpec,
+                  historicalSpecs,
                 );
 
               return (
@@ -677,23 +681,21 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
 }
 
 function canCreateIterationForCurrentProject(
+  projectId: string,
   summaries: ProjectConversationSummary[],
-  currentConversation: ProjectConversation | null,
+  currentProject: { id: string } | null,
   currentSpec: DevelopmentSpec | null,
+  historicalSpecs: DevelopmentSpec[],
 ) {
-  if (summaries.some((summary) => summary.kind === "iteration")) {
-    return true;
-  }
-
-  const initialBuild = summaries.find(
-    (summary) => summary.kind === "initial_build",
+  return hasCompletedInitialBuildEvidence(
+    {
+      conversationSummaries: summaries,
+      currentProject,
+      currentSpec,
+      historicalSpecs,
+    },
+    projectId,
   );
-
-  if (!initialBuild || currentConversation?.id !== initialBuild.id) {
-    return false;
-  }
-
-  return currentSpec?.status === "completed";
 }
 
 function formatConversationMarker(conversation: ProjectConversationSummary) {

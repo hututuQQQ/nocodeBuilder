@@ -9,6 +9,7 @@ const fake = vi.hoisted(() => ({
   archiveProjectConversation: vi.fn(),
   createProjectConversation: vi.fn(),
   listProjectConversations: vi.fn(),
+  readSpec: vi.fn(),
   readProjectConversation: vi.fn(),
   unarchiveProjectConversation: vi.fn(),
 }));
@@ -30,13 +31,22 @@ vi.mock("../services/projects", () => ({
   },
 }));
 
+vi.mock("../services/specs", () => ({
+  specApi: {
+    readSpec: (...args: unknown[]) => fake.readSpec(...args),
+  },
+}));
+
 describe("conversation store actions", () => {
   beforeEach(() => {
     fake.archiveProjectConversation.mockReset();
     fake.createProjectConversation.mockReset();
     fake.listProjectConversations.mockReset();
+    fake.readSpec.mockReset();
     fake.readProjectConversation.mockReset();
     fake.unarchiveProjectConversation.mockReset();
+    fake.listProjectConversations.mockResolvedValue([]);
+    fake.readSpec.mockRejectedValue(new Error("spec not loaded"));
   });
 
   it("does not auto-create a Chat conversation when a project has no conversations", async () => {
@@ -47,7 +57,7 @@ describe("conversation store actions", () => {
 
     await actions.loadProjectConversations("project-1");
 
-    expect(fake.listProjectConversations).toHaveBeenCalledWith("project-1", false);
+    expect(fake.listProjectConversations).toHaveBeenCalledWith("project-1", true);
     expect(fake.createProjectConversation).not.toHaveBeenCalled();
     expect(store.get().conversationSummaries).toEqual([]);
     expect(store.get().currentConversation).toBeNull();
@@ -74,6 +84,37 @@ describe("conversation store actions", () => {
     expect(store.get().currentConversation).toEqual(conversation);
     expect(store.get().chatMessages).toEqual(conversation.messages);
     expect(store.get().loadCurrentSpec).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps archived completed Initial Spec evidence when no active iterations exist", async () => {
+    const archivedInitialBuild = createSummary({
+      activeSpecId: "spec-initial",
+      archivedAt: "2026-01-01T00:01:00.000Z",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      title: "Initial build",
+    });
+    const completedSpec = createSpec({
+      conversationId: "conversation-initial",
+      id: "spec-initial",
+      status: "completed",
+    });
+    fake.listProjectConversations.mockResolvedValue([archivedInitialBuild]);
+    fake.readSpec.mockResolvedValue(completedSpec);
+    const store = createStore();
+    const actions = createConversationActions(store as never);
+    store.set(actions as unknown as Partial<StoreState>);
+
+    await actions.loadProjectConversations("project-1");
+
+    expect(fake.listProjectConversations).toHaveBeenCalledWith("project-1", true);
+    expect(fake.readProjectConversation).not.toHaveBeenCalled();
+    expect(fake.readSpec).toHaveBeenCalledWith("project-1", "spec-initial");
+    expect(store.get().conversationSummaries).toEqual([archivedInitialBuild]);
+    expect(store.get().currentConversation).toBeNull();
+    expect(store.get().currentSpec).toBeNull();
+    expect(store.get().historicalSpecs).toEqual([completedSpec]);
   });
 
   it("does not create a new iteration while a Spec operation is busy", async () => {
@@ -189,6 +230,42 @@ describe("conversation store actions", () => {
         title: "Follow-up",
       }),
     );
+  });
+
+  it("creates the first iteration after a completed Initial Build was archived", async () => {
+    const archivedInitialBuild = createSummary({
+      activeSpecId: "spec-initial",
+      archivedAt: "2026-01-01T00:01:00.000Z",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      title: "Initial build",
+    });
+    const completedSpec = createSpec({
+      conversationId: "conversation-initial",
+      id: "spec-initial",
+      status: "completed",
+    });
+    const iteration = createConversation({
+      id: "conversation-iteration",
+      title: "Follow-up",
+    });
+    fake.createProjectConversation.mockResolvedValue(iteration);
+    const store = createStore({
+      conversationSummaries: [archivedInitialBuild],
+      historicalSpecs: [completedSpec],
+    });
+    const actions = createConversationActions(store as never);
+
+    await expect(
+      actions.createConversation("project-1", {
+        kind: "iteration",
+        mode: "chat",
+        title: "Follow-up",
+      }),
+    ).resolves.toEqual(iteration);
+
+    expect(fake.createProjectConversation).toHaveBeenCalledTimes(1);
   });
 
   it("allows later iterations once the project already has an iteration", async () => {
@@ -318,6 +395,16 @@ function createConversation(
     specIds: [],
     title: "Iteration",
     updatedAt: "2026-01-01T00:00:00.000Z",
+    ...patch,
+  };
+}
+
+function createSpec(patch: Record<string, unknown> = {}) {
+  return {
+    conversationId: "conversation-1",
+    id: "spec-1",
+    projectId: "project-1",
+    status: "review",
     ...patch,
   };
 }

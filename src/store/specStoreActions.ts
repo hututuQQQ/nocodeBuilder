@@ -42,6 +42,7 @@ import {
   persistConversation,
   upsertConversationSummary,
 } from "./conversationState";
+import { ensureInitialBuildCompletedForIteration } from "./initialBuildGate";
 import type { StoreAccess } from "./storeAccess";
 
 type SpecActions = Pick<
@@ -245,6 +246,13 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
           projectError:
             "Wait for the current Spec operation to finish before creating a new iteration.",
         });
+        return null;
+      }
+
+      try {
+        await ensureInitialBuildCompletedForIteration(project.id, get());
+      } catch (error) {
+        recordSpecError(set, error);
         return null;
       }
 

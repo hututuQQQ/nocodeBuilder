@@ -13,6 +13,7 @@ const fake = vi.hoisted(() => ({
   createProjectConversation: vi.fn(),
   createSpec: vi.fn(),
   deleteUnattachedSpec: vi.fn(),
+  listProjectConversations: vi.fn(),
   readSpec: vi.fn(),
   requestFeatureSpec: vi.fn(),
   requestInitialSpec: vi.fn(),
@@ -66,6 +67,8 @@ vi.mock("../services/projects", () => ({
   projectApi: {
     createProjectConversation: (...args: unknown[]) =>
       fake.createProjectConversation(...args),
+    listProjectConversations: (...args: unknown[]) =>
+      fake.listProjectConversations(...args),
     listFiles: vi.fn(async () => ({
       children: [],
       kind: "directory",
@@ -103,6 +106,7 @@ describe("spec store actions", () => {
     fake.createProjectConversation.mockReset();
     fake.createSpec.mockReset();
     fake.deleteUnattachedSpec.mockReset();
+    fake.listProjectConversations.mockReset();
     fake.readSpec.mockReset();
     fake.requestFeatureSpec.mockReset();
     fake.requestInitialSpec.mockReset();
@@ -114,6 +118,15 @@ describe("spec store actions", () => {
     fake.verificationReports = new Map();
     fake.createSpec.mockImplementation(async (_projectId: string, spec: DevelopmentSpec) => spec);
     fake.deleteUnattachedSpec.mockResolvedValue(undefined);
+    fake.listProjectConversations.mockResolvedValue([
+      createConversationSummary({
+        activeSpecId: "spec-initial",
+        id: "conversation-1",
+        kind: "initial_build",
+        mode: "spec",
+        title: "Initial build",
+      }),
+    ]);
     fake.readSpec.mockImplementation(async (_projectId: string, specId: string) =>
       createSpec({ id: specId, status: "completed" }),
     );
@@ -191,6 +204,42 @@ describe("spec store actions", () => {
     expect(store.get().currentConversation).toBeNull();
     expect(store.get().currentSpec).toBeNull();
     expect(store.get().projectError).toBe("model unavailable");
+  });
+
+  it("does not request a Feature Spec iteration before Initial Build completes", async () => {
+    fake.listProjectConversations.mockResolvedValue([
+      createConversationSummary({
+        activeSpecId: "spec-initial",
+        id: "conversation-1",
+        kind: "initial_build",
+        mode: "spec",
+        title: "Initial build",
+      }),
+    ]);
+    fake.readSpec.mockResolvedValue(
+      createSpec({
+        conversationId: "conversation-1",
+        id: "spec-initial",
+        status: "review",
+      }),
+    );
+    const store = createStore();
+    const actions = createSpecActions(store as never);
+
+    await expect(
+      actions.createFeatureSpecIteration(
+        "project-1",
+        "Checkout copy",
+        "Improve checkout copy",
+      ),
+    ).resolves.toBeNull();
+
+    expect(fake.requestFeatureSpec).not.toHaveBeenCalled();
+    expect(fake.createSpec).not.toHaveBeenCalled();
+    expect(fake.createProjectConversation).not.toHaveBeenCalled();
+    expect(store.get().projectError).toBe(
+      "conversation: initial build must complete before creating iterations",
+    );
   });
 
   it("does not create a Feature Spec iteration while a Spec operation is busy", async () => {
@@ -1453,6 +1502,25 @@ function createConversation(
     specIds: (input.specIds as string[] | undefined) ?? [],
     title: (input.title as string | undefined) ?? "Spec iteration",
     updatedAt: now,
+  };
+}
+
+function createConversationSummary(
+  patch: Partial<ProjectConversationSummary> = {},
+): ProjectConversationSummary {
+  return {
+    activeSpecId: null,
+    archivedAt: null,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    id: "conversation-1",
+    kind: "iteration",
+    lastMessageAt: "2026-01-01T00:00:00.000Z",
+    messageCount: 0,
+    mode: "chat",
+    projectId: "project-1",
+    title: "Iteration",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    ...patch,
   };
 }
 
