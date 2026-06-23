@@ -1066,6 +1066,28 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
     return;
   }
 
+  const incompleteTaskReports = revision.tasks.filter((task) => {
+    if (!task.runId) {
+      return true;
+    }
+
+    return verificationReports.get(task.runId) !== "passed";
+  });
+
+  if (incompleteTaskReports.length > 0) {
+    const output = `Task verification reports are not all passing: ${incompleteTaskReports
+      .map((task) => task.id)
+      .join(", ")}.`;
+    await saveSpecToStore(
+      store,
+      markSpecBlocked(
+        markFinalVerificationFailed(spec, "task verification reports", output),
+        output,
+      ),
+    );
+    return;
+  }
+
   const installRequired =
     spec.kind === "initial_build" ||
     (await didSpecChangePackageJson(project.id, revision.tasks));

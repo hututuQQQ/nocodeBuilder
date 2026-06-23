@@ -724,6 +724,66 @@ describe("spec store actions", () => {
     expect(store.get().runProjectCommand).not.toHaveBeenCalled();
   });
 
+  it("blocks completion when any task verification report failed even if required criteria passed", async () => {
+    const payload = createGeneratedPayload();
+    const revision = createExecutableRevision({
+      requirements: {
+        ...payload.requirements,
+        acceptanceCriteria: [
+          ...payload.requirements.acceptanceCriteria,
+          {
+            description: "Optional polish is verified.",
+            id: "criterion-optional",
+            required: false,
+          },
+        ],
+      },
+      tasks: [
+        createExecutableTask("task-1", {
+          acceptanceCriteriaIds: ["criterion-1"],
+          runId: "run-1",
+          status: "passed",
+        }),
+        createExecutableTask("task-2", {
+          acceptanceCriteriaIds: ["criterion-optional"],
+          runId: "run-2",
+          status: "passed",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "verifying",
+    });
+    fake.agentRuns.set("run-1", createRun("run-1", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "completed",
+      status: "completed",
+    }));
+    fake.agentRuns.set("run-2", createRun("run-2", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "completed",
+      status: "completed",
+    }));
+    fake.verificationReports.set("run-1", createVerificationReport("run-1", "passed"));
+    fake.verificationReports.set("run-2", createVerificationReport("run-2", "failed"));
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    expect(store.get().currentSpec?.status).toBe("blocked");
+    expect(store.get().currentSpec?.failureMessage).toContain("task-2");
+    expect(store.get().currentSpec?.finalVerification).toMatchObject({
+      command: "task verification reports",
+      success: false,
+    });
+    expect(store.get().runProjectCommand).not.toHaveBeenCalled();
+  });
+
   it("does not retry verification without a failed final verification marker", async () => {
     const revision = createExecutableRevision({
       tasks: [
