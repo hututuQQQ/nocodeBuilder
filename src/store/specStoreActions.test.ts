@@ -1104,6 +1104,36 @@ describe("spec store actions", () => {
     );
   });
 
+  it("does not switch to Chat with a stale Spec from another conversation", async () => {
+    const staleSpec = createSpec({
+      conversationId: "conversation-stale",
+      id: "spec-stale",
+      projectId: "project-1",
+      status: "review",
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: "spec-current",
+        conversationId: "conversation-1",
+        mode: "spec",
+        specIds: ["spec-current"],
+        title: "Spec iteration",
+      }),
+      currentSpec: staleSpec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.switchCurrentIterationToChat({ cancelActiveSpec: true });
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(fake.switchProjectConversationMode).not.toHaveBeenCalled();
+    expect(store.get().currentConversation?.mode).toBe("spec");
+    expect(store.get().currentSpec).toBe(staleSpec);
+    expect(store.get().projectError).toBe(
+      "Active Spec does not belong to the current conversation.",
+    );
+  });
+
   it("cancels the running Spec before switching to Chat", async () => {
     const revision = createExecutableRevision({
       tasks: [

@@ -663,6 +663,13 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         return;
       }
 
+      if (!isActiveConversationSpec(conversation, spec)) {
+        set({
+          projectError: "Active Spec does not belong to the current conversation.",
+        });
+        return;
+      }
+
       if (spec.status === "revising" || get().isRevisingSpec) {
         set({
           projectError: "Wait for the Spec revision to finish before switching modes.",
@@ -1602,6 +1609,19 @@ function isSpecWorkflowBusy(state: AppState) {
       state.isExecutingSpec ||
       state.isVerifyingSpec ||
       state.isSwitchingIterationMode,
+  );
+}
+
+function isActiveConversationSpec(
+  conversation: ProjectConversation,
+  spec: DevelopmentSpec,
+) {
+  return (
+    conversation.mode === "spec" &&
+    conversation.activeSpecId === spec.id &&
+    conversation.specIds.includes(spec.id) &&
+    conversation.id === spec.conversationId &&
+    conversation.projectId === spec.projectId
   );
 }
 
