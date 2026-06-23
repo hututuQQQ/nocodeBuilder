@@ -9,6 +9,7 @@ const fake = vi.hoisted(() => ({
   activeController: false,
   events: [] as AgentEvent[],
   modifyCalls: [] as unknown[],
+  specCalls: [] as unknown[],
   runs: new Map<string, AgentRun>(),
   approvals: [] as AgentApproval[],
 }));
@@ -27,10 +28,14 @@ vi.mock("../agent-runtime/runController", () => ({
     fake.modifyCalls.push(args);
     return true;
   }),
-  runSpecTaskRuntime: vi.fn(async () => ({
-    run: null,
-    verificationReport: null,
-  })),
+  runSpecTaskRuntime: vi.fn(async (...args: unknown[]) => {
+    fake.specCalls.push(args);
+
+    return {
+      run: null,
+      verificationReport: null,
+    };
+  }),
 }));
 
 vi.mock("../services/projects", () => ({
@@ -51,6 +56,15 @@ vi.mock("../services/agentRuntime", () => ({
       fake.events.filter((event) => event.runId === runId),
     ),
     listRuns: vi.fn(async () => [...fake.runs.values()]),
+    resolveApproval: vi.fn(async (_projectId: string, runId: string, approvalId: string, decision: string) => {
+      const approval = fake.approvals.find((item) => item.runId === runId && item.id === approvalId);
+
+      return {
+        ...approval,
+        decision,
+        resolvedAt: "2026-01-01T00:02:00.000Z",
+      };
+    }),
     appendEvent: vi.fn(async (_projectId: string, event: Omit<AgentEvent, "id" | "sequence">) =>
       appendEvent(event),
     ),
@@ -73,6 +87,7 @@ describe("agent run store actions", () => {
     fake.activeController = false;
     fake.events = [];
     fake.modifyCalls = [];
+    fake.specCalls = [];
     fake.runs = new Map();
     fake.approvals = [];
   });
@@ -128,6 +143,75 @@ describe("agent run store actions", () => {
       run.contract.objective,
       { existingRun: run },
     ]);
+  });
+
+  it("resumes a Spec run with its original generate execution mode", async () => {
+    const run = createRun("run-generate-resume", {
+      contract: createSpecContract("generate"),
+      conversationId: "conversation-1",
+      phase: "paused",
+      status: "paused",
+    });
+    fake.runs.set(run.id, run);
+    const continueCurrentSpecExecution = vi.fn(async () => undefined);
+    const store = createStore({
+      continueCurrentSpecExecution,
+      currentAgentRun: run,
+      currentConversation: createSpecConversation(),
+      currentSpec: createSpec(),
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await actions.resumeCurrentAgentRun();
+
+    expect(fake.modifyCalls).toHaveLength(0);
+    expect(fake.specCalls).toHaveLength(1);
+    expect(fake.specCalls[0]).toMatchObject([
+      {
+        contract: run.contract,
+        conversationId: "conversation-1",
+        executionMode: "generate",
+        existingRun: run,
+        taskObjective: run.contract.objective,
+      },
+    ]);
+    expect(continueCurrentSpecExecution).toHaveBeenCalledTimes(1);
+  });
+
+  it("continues Spec orchestration after approval resumes the run", async () => {
+    const run = createRun("run-approval-resume", {
+      contract: createSpecContract("modify"),
+      conversationId: "conversation-1",
+      phase: "waiting_approval",
+      status: "waiting_approval",
+    });
+    const approval = createApproval(run.id);
+    fake.runs.set(run.id, run);
+    fake.approvals.push(approval);
+    const continueCurrentSpecExecution = vi.fn(async () => undefined);
+    const store = createStore({
+      continueCurrentSpecExecution,
+      currentAgentApproval: approval,
+      currentAgentRun: run,
+      currentConversation: createSpecConversation(),
+      currentSpec: createSpec(),
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await actions.approveCurrentAgentApproval();
+
+    expect(fake.modifyCalls).toHaveLength(0);
+    expect(fake.specCalls).toHaveLength(1);
+    expect(fake.specCalls[0]).toMatchObject([
+      {
+        conversationId: "conversation-1",
+        executionMode: "modify",
+        existingRun: run,
+        taskObjective: run.contract.objective,
+      },
+    ]);
+    expect(store.get().currentAgentApproval).toBeNull();
+    expect(continueCurrentSpecExecution).toHaveBeenCalledTimes(1);
   });
 
   it("does not request pause for waiting approval runs", async () => {
@@ -223,6 +307,7 @@ function createStore(patch: Partial<StoreState> = {}) {
   let state: StoreState = {
     agentEvents: [],
     agentRuns: [],
+    continueCurrentSpecExecution: vi.fn(async () => undefined),
     currentAgentApproval: null,
     currentAgentRun: null,
     currentProject: {
@@ -258,6 +343,7 @@ function createStore(patch: Partial<StoreState> = {}) {
 type StoreState = {
   agentEvents: AgentEvent[];
   agentRuns: AgentRun[];
+  continueCurrentSpecExecution: () => Promise<void>;
   currentAgentApproval: AgentApproval | null;
   currentAgentRun: AgentRun | null;
   currentProject: {
@@ -301,6 +387,28 @@ function createRun(runId: string, patch: Partial<AgentRun> = {}): AgentRun {
     toolCalls: 0,
     updatedAt: now,
     ...patch,
+  };
+}
+
+function createSpecContract(
+  executionMode: "generate" | "modify",
+): AgentRun["contract"] {
+  return {
+    ...compileTaskContract({
+      objective: executionMode === "generate"
+        ? "Generate the initial app foundation"
+        : "Modify the current app",
+      taskType: "component_edit",
+    }),
+    source: {
+      acceptanceCriteriaIds: ["criterion-1"],
+      executionMode,
+      mode: "spec",
+      requirementIds: ["story-1"],
+      revisionId: "rev-1",
+      specId: "spec-1",
+      taskId: "task-1",
+    },
   };
 }
 
