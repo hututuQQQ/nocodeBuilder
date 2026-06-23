@@ -357,12 +357,21 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
 
     continueCurrentSpecExecution: async () => {
       const spec = get().currentSpec;
+      const conversation = get().currentConversation;
 
       if (
         !spec ||
+        !conversation ||
         get().isExecutingSpec ||
         !["approved", "building", "verifying"].includes(spec.status)
       ) {
+        return;
+      }
+
+      if (!isActiveConversationSpec(conversation, spec)) {
+        set({
+          projectError: "Active Spec does not belong to the current conversation.",
+        });
         return;
       }
 
@@ -499,8 +508,21 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
 
     retrySpecTask: async (taskId) => {
       const spec = get().currentSpec;
+      const conversation = get().currentConversation;
 
-      if (!spec || get().isExecutingSpec || spec.status !== "blocked") {
+      if (
+        !spec ||
+        !conversation ||
+        get().isExecutingSpec ||
+        spec.status !== "blocked"
+      ) {
+        return;
+      }
+
+      if (!isActiveConversationSpec(conversation, spec)) {
+        set({
+          projectError: "Active Spec does not belong to the current conversation.",
+        });
         return;
       }
 
@@ -544,8 +566,16 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
 
     retrySpecVerification: async () => {
       const spec = get().currentSpec;
+      const conversation = get().currentConversation;
 
-      if (!spec || !canRetrySpecVerification(spec)) {
+      if (!spec || !conversation || !canRetrySpecVerification(spec)) {
+        return;
+      }
+
+      if (!isActiveConversationSpec(conversation, spec)) {
+        set({
+          projectError: "Active Spec does not belong to the current conversation.",
+        });
         return;
       }
 

@@ -655,6 +655,40 @@ describe("spec store actions", () => {
     });
   });
 
+  it("does not continue execution for a stale Spec from another conversation", async () => {
+    const revision = createExecutableRevision({
+      approvedAt: "2026-01-01T00:00:01.000Z",
+      tasks: [createExecutableTask("task-1")],
+    });
+    const staleSpec = createSpec({
+      conversationId: "conversation-stale",
+      currentRevisionId: revision.id,
+      id: "spec-stale",
+      revisions: [revision],
+      status: "approved",
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: "spec-current",
+        conversationId: "conversation-1",
+        mode: "spec",
+        specIds: ["spec-current"],
+        title: "Spec iteration",
+      }),
+      currentSpec: staleSpec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(fake.runSpecTaskRuntime).not.toHaveBeenCalled();
+    expect(store.get().currentSpec).toBe(staleSpec);
+    expect(store.get().projectError).toBe(
+      "Active Spec does not belong to the current conversation.",
+    );
+  });
+
   it("marks a missing AgentRun as retryable blocked instead of leaving it running", async () => {
     const revision = createExecutableRevision({
       tasks: [
@@ -909,6 +943,45 @@ describe("spec store actions", () => {
       runId: undefined,
       status: "pending",
     });
+  });
+
+  it("does not retry a failed task for a stale Spec from another conversation", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          error: "failed",
+          runId: "run-1",
+          status: "failed",
+        }),
+      ],
+    });
+    const staleSpec = createSpec({
+      conversationId: "conversation-stale",
+      currentRevisionId: revision.id,
+      id: "spec-stale",
+      revisions: [revision],
+      status: "blocked",
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: "spec-current",
+        conversationId: "conversation-1",
+        mode: "spec",
+        specIds: ["spec-current"],
+        title: "Spec iteration",
+      }),
+      currentSpec: staleSpec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.retrySpecTask("task-1");
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(fake.runSpecTaskRuntime).not.toHaveBeenCalled();
+    expect(store.get().currentSpec).toBe(staleSpec);
+    expect(store.get().projectError).toBe(
+      "Active Spec does not belong to the current conversation.",
+    );
   });
 
   it("does not retry verification without a failed final verification marker", async () => {
@@ -1697,6 +1770,17 @@ describe("spec store actions", () => {
 });
 
 function createStore(patch: Partial<StoreState> = {}) {
+  const inferredConversation =
+    !Object.prototype.hasOwnProperty.call(patch, "currentConversation") &&
+    patch.currentSpec
+      ? createConversation(patch.currentSpec.projectId, {
+          activeSpecId: patch.currentSpec.id,
+          conversationId: patch.currentSpec.conversationId,
+          mode: "spec",
+          specIds: [patch.currentSpec.id],
+          title: "Spec iteration",
+        })
+      : null;
   let state: StoreState = {
     agentRuns: [],
     cancelCurrentAgentRunAndWait: vi.fn(async () => null),
@@ -1704,7 +1788,7 @@ function createStore(patch: Partial<StoreState> = {}) {
     chatMessages: [],
     conversationSummaries: [],
     currentAgentRun: null,
-    currentConversation: null,
+    currentConversation: inferredConversation,
     currentProject: createProject(),
     currentSpec: null,
     fileTree: {
