@@ -538,6 +538,51 @@ describe("spec store actions", () => {
     expect(store.get().projectError).toBe("active spec file missing");
   });
 
+  it("does not activate a stale Spec when activeSpecId changes while loading", async () => {
+    const staleSpec = createSpec({
+      id: "spec-stale",
+      status: "completed",
+    });
+    let store: ReturnType<typeof createStore>;
+    fake.readSpec.mockImplementation(async () => {
+      store.set({
+        currentConversation: createConversation("project-1", {
+          activeSpecId: null,
+          conversationId: "conversation-1",
+          mode: "chat",
+          specIds: ["spec-stale"],
+          title: "Chat iteration",
+        }),
+        currentSpec: null,
+        historicalSpecs: [],
+        isLoadingSpec: true,
+      });
+      return staleSpec;
+    });
+    store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: "spec-stale",
+        conversationId: "conversation-1",
+        mode: "spec",
+        specIds: ["spec-stale"],
+        title: "Spec iteration",
+      }),
+      currentSpec: null,
+      historicalSpecs: [],
+    });
+    const actions = createSpecActions(store as never);
+    store.set(actions as unknown as Partial<StoreState>);
+
+    await actions.loadCurrentSpec();
+
+    expect(fake.readSpec).toHaveBeenCalledWith("project-1", "spec-stale");
+    expect(store.get().currentConversation?.mode).toBe("chat");
+    expect(store.get().currentConversation?.activeSpecId).toBeNull();
+    expect(store.get().currentSpec).toBeNull();
+    expect(store.get().historicalSpecs).toEqual([]);
+    expect(store.get().isLoadingSpec).toBe(true);
+  });
+
   it("persists a task runId before launching Spec runtime", async () => {
     const revision = createExecutableRevision({
       tasks: [createExecutableTask("task-1")],

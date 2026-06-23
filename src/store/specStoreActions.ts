@@ -79,15 +79,22 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         return;
       }
 
+      const isStillCurrentSpecLoad = () => {
+        const state = get();
+
+        return (
+          state.currentProject?.id === project.id &&
+          state.currentConversation?.id === conversation.id &&
+          state.currentConversation?.activeSpecId === conversation.activeSpecId
+        );
+      };
+
       set({ isLoadingSpec: true, projectError: null });
 
       try {
         const spec = await specApi.readSpec(project.id, conversation.activeSpecId);
 
-        if (
-          get().currentProject?.id !== project.id ||
-          get().currentConversation?.id !== conversation.id
-        ) {
+        if (!isStillCurrentSpecLoad()) {
           return;
         }
 
@@ -101,17 +108,16 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
           void get().continueCurrentSpecExecution();
         }
       } catch (error) {
-        if (
-          get().currentProject?.id !== project.id ||
-          get().currentConversation?.id !== conversation.id
-        ) {
+        if (!isStillCurrentSpecLoad()) {
           return;
         }
 
         set({ currentSpec: null, historicalSpecs: [] });
         recordSpecError(set, error);
       } finally {
-        set({ isLoadingSpec: false });
+        if (isStillCurrentSpecLoad()) {
+          set({ isLoadingSpec: false });
+        }
       }
     },
 
