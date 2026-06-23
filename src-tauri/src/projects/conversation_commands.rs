@@ -16,7 +16,7 @@ use super::{
 
 const CONVERSATIONS_DIR: &str = "conversations";
 const INDEX_FILE: &str = "index.json";
-const DEFAULT_CONVERSATION_TITLE: &str = "New chat";
+const DEFAULT_CONVERSATION_TITLE: &str = "New iteration";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -778,6 +778,12 @@ mod tests {
             &vec!["spec-1".to_string(), "spec-2".to_string()],
         )
         .is_ok());
+    }
+
+    #[test]
+    fn untitled_iterations_use_iteration_label() {
+        assert_eq!(normalize_title(None), "New iteration");
+        assert_eq!(normalize_title(Some("   ")), "New iteration");
     }
 
     #[test]

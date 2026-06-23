@@ -287,7 +287,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                         <FolderOpen size={14} aria-hidden="true" />
                       </button>
                       <button
-                        aria-label={`Show archived chats for ${project.name}`}
+                        aria-label={`Show archived iterations for ${project.name}`}
                         className={`grid size-7 place-items-center rounded border transition disabled:cursor-not-allowed disabled:text-zinc-700 ${
                           isCurrent && showArchivedConversations
                             ? "border-teal-400/40 bg-teal-400/10 text-teal-100"
@@ -302,8 +302,8 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                         }
                         title={
                           isCurrent && showArchivedConversations
-                            ? "Show active chats"
-                            : "Show archived chats"
+                            ? "Show active iterations"
+                            : "Show archived iterations"
                         }
                         type="button"
                       >
@@ -338,13 +338,13 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                             className="animate-spin"
                             aria-hidden="true"
                           />
-                          Loading chats
+                          Loading iterations
                         </div>
                       ) : visibleConversations.length === 0 ? (
                         <div className="px-2 py-2 text-xs text-zinc-500">
                           {showArchivedConversations
-                            ? "No archived chats"
-                            : "No active chats"}
+                            ? "No archived iterations"
+                            : "No active iterations"}
                         </div>
                       ) : (
                         visibleConversations.map((conversation) => {
