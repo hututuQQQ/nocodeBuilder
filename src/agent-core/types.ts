@@ -90,6 +90,7 @@ export type AgentRun = {
 export type AgentEventType =
   | "run.created"
   | "run.started"
+  | "run.pause_requested"
   | "run.paused"
   | "run.resumed"
   | "run.cancel_requested"
@@ -106,6 +107,7 @@ export type AgentEventType =
   | "policy.denied"
   | "approval.requested"
   | "approval.resolved"
+  | "approval.expired"
   | "verification.started"
   | "verification.completed"
   | "checkpoint.created"
@@ -123,7 +125,7 @@ export type AgentEvent = {
   artifactIds?: string[];
 };
 
-export type AgentApprovalDecision = "approved" | "denied";
+export type AgentApprovalDecision = "approved" | "denied" | "expired";
 
 export type AgentApproval = {
   id: string;
@@ -206,6 +208,7 @@ export type ToolResult = {
     changedFiles: string[];
     deletedFiles?: string[];
     packageChanged: boolean;
+    readSnapshots?: AgentReadSnapshot[];
   };
 };
 

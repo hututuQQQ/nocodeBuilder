@@ -17,6 +17,7 @@ import { compileTaskContract } from "../agent-core/contract/taskContract";
 import {
   RunController,
   type HeadlessModelAction,
+  readRunDriveStateMetadata,
   type RunContextBundle,
   type RunControllerPorts,
 } from "../agent-core/runtime/runController";
@@ -194,21 +195,24 @@ async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
           runAbortController.signal,
         );
 
-    completeStreamForRun(store, stream, finalRun, userRequest);
+    await completeStreamForRun(project.id, store, stream, finalRun);
     void persistCurrentConversation(store);
     return finalRun.status === "completed";
   } catch (error) {
     const message = getProjectErrorMessage(error);
+    const cleanupMessage = await cleanupRunAfterRuntimeError({
+      message,
+      projectId: project.id,
+      runId: controllerRunId,
+      signalAborted: runAbortController.signal.aborted,
+      store,
+    });
 
-    if (finalRun && !isTerminalAgentRunStatus(finalRun.status)) {
-      await failRunBestEffort(project.id, finalRun, message);
-    }
-
-    stream.failWithTypewriter(`Agent run failed: ${message}`);
+    stream.failWithTypewriter(`Agent run failed: ${cleanupMessage}`);
     void persistCurrentConversation(store);
     store.set((state) => ({
-      projectError: message,
-      terminalLogs: appendLogs(state.terminalLogs, [`[agent:error] ${message}`]),
+      projectError: cleanupMessage,
+      terminalLogs: appendLogs(state.terminalLogs, [`[agent:error] ${cleanupMessage}`]),
     }));
     return false;
   } finally {
@@ -242,7 +246,7 @@ function createApplicationPorts({
   userRequest: string;
 }): RunControllerPorts {
   return {
-    approvals: createApprovalPort(project.id),
+    approvals: createApprovalPort(project.id, store),
     artifacts: {
       write: async ({ content, relativePath, runId }) => {
         const artifact = await agentRuntimeApi.writeArtifact(
@@ -348,6 +352,8 @@ function createApplicationPorts({
     },
     workspace: {
       fingerprint: () => computeWorkspaceFingerprint(project),
+      validateReadSnapshots: (snapshots) =>
+        validateReadSnapshotsForProject(project, snapshots),
     },
   };
 }
@@ -527,13 +533,12 @@ async function executeToolPort({
     status: result.observation.ok ? "success" : "domain_error",
     structuredData: result.observation,
     summary: result.observation.summary,
-    workspaceEffects: result.didChangeFiles
-      ? {
-          changedFiles: result.changedFiles ?? [],
-          deletedFiles: result.deletedFiles ?? [],
-          packageChanged: result.didChangePackage === true,
-        }
-      : undefined,
+    workspaceEffects: {
+      changedFiles: result.didChangeFiles ? result.changedFiles ?? [] : [],
+      deletedFiles: result.didChangeFiles ? result.deletedFiles ?? [] : [],
+      packageChanged: result.didChangePackage === true,
+      readSnapshots: collectReadSnapshots(session.runState),
+    },
   };
 }
 
@@ -564,22 +569,7 @@ async function verifyRunPort({
     title: "Verification",
   });
   const verifier = new AgentVerifier({
-    httpProbe: async (url) => {
-      try {
-        const response = await fetch(url, { method: "GET" });
-        return {
-          ok: response.ok,
-          status: response.status,
-          summary: response.ok ? "ok" : response.statusText,
-        };
-      } catch (error) {
-        return {
-          ok: false,
-          status: 0,
-          summary: getProjectErrorMessage(error),
-        };
-      }
-    },
+    httpProbe: (url) => projectApi.probePreviewUrl(url),
     readFile: (path) => projectApi.readFile(project.id, path),
     readSiteSpec: () => agentRuntimeApi.readSiteSpec(project.id),
     recordArtifact: async ({ content, relativePath, runId }) => {
@@ -695,14 +685,36 @@ async function buildAgentStepContext({
   };
 }
 
-function createApprovalPort(projectId: string): RunControllerPorts["approvals"] {
+function createApprovalPort(
+  projectId: string,
+  store: StoreAccess,
+): RunControllerPorts["approvals"] {
   return {
-    create: (approval) => agentRuntimeApi.createApproval(projectId, approval),
+    create: async (approval) => {
+      const created = await agentRuntimeApi.createApproval(projectId, approval);
+      const run = await agentRuntimeApi.getRun(projectId, created.runId);
+      const events = await agentRuntimeApi.listEvents(projectId, created.runId);
+      store.set((state) => ({
+        agentEvents: events,
+        agentRuns: run
+          ? [run, ...state.agentRuns.filter((item) => item.id !== run.id)]
+          : state.agentRuns,
+        currentAgentApproval: created,
+        currentAgentRun: run ?? state.currentAgentRun,
+      }));
+      return created;
+    },
     getLatestResolved: async (runId) => {
       const approvals = await agentRuntimeApi.listApprovals(projectId, runId);
       return [...approvals]
         .reverse()
         .find((approval) => approval.decision && !isExpiredApproval(approval)) ?? null;
+    },
+    getLatestUnresolved: async (runId) => {
+      const approvals = await agentRuntimeApi.listApprovals(projectId, runId);
+      return [...approvals]
+        .reverse()
+        .find((approval) => !approval.decision && !approval.resolvedAt) ?? null;
     },
     getPending: (runId) => agentRuntimeApi.getPendingApproval(projectId, runId),
     listApprovedHashes: async (runId) => {
@@ -715,6 +727,22 @@ function createApprovalPort(projectId: string): RunControllerPorts["approvals"] 
           )
           .map((approval) => approval.normalizedArgsHash),
       );
+    },
+    resolve: async (runId, approvalId, decision, resolvedAt) => {
+      const resolved = await agentRuntimeApi.resolveApproval(
+        projectId,
+        runId,
+        approvalId,
+        decision,
+        resolvedAt,
+      );
+      store.set((state) => ({
+        currentAgentApproval:
+          state.currentAgentApproval?.id === approvalId
+            ? null
+            : state.currentAgentApproval,
+      }));
+      return resolved;
     },
   };
 }
@@ -939,18 +967,104 @@ function projectRunToStore(store: StoreAccess, run: AgentRun, event: AgentEvent)
   }));
 }
 
-function completeStreamForRun(
+function collectReadSnapshots(runState: AgentRunState) {
+  return Array.from(runState.readFiles.values()).map((file) => ({
+    contentHash: file.contentHash,
+    path: file.path,
+    readAt: file.readAt,
+  }));
+}
+
+async function validateReadSnapshotsForProject(
+  project: ProjectInfo,
+  snapshots: Array<{ contentHash: string; path: string; readAt: string }>,
+) {
+  const validSnapshots = [];
+
+  for (const snapshot of snapshots) {
+    if (!isReadSnapshot(snapshot)) {
+      continue;
+    }
+
+    try {
+      const content = await projectApi.readFile(project.id, snapshot.path);
+
+      if (hashText(content) === snapshot.contentHash) {
+        validSnapshots.push(snapshot);
+      }
+    } catch {
+      // Missing or unreadable files invalidate only that read-before-write snapshot.
+    }
+  }
+
+  return validSnapshots;
+}
+
+async function cleanupRunAfterRuntimeError({
+  message,
+  projectId,
+  runId,
+  signalAborted,
+  store,
+}: {
+  message: string;
+  projectId: string;
+  runId: string;
+  signalAborted: boolean;
+  store: StoreAccess;
+}) {
+  try {
+    const latestRun = await agentRuntimeApi.getRun(projectId, runId);
+
+    if (!latestRun || shouldLeaveRunStateAfterError(latestRun)) {
+      return message;
+    }
+
+    const transition = latestRun.cancelRequested || signalAborted
+      ? new RunStateMachine().transition(latestRun, { type: "cancel" })
+      : new RunStateMachine().transition(latestRun, { type: "fail", reason: message });
+    const { run, event } = await agentRuntimeApi.transitionRun(
+      projectId,
+      latestRun,
+      transition,
+    );
+    projectRunToStore(store, run, event);
+    return message;
+  } catch (cleanupError) {
+    return [
+      message,
+      `Cleanup failed: ${getProjectErrorMessage(cleanupError)}`,
+    ].join("\n");
+  }
+}
+
+function shouldLeaveRunStateAfterError(run: AgentRun) {
+  return (
+    isTerminalAgentRunStatus(run.status) ||
+    run.status === "waiting_approval" ||
+    run.status === "paused"
+  );
+}
+
+async function completeStreamForRun(
+  projectId: string,
   store: StoreAccess,
   stream: AgentStreamController,
   run: AgentRun,
-  userRequest: string,
 ) {
   if (run.status === "completed") {
     const report = store.get().currentVerificationReport;
+    const checkpoint = await agentRuntimeApi.getLatestCheckpoint(projectId, run.id);
+    const metadata = checkpoint
+      ? readRunDriveStateMetadata(checkpoint.plan)
+      : { userPlan: null };
+    const modelSummary = run.contract.taskType === "answer"
+      ? metadata.answerMessage
+      : metadata.finishSummary;
     stream.completeWithTypewriter(
       [
-        `Done: ${userRequest}`,
-        report ? `Verifier: ${report.status}.` : "Verifier: completed.",
+        modelSummary?.trim() || "Run completed.",
+        report ? `Verification: ${report.status}.` : "Verification: completed.",
       ].join("\n\n"),
     );
     return;
@@ -967,21 +1081,6 @@ function completeStreamForRun(
   }
 
   stream.failWithTypewriter(`Run ended with status ${run.status}.`);
-}
-
-async function failRunBestEffort(projectId: string, run: AgentRun, reason: string) {
-  try {
-    const latestRun = (await agentRuntimeApi.getRun(projectId, run.id)) ?? run;
-
-    if (isTerminalAgentRunStatus(latestRun.status)) {
-      return;
-    }
-
-    const result = new RunStateMachine().transition(latestRun, { type: "fail", reason });
-    await agentRuntimeApi.transitionRun(projectId, latestRun, result);
-  } catch {
-    // Best-effort failure recording should never hide the user-facing error.
-  }
 }
 
 async function loadApprovedPackageChangeKeys(projectId: string, runId: string) {

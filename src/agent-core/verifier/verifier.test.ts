@@ -56,10 +56,11 @@ describe("AgentVerifier", () => {
     });
 
     expect(report.status).toBe("passed");
-    expect(report.checks.find((check) => check.id === "preview")).toMatchObject({
-      required: false,
-      status: "skipped",
+    expect(report.checks.find((check) => check.id === "answer")).toMatchObject({
+      required: true,
+      status: "passed",
     });
+    expect(report.checks.find((check) => check.id === "preview")).toBeUndefined();
   });
 
   it("fails required preview checks when bridge diagnostics report runtime errors", async () => {
@@ -291,7 +292,7 @@ describe("AgentVerifier", () => {
   });
 
   it("distinguishes pre-existing command failures from newly introduced failures", async () => {
-    const run = createRun("Explain what changed", "answer");
+    const run = createRun("Build the site", "full_site");
     const verifier = new AgentVerifier({
       readFile: createReadFile({
         "package.json": JSON.stringify({
@@ -373,8 +374,13 @@ describe("AgentVerifier", () => {
   });
 
   it("blocks dependency additions that are not approved by package change keys", async () => {
-    const run = createRun("Explain dependency changes", "answer");
+    const run = createRun("Change dependency setup", "full_site");
     const verifier = new AgentVerifier({
+      httpProbe: async () => ({
+        ok: true,
+        status: 200,
+        summary: "ok",
+      }),
       readFile: createReadFile({
         "package.json": JSON.stringify({
           scripts: { build: "next build" },
@@ -675,8 +681,13 @@ describe("AgentVerifier", () => {
   });
 
   it("passes approved dependency changes after comparing baseline package.json", async () => {
-    const run = createRun("Explain dependency changes", "answer");
+    const run = createRun("Change dependency setup", "full_site");
     const verifier = new AgentVerifier({
+      httpProbe: async () => ({
+        ok: true,
+        status: 200,
+        summary: "ok",
+      }),
       readFile: createReadFile({
         "package.json": JSON.stringify({
           scripts: { build: "next build" },
@@ -701,8 +712,9 @@ describe("AgentVerifier", () => {
         scripts: { build: "next build" },
         dependencies: { next: "15.0.0" },
       }),
-      changedFiles: [],
+      changedFiles: ["package.json"],
       packageChanged: true,
+      previewUrl: "http://localhost:3000",
       run,
     });
 

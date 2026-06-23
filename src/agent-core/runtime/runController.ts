@@ -1,6 +1,8 @@
 import type {
   AgentApproval,
+  AgentApprovalDecision,
   AgentEvent,
+  AgentReadSnapshot,
   AgentRun,
   AgentRunCheckpoint,
   TaskContract,
@@ -88,13 +90,21 @@ export type VerifierPort = {
 
 export type WorkspacePort = {
   fingerprint(): Promise<string>;
+  validateReadSnapshots?: (snapshots: AgentReadSnapshot[]) => Promise<AgentReadSnapshot[]>;
 };
 
 export type ApprovalPort = {
   create(approval: AgentApproval): Promise<AgentApproval>;
+  getLatestUnresolved(runId: string): Promise<AgentApproval | null>;
   getPending(runId: string): Promise<AgentApproval | null>;
   getLatestResolved(runId: string): Promise<AgentApproval | null>;
   listApprovedHashes(runId: string): Promise<Set<string>>;
+  resolve(
+    runId: string,
+    approvalId: string,
+    decision: AgentApprovalDecision,
+    resolvedAt: string,
+  ): Promise<AgentApproval>;
 };
 
 export type ArtifactPort = {
@@ -142,6 +152,7 @@ type RunDriveState = {
   baselinePackageJson?: string | null;
   changedFiles: Set<string>;
   deletedFiles: Set<string>;
+  finishSummary?: string;
   latestReportId?: string;
   observations: unknown[];
   packageChanged: boolean;
@@ -252,6 +263,18 @@ export class RunController {
 
       const context = await this.compileContext(run, state);
       const action = await this.ports.model.next(context, signal);
+      run = await this.refreshRunRequests(run);
+
+      if (run.cancelRequested || run.status === "cancelled") {
+        run = await this.cancelAtBoundary(run, state, "cancelled-after-model");
+        return run;
+      }
+
+      if (isTerminalAgentRunStatus(run.status) || run.status === "waiting_approval" || run.status === "paused") {
+        await this.saveCheckpoint(run, state, "stopped-after-model");
+        return run;
+      }
+
       run = await this.ports.runStore.recordProgress(
         run,
         { modelTurns: run.modelTurns + 1 },
@@ -264,6 +287,12 @@ export class RunController {
       );
       await this.saveCheckpoint(run, state, "model-completed");
 
+      if (run.pauseRequested) {
+        run = await this.commit(run, this.machine.transition(run, { type: "pause_at_boundary" }));
+        await this.saveCheckpoint(run, state, "pause-after-model");
+        return run;
+      }
+
       if (action.type === "answer") {
         state.answerMessage = action.message;
         state.observations.push(action.message);
@@ -272,23 +301,13 @@ export class RunController {
       }
 
       if (action.type === "finish_candidate") {
+        state.finishSummary = action.summary;
         run = await this.verifyAndAdvance(run, state, { final: true });
         continue;
       }
 
       if (action.type === "tool_calls") {
-        for (const call of action.calls) {
-          run = await this.executeToolAction(
-            run,
-            { ...call, type: "tool_call" },
-            state,
-            signal,
-          );
-
-          if (isTerminalAgentRunStatus(run.status) || run.status === "waiting_approval" || run.status === "paused") {
-            break;
-          }
-        }
+        run = await this.executeToolBatch(run, action.calls, state, signal);
         continue;
       }
 
@@ -368,7 +387,12 @@ export class RunController {
       state.pendingApprovalAction = action;
       const waitingRun = await this.commit(
         run,
-        this.machine.transition(run, { type: "enter_waiting_approval" }),
+        this.machine.transition(run, {
+          approvalId: approval.id,
+          normalizedArgsHash: approval.normalizedArgsHash,
+          toolName: approval.toolName,
+          type: "enter_waiting_approval",
+        }),
       );
       await this.saveCheckpoint(waitingRun, state, `approval-requested:${approval.id}`);
       return waitingRun;
@@ -394,6 +418,17 @@ export class RunController {
       signal,
       tool: action.tool,
     });
+    run = await this.refreshRunRequests(run);
+
+    if (run.cancelRequested || run.status === "cancelled") {
+      return this.cancelAtBoundary(run, state, "cancelled-after-tool");
+    }
+
+    if (isTerminalAgentRunStatus(run.status) || run.status === "waiting_approval" || run.status === "paused") {
+      await this.saveCheckpoint(run, state, "stopped-after-tool");
+      return run;
+    }
+
     const changed = result.workspaceEffects?.changedFiles ?? [];
     const deleted = result.workspaceEffects?.deletedFiles ?? [];
 
@@ -407,6 +442,7 @@ export class RunController {
     }
 
     state.packageChanged ||= result.workspaceEffects?.packageChanged === true;
+    state.readSnapshots = result.workspaceEffects?.readSnapshots ?? state.readSnapshots;
 
     const mutationDelta = !tool.readOnly && changed.length + deleted.length > 0 ? 1 : 0;
     const nextRun = await this.ports.runStore.recordProgress(
@@ -432,6 +468,15 @@ export class RunController {
     state.observations.push(result.structuredData ?? result.summary);
     await this.saveCheckpoint(nextRun, state, "tool-completed");
 
+    if (nextRun.pauseRequested) {
+      const pausedRun = await this.commit(
+        nextRun,
+        this.machine.transition(nextRun, { type: "pause_at_boundary" }),
+      );
+      await this.saveCheckpoint(pausedRun, state, "pause-after-tool");
+      return pausedRun;
+    }
+
     if (
       result.status === "success" &&
       tool.requiresVerification &&
@@ -446,6 +491,195 @@ export class RunController {
         this.machine.transition(nextRun, { type: "enter_planning" }),
       );
       await this.saveCheckpoint(planningRun, state, "tool-returned-to-planning");
+      return planningRun;
+    }
+
+    return nextRun;
+  }
+
+  private async executeToolBatch(
+    run: AgentRun,
+    calls: Extract<HeadlessModelAction, { type: "tool_calls" }>["calls"],
+    state: RunDriveState,
+    signal?: AbortSignal,
+  ): Promise<AgentRun> {
+    const actions = calls.map((call) => ({ ...call, type: "tool_call" as const }));
+    const toolEntries = actions.map((action) => ({
+      action,
+      tool: getCoreToolDefinition(action.tool),
+    }));
+    const invalidTool = toolEntries.find((entry) => !entry.tool);
+
+    if (invalidTool) {
+      await this.ports.eventStore.append({
+        runId: run.id,
+        type: "tool.failed",
+        timestamp: this.ports.clock.now(),
+        payload: {
+          reason: `Unknown tool ${invalidTool.action.tool}.`,
+          tool: invalidTool.action.tool,
+        },
+      });
+      return run;
+    }
+
+    const unsafeTool = toolEntries.find(
+      (entry) => !entry.tool?.readOnly || !entry.tool.concurrencySafe,
+    );
+
+    if (unsafeTool) {
+      const summary = `tool_calls may only batch read-only concurrency-safe tools, but included ${unsafeTool.action.tool}.`;
+      state.observations.push(summary);
+      await this.ports.eventStore.append({
+        runId: run.id,
+        type: "tool.failed",
+        timestamp: this.ports.clock.now(),
+        payload: { reason: summary, tool: "tool_calls" },
+      });
+      return run;
+    }
+
+    for (const action of actions) {
+      validateCoreToolInput(action.tool, action.args);
+    }
+
+    if (run.toolCalls + actions.length > run.contract.budget.maxToolCalls) {
+      const exceededRun = await this.commit(
+        run,
+        this.machine.transition(run, {
+          budget: "maxToolCalls",
+          reason: "maxToolCalls was exhausted by a read-only tool batch.",
+          type: "budget_exceeded",
+        }),
+      );
+      await this.saveCheckpoint(exceededRun, state, "tool-batch-budget-exceeded");
+      return exceededRun;
+    }
+
+    const approvedHashes = await this.ports.approvals.listApprovedHashes(run.id);
+
+    for (const { action, tool } of toolEntries) {
+      const policyDecision = this.policy.evaluate({
+        approvedHashes,
+        args: action.args,
+        run,
+        tool: tool!,
+      });
+
+      if (!policyDecision.allowed || policyDecision.approvalRequired) {
+        const summary = !policyDecision.allowed
+          ? policyDecision.reason
+          : `${action.tool} cannot request approval inside a batched tool_calls action.`;
+        state.observations.push(summary);
+        await this.ports.eventStore.append({
+          runId: run.id,
+          type: "policy.denied",
+          timestamp: this.ports.clock.now(),
+          payload: { reason: summary, tool: action.tool },
+        });
+        return run;
+      }
+    }
+
+    for (const action of actions) {
+      await this.ports.eventStore.append({
+        runId: run.id,
+        type: "tool.started",
+        timestamp: this.ports.clock.now(),
+        payload: { batch: true, tool: action.tool },
+      });
+    }
+
+    if (run.status !== "exploring") {
+      run = await this.commit(run, this.machine.transition(run, { type: "enter_exploring" }));
+    }
+
+    const results = await Promise.all(
+      actions.map((action) =>
+        this.ports.tools.execute({
+          args: action.args,
+          run,
+          signal,
+          tool: action.tool,
+        }),
+      ),
+    );
+
+    run = await this.refreshRunRequests(run);
+
+    if (run.cancelRequested || run.status === "cancelled") {
+      return this.cancelAtBoundary(run, state, "cancelled-after-tool-batch");
+    }
+
+    if (isTerminalAgentRunStatus(run.status) || run.status === "waiting_approval" || run.status === "paused") {
+      await this.saveCheckpoint(run, state, "stopped-after-tool-batch");
+      return run;
+    }
+
+    for (const [index, result] of results.entries()) {
+      const action = actions[index]!;
+      const changed = result.workspaceEffects?.changedFiles ?? [];
+      const deleted = result.workspaceEffects?.deletedFiles ?? [];
+
+      for (const path of changed) {
+        state.changedFiles.add(path);
+      }
+
+      for (const path of deleted) {
+        state.changedFiles.add(path);
+        state.deletedFiles.add(path);
+      }
+
+      state.packageChanged ||= result.workspaceEffects?.packageChanged === true;
+      state.readSnapshots = result.workspaceEffects?.readSnapshots ?? state.readSnapshots;
+      state.observations.push(result.structuredData ?? result.summary);
+
+      await this.ports.eventStore.append({
+        artifactIds: result.artifactIds,
+        runId: run.id,
+        type: result.status === "success" ? "tool.completed" : "tool.failed",
+        timestamp: this.ports.clock.now(),
+        payload: {
+          batch: true,
+          deletedFiles: deleted,
+          packageChanged: state.packageChanged,
+          status: result.status,
+          summary: result.summary,
+          tool: action.tool,
+        },
+      });
+    }
+
+    const nextRun = await this.ports.runStore.recordProgress(
+      run,
+      {
+        mutationCount: run.mutationCount,
+        toolCalls: run.toolCalls + actions.length,
+      },
+      {
+        runId: run.id,
+        type: "plan.updated",
+        timestamp: this.ports.clock.now(),
+        payload: { batchSize: actions.length, reason: "read-only tool batch completed" },
+      },
+    );
+    await this.saveCheckpoint(nextRun, state, "tool-batch-completed");
+
+    if (nextRun.pauseRequested) {
+      const pausedRun = await this.commit(
+        nextRun,
+        this.machine.transition(nextRun, { type: "pause_at_boundary" }),
+      );
+      await this.saveCheckpoint(pausedRun, state, "pause-after-tool-batch");
+      return pausedRun;
+    }
+
+    if (nextRun.status !== "planning") {
+      const planningRun = await this.commit(
+        nextRun,
+        this.machine.transition(nextRun, { type: "enter_planning" }),
+      );
+      await this.saveCheckpoint(planningRun, state, "tool-batch-returned-to-planning");
       return planningRun;
     }
 
@@ -471,6 +705,16 @@ export class RunController {
     });
     state.latestReportId = report.id;
     state.repairFeedback = [...report.repairFeedback];
+    run = await this.refreshRunRequests(run);
+
+    if (run.cancelRequested || run.status === "cancelled") {
+      return this.cancelAtBoundary(run, state, "cancelled-after-verifier");
+    }
+
+    if (isTerminalAgentRunStatus(run.status) || run.status === "waiting_approval" || run.status === "paused") {
+      await this.saveCheckpoint(run, state, "stopped-after-verifier");
+      return run;
+    }
 
     await this.ports.eventStore.append({
       artifactIds: report.artifactIds,
@@ -509,9 +753,32 @@ export class RunController {
     run: AgentRun,
     signal?: AbortSignal,
   ): Promise<{ run: AgentRun; state?: RunDriveState }> {
-    const pending = await this.ports.approvals.getPending(run.id);
+    const unresolved = await this.ports.approvals.getLatestUnresolved(run.id);
 
-    if (pending) {
+    if (unresolved && isApprovalExpired(unresolved, this.ports.clock.now())) {
+      const state = await this.restoreCheckpoint(run);
+      await this.ports.approvals.resolve(
+        run.id,
+        unresolved.id,
+        "expired",
+        this.ports.clock.now(),
+      );
+      state.pendingApprovalAction = undefined;
+      state.observations.push(
+        "Previous approval expired. Request a new approval if the action is still needed.",
+      );
+      const nextRun = await this.commit(
+        run,
+        this.machine.transition(run, {
+          approvalId: unresolved.id,
+          type: "approval_expired",
+        }),
+      );
+      await this.saveCheckpoint(nextRun, state, "approval-expired");
+      return { run: nextRun, state };
+    }
+
+    if (unresolved ?? await this.ports.approvals.getPending(run.id)) {
       return { run };
     }
 
@@ -621,11 +888,30 @@ export class RunController {
       return run;
     }
 
-    return {
-      ...run,
-      cancelRequested: persisted.cancelRequested,
-      pauseRequested: persisted.pauseRequested,
-    };
+    return persisted;
+  }
+
+  private async cancelAtBoundary(
+    run: AgentRun,
+    state: RunDriveState,
+    reason: string,
+  ): Promise<AgentRun> {
+    if (run.status === "cancelled") {
+      await this.saveCheckpoint(run, state, reason);
+      return run;
+    }
+
+    if (isTerminalAgentRunStatus(run.status)) {
+      await this.saveCheckpoint(run, state, reason);
+      return run;
+    }
+
+    const cancelledRun = await this.commit(
+      run,
+      this.machine.transition(run, { type: "cancel" }),
+    );
+    await this.saveCheckpoint(cancelledRun, state, reason);
+    return cancelledRun;
   }
 
   private async restoreCheckpoint(run: AgentRun): Promise<RunDriveState> {
@@ -637,19 +923,12 @@ export class RunController {
 
     const currentFingerprint = await this.ports.workspace.fingerprint();
 
-    if (checkpoint.workspaceFingerprint !== currentFingerprint) {
-      await this.commit(
-        run,
-        this.machine.transition(run, {
-          type: "fail",
-          reason:
-            "Workspace changed since the latest checkpoint; resume requires reconciliation before continuing.",
-        }),
-      );
-      throw new Error("Workspace fingerprint changed since checkpoint.");
-    }
+    const readSnapshots =
+      checkpoint.workspaceFingerprint === currentFingerprint
+        ? [...checkpoint.readSnapshots]
+        : await this.validateReadSnapshots(checkpoint.readSnapshots);
 
-    const metadata = readDriveStateMetadata(checkpoint.plan);
+    const metadata = readRunDriveStateMetadata(checkpoint.plan);
 
     return {
       answerMessage: metadata.answerMessage,
@@ -658,15 +937,24 @@ export class RunController {
       baselinePackageJson: metadata.baselinePackageJson ?? checkpoint.packageBaselineJson,
       changedFiles: new Set(checkpoint.changedFiles),
       deletedFiles: new Set(checkpoint.deletedFiles),
+      finishSummary: metadata.finishSummary,
       latestReportId: checkpoint.latestReportId,
       observations: [...checkpoint.observations],
       packageChanged: checkpoint.packageChanged,
       pendingApprovalAction: metadata.pendingApprovalAction,
       plan: metadata.userPlan,
-      readSnapshots: [...checkpoint.readSnapshots],
+      readSnapshots,
       repairFeedback: [...checkpoint.repairFeedback],
       steeringWatermark: checkpoint.steeringWatermark,
     };
+  }
+
+  private async validateReadSnapshots(snapshots: AgentReadSnapshot[]) {
+    if (!this.ports.workspace.validateReadSnapshots) {
+      return [];
+    }
+
+    return this.ports.workspace.validateReadSnapshots(snapshots);
   }
 
   private async saveCheckpoint(
@@ -726,6 +1014,7 @@ function createEmptyDriveState(
     baselinePackageJson: initial.baselinePackageJson,
     changedFiles: new Set(),
     deletedFiles: new Set(),
+    finishSummary: undefined,
     observations: [],
     packageChanged: false,
     plan: null,
@@ -740,6 +1029,7 @@ type CheckpointDriveStateMetadata = {
   baselineArtifactId?: string;
   baselineCommandResults?: Record<string, unknown>;
   baselinePackageJson?: string | null;
+  finishSummary?: string;
   pendingApprovalAction?: HeadlessToolCallAction;
   userPlan: unknown;
 };
@@ -754,12 +1044,13 @@ function writeDriveStateMetadata(state: RunDriveState) {
       baselineArtifactId: state.baselineArtifactId,
       baselineCommandResults: state.baselineCommandResults,
       baselinePackageJson: state.baselinePackageJson,
+      finishSummary: state.finishSummary,
       pendingApprovalAction: state.pendingApprovalAction,
     },
   };
 }
 
-function readDriveStateMetadata(plan: unknown): CheckpointDriveStateMetadata {
+export function readRunDriveStateMetadata(plan: unknown): CheckpointDriveStateMetadata {
   if (!plan || typeof plan !== "object" || Array.isArray(plan)) {
     return { userPlan: plan };
   }
@@ -789,6 +1080,10 @@ function readDriveStateMetadata(plan: unknown): CheckpointDriveStateMetadata {
       metadataRecord.baselinePackageJson === null
         ? metadataRecord.baselinePackageJson
         : undefined,
+    finishSummary:
+      typeof metadataRecord.finishSummary === "string"
+        ? metadataRecord.finishSummary
+        : undefined,
     pendingApprovalAction: isHeadlessToolCallAction(metadataRecord.pendingApprovalAction)
       ? metadataRecord.pendingApprovalAction
       : undefined,
@@ -815,7 +1110,9 @@ function collectTargetResources(args: unknown): string[] {
   }
 
   if (Array.isArray(args)) {
-    return args.flatMap(collectTargetResources);
+    return args.flatMap((item) =>
+      typeof item === "string" ? [item] : collectTargetResources(item),
+    );
   }
 
   const record = args as Record<string, unknown>;
@@ -860,6 +1157,10 @@ function stringifyPayload(payload: unknown): string {
 
 function addMinutesIso(now: string, minutes: number) {
   return new Date(new Date(now).getTime() + minutes * 60_000).toISOString();
+}
+
+function isApprovalExpired(approval: AgentApproval, now: string) {
+  return new Date(approval.expiresAt).getTime() <= new Date(now).getTime();
 }
 
 function createId(prefix: string) {

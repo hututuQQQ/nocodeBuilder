@@ -101,6 +101,13 @@ export class AgentVerifier {
         deletedFiles: input.deletedFiles ?? [],
       }),
     );
+
+    if (input.run.contract.taskType === "answer") {
+      checks.push(verifyAnswerTask(input));
+      checks.push(...verifyAcceptanceCriteria(input.run.contract, input, checks, null));
+      return buildVerificationReport(input.run.id, checks);
+    }
+
     checks.push(await this.verifyPackage(input));
     checks.push(await this.verifyStatic(input));
     checks.push(await this.verifyBuild(input));
@@ -109,25 +116,7 @@ export class AgentVerifier {
     checks.push(await this.verifyDesignTokens(siteSpec));
     checks.push(...verifyAcceptanceCriteria(input.run.contract, input, checks, siteSpec));
 
-    const status = summarizeStatus(checks);
-    const failedChecks = checks.filter((check) => check.status === "failed");
-    const inconclusiveChecks = checks.filter(
-      (check) =>
-        check.status === "inconclusive" ||
-        (check.required === true && check.status === "skipped"),
-    );
-
-    return {
-      id: createId("verification"),
-      runId: input.run.id,
-      status,
-      checks,
-      newlyIntroducedFailures: collectNewlyIntroducedFailures(failedChecks),
-      missingEvidence: inconclusiveChecks.map((check) => check.summary),
-      artifactIds: checks.flatMap((check) => check.artifactIds ?? []),
-      repairFeedback: failedChecks.map((check) => `${check.title}: ${check.summary}`),
-      createdAt: new Date().toISOString(),
-    };
+    return buildVerificationReport(input.run.id, checks);
   }
 
   private async verifyPackage(input: VerificationInput): Promise<VerificationCheck> {
@@ -954,6 +943,65 @@ export function verifyScope(
   }
 
   return passedCheck("scope", "ScopeVerifier", "Changed files stayed within scope.", true);
+}
+
+function verifyAnswerTask(input: VerificationInput): VerificationCheck {
+  const sideEffects = [
+    input.changedFiles.length > 0 ? `changedFiles=${input.changedFiles.length}` : null,
+    (input.deletedFiles?.length ?? 0) > 0 ? `deletedFiles=${input.deletedFiles?.length}` : null,
+    input.packageChanged ? "packageChanged=true" : null,
+    input.run.mutationCount > 0 ? `mutationCount=${input.run.mutationCount}` : null,
+  ].filter(Boolean);
+
+  if (sideEffects.length > 0) {
+    return failedCheck(
+      "answer",
+      "AnswerVerifier",
+      `Read-only answer task produced side effects: ${sideEffects.join(", ")}.`,
+      true,
+    );
+  }
+
+  if (!input.answerMessage?.trim()) {
+    return unavailableEvidenceCheck(
+      "answer",
+      "AnswerVerifier",
+      "Answer task did not produce a non-empty answer message.",
+      true,
+    );
+  }
+
+  return passedCheck(
+    "answer",
+    "AnswerVerifier",
+    "Answer task produced a non-empty answer without workspace side effects.",
+    true,
+  );
+}
+
+function buildVerificationReport(
+  runId: string,
+  checks: VerificationCheck[],
+): VerificationReport {
+  const status = summarizeStatus(checks);
+  const failedChecks = checks.filter((check) => check.status === "failed");
+  const inconclusiveChecks = checks.filter(
+    (check) =>
+      check.status === "inconclusive" ||
+      (check.required === true && check.status === "skipped"),
+  );
+
+  return {
+    id: createId("verification"),
+    runId,
+    status,
+    checks,
+    newlyIntroducedFailures: collectNewlyIntroducedFailures(failedChecks),
+    missingEvidence: inconclusiveChecks.map((check) => check.summary),
+    artifactIds: checks.flatMap((check) => check.artifactIds ?? []),
+    repairFeedback: failedChecks.map((check) => `${check.title}: ${check.summary}`),
+    createdAt: new Date().toISOString(),
+  };
 }
 
 function verifyAcceptanceCriteria(

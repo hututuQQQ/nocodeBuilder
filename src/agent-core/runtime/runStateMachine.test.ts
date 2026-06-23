@@ -107,7 +107,12 @@ describe("RunStateMachine", () => {
       }),
     ).toThrow(/Illegal run transition/);
 
-    const waiting = machine.transition(started, { type: "enter_waiting_approval" }).run;
+    const waiting = machine.transition(started, {
+      approvalId: "approval-1",
+      normalizedArgsHash: "hash",
+      toolName: "delete_files",
+      type: "enter_waiting_approval",
+    }).run;
     const resumed = machine.transition(waiting, {
       type: "approval_granted",
       approvalId: "approval-1",

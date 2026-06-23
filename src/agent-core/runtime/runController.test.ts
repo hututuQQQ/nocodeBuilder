@@ -238,7 +238,7 @@ describe("Headless RunController", () => {
     );
   });
 
-  it("refuses to resume blindly when the workspace fingerprint changed", async () => {
+  it("prunes stale read snapshots when the workspace fingerprint changed", async () => {
     const contract = compileTaskContract({ objective: "Continue paused copy edit" });
     const pausedRun = createPausedRun("run-stale-resume", contract);
     const ports = createFakePorts({
@@ -256,20 +256,26 @@ describe("Headless RunController", () => {
       changedFiles: [],
       deletedFiles: [],
       packageChanged: false,
-      readSnapshots: [],
+      readSnapshots: [
+        {
+          contentHash: "stale",
+          path: "app/page.tsx",
+          readAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
       repairFeedback: [],
       steeringWatermark: 0,
     });
     ports.setWorkspaceFingerprint("workspace:fingerprint:new");
     const controller = new RunController(ports);
 
-    await expect(controller.resume(pausedRun.id)).rejects.toThrow(
-      "Workspace fingerprint changed since checkpoint.",
-    );
+    const completed = await controller.resume(pausedRun.id);
 
-    expect(ports.modelCalls).toBe(0);
-    expect((await ports.runStore.get(pausedRun.id))?.status).toBe("failed");
-    expect(ports.events.map((event) => event.type)).toContain("run.failed");
+    expect(completed.status).toBe("completed");
+    expect(ports.modelCalls).toBe(1);
+    expect(
+      ports.checkpointRecords[ports.checkpointRecords.length - 1]?.readSnapshots,
+    ).toEqual([]);
   });
 
   it("scenario H verifies answers once and completes without exhausting budget", async () => {
@@ -432,6 +438,113 @@ describe("Headless RunController", () => {
     expect(run.modelTurns).toBe(1);
     expect(run.toolCalls).toBe(1);
   });
+
+  it("runs read-only tool_calls concurrently and records observations in order", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        {
+          type: "tool_calls",
+          calls: [
+            { type: "tool_call", tool: "read_files", args: { paths: ["app/a.tsx"] } },
+            { type: "tool_call", tool: "read_files", args: { paths: ["app/b.tsx"] } },
+          ],
+        },
+        { type: "finish_candidate", summary: "Read both files" },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    const starts: string[] = [];
+    let releaseFirst: (() => void) | null = null;
+    const firstStarted = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    ports.tools.execute = async ({ args }): Promise<ToolResult> => {
+      const path = (args as { paths: string[] }).paths[0]!;
+      starts.push(path);
+
+      if (starts.length === 1) {
+        await firstStarted;
+      } else {
+        releaseFirst?.();
+      }
+
+      return {
+        artifactIds: [],
+        retryable: false,
+        status: "success",
+        structuredData: `read:${path}`,
+        summary: `Read ${path}`,
+        workspaceEffects: {
+          changedFiles: [],
+          packageChanged: false,
+        },
+      };
+    };
+    const controller = new RunController(ports);
+
+    const run = await controller.start({
+      contract: compileTaskContract({ objective: "Inspect files" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-batch",
+    });
+
+    expect(run.status).toBe("completed");
+    expect(run.toolCalls).toBe(2);
+    expect(starts).toEqual(["app/a.tsx", "app/b.tsx"]);
+    expect(ports.contexts[1]?.observations).toEqual(["read:app/a.tsx", "read:app/b.tsx"]);
+    expect(ports.events.map((event) => event.sequence)).toEqual(
+      Array.from({ length: ports.events.length }, (_, index) => index + 1),
+    );
+  });
+
+  it("rejects tool_calls batches that contain a write tool", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        {
+          type: "tool_calls",
+          calls: [
+            { type: "tool_call", tool: "read_files", args: { paths: ["app/page.tsx"] } },
+            {
+              type: "tool_call",
+              tool: "edit_file",
+              args: {
+                new_string: "Hello",
+                old_string: "Hi",
+                path: "app/page.tsx",
+                summary: "Should not execute",
+              },
+            },
+          ],
+        },
+        { type: "finish_candidate", summary: "Batch rejected" },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    let executed = false;
+    ports.tools.execute = async (): Promise<ToolResult> => {
+      executed = true;
+      return {
+        artifactIds: [],
+        retryable: false,
+        status: "success",
+        summary: "unexpected",
+      };
+    };
+    const controller = new RunController(ports);
+
+    const run = await controller.start({
+      contract: compileTaskContract({ objective: "Inspect files" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-batch-write",
+    });
+
+    expect(run.status).toBe("completed");
+    expect(run.toolCalls).toBe(0);
+    expect(executed).toBe(false);
+    expect(ports.events.some((event) => event.type === "tool.failed")).toBe(true);
+  });
 });
 
 function createFakePorts({
@@ -473,7 +586,7 @@ function createFakePorts({
     contexts: RunContextBundle[];
     events: AgentEvent[];
     get modelCalls(): number;
-    resolveLatestApproval(decision: "approved" | "denied"): void;
+    resolveLatestApproval(decision: "approved" | "denied" | "expired"): void;
     seedCheckpoint(checkpoint: AgentRunCheckpoint): void;
     seedRun(run: AgentRun): void;
     setWorkspaceFingerprint(fingerprint: string): void;
@@ -531,6 +644,10 @@ function createFakePorts({
         [...approvals]
           .reverse()
           .find((approval) => approval.runId === runId && approval.decision) ?? null,
+      getLatestUnresolved: async (runId) =>
+        [...approvals]
+          .reverse()
+          .find((approval) => approval.runId === runId && !approval.decision && !approval.resolvedAt) ?? null,
       getPending: async (runId) =>
         approvals.find(
           (approval) => approval.runId === runId && !approval.decision && !approval.resolvedAt,
@@ -541,6 +658,17 @@ function createFakePorts({
             .filter((approval) => approval.runId === runId && approval.decision === "approved")
             .map((approval) => approval.normalizedArgsHash),
         ),
+      resolve: async (runId, approvalId, decision, resolvedAt) => {
+        const approval = approvals.find((item) => item.runId === runId && item.id === approvalId);
+
+        if (!approval) {
+          throw new Error("Approval not found.");
+        }
+
+        approval.decision = decision;
+        approval.resolvedAt = resolvedAt;
+        return approval;
+      },
     },
     resolveLatestApproval(decision) {
       const approval = approvals[approvals.length - 1];
@@ -635,6 +763,8 @@ function createFakePorts({
     verificationRequests,
     workspace: {
       fingerprint: async () => workspaceFingerprint,
+      validateReadSnapshots: async (snapshots) =>
+        snapshots.filter((snapshot) => snapshot.contentHash !== "stale"),
     },
   };
 

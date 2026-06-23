@@ -13,9 +13,15 @@ export type RunTransition =
   | { type: "enter_planning" }
   | { type: "enter_exploring" }
   | { type: "enter_mutating"; mutationDelta?: number }
-  | { type: "enter_waiting_approval" }
+  | {
+      type: "enter_waiting_approval";
+      approvalId: string;
+      normalizedArgsHash: string;
+      toolName: string;
+    }
   | { type: "approval_granted"; approvalId: string }
   | { type: "approval_denied"; approvalId: string; reason?: string }
+  | { type: "approval_expired"; approvalId: string }
   | { type: "enter_verifying" }
   | { type: "verification_passed_continue"; report: VerificationReport }
   | { type: "verification_passed"; report: VerificationReport }
@@ -88,6 +94,7 @@ const LEGAL_TRANSITIONS: Record<AgentRunStatus, ReadonlySet<RunTransitionType>> 
   waiting_approval: new Set([
     "approval_granted",
     "approval_denied",
+    "approval_expired",
     "request_cancel",
     "budget_exceeded",
     "cancel",
@@ -177,7 +184,7 @@ export class RunStateMachine {
           currentRun,
           "mutating",
           "mutating",
-          "tool.started",
+          "plan.updated",
           { mutationDelta: transition.mutationDelta ?? 0 },
           now,
           { mutationCount: currentRun.mutationCount + (transition.mutationDelta ?? 0) },
@@ -188,7 +195,11 @@ export class RunStateMachine {
           "waiting_approval",
           "waiting_approval",
           "approval.requested",
-          {},
+          {
+            approvalId: transition.approvalId,
+            normalizedArgsHash: transition.normalizedArgsHash,
+            toolName: transition.toolName,
+          },
           now,
         );
       case "approval_granted":
@@ -198,6 +209,15 @@ export class RunStateMachine {
           "planning",
           "approval.resolved",
           { approvalId: transition.approvalId, decision: "approved" },
+          now,
+        );
+      case "approval_expired":
+        return this.move(
+          currentRun,
+          "planning",
+          "planning",
+          "approval.expired",
+          { approvalId: transition.approvalId, decision: "expired" },
           now,
         );
       case "approval_denied":
@@ -239,7 +259,7 @@ export class RunStateMachine {
           currentRun,
           "planning",
           "planning",
-          "verification.completed",
+          "plan.updated",
           { reportId: transition.report.id, status: transition.report.status },
           now,
         );
@@ -263,7 +283,7 @@ export class RunStateMachine {
           currentRun,
           "repairing",
           "repairing",
-          "verification.completed",
+          "plan.updated",
           { reportId: transition.report.id, status: transition.report.status },
           now,
           { repairCycles: currentRun.repairCycles + 1 },
@@ -300,7 +320,7 @@ export class RunStateMachine {
           currentRun,
           currentRun.status,
           currentRun.phase,
-          "run.paused",
+          "run.pause_requested",
           { requested: true },
           now,
           { pauseRequested: true },

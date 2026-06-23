@@ -1105,6 +1105,28 @@ async fn resolve_agent_approval_with_pool(
     resolution: AgentApprovalResolveInput,
 ) -> Result<AgentApprovalRecord, String> {
     validate_approval_decision(&resolution.decision)?;
+    let existing = sqlx::query(
+        r#"
+        SELECT * FROM approvals
+        WHERE id = ?1
+          AND run_id = ?2
+          AND decision IS NULL
+          AND resolved_at IS NULL
+        "#,
+    )
+    .bind(&resolution.approval_id)
+    .bind(&resolution.run_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("agent-storage: failed to read approval before resolve: {error}"))?;
+    let approval = existing
+        .map(row_to_approval)
+        .transpose()?
+        .ok_or_else(|| "agent-storage: pending approval not found".to_string())?;
+
+    if resolution.decision != "expired" && approval.expires_at <= resolution.resolved_at {
+        return Err("agent-storage: expired approval cannot be approved or denied".to_string());
+    }
 
     let result = sqlx::query(
         r#"
@@ -1622,8 +1644,10 @@ async fn table_has_column(
 
 fn validate_approval_decision(decision: &str) -> Result<(), String> {
     match decision {
-        "approved" | "denied" => Ok(()),
-        _ => Err("agent-storage: approval decision must be approved or denied".to_string()),
+        "approved" | "denied" | "expired" => Ok(()),
+        _ => {
+            Err("agent-storage: approval decision must be approved, denied, or expired".to_string())
+        }
     }
 }
 
@@ -1991,6 +2015,63 @@ mod tests {
                 pending_after_resolve.is_none(),
                 "resolved approvals must no longer be pending"
             );
+
+            let _ = fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn rejects_approval_resolution_after_expiry_except_expired_decision() {
+        tauri::async_runtime::block_on(async {
+            let root =
+                std::env::temp_dir().join(format!("agent-storage-expired-{}", rand_suffix()));
+            fs::create_dir_all(root.join(METADATA_DIR)).expect("create metadata dir");
+            let pool = open_project_agent_db(&root).await.expect("open db");
+
+            insert_test_run(&pool, "run-expired-approval").await;
+
+            create_agent_approval_with_pool(
+                &pool,
+                AgentApprovalCreateInput {
+                    id: "approval-expired".to_string(),
+                    run_id: "run-expired-approval".to_string(),
+                    tool_call_id: "tool-call-expired".to_string(),
+                    tool_name: "delete_files".to_string(),
+                    normalized_args_hash: "12:expired".to_string(),
+                    target_resources: vec!["app/page.tsx".to_string()],
+                    exact_side_effect: "delete app/page.tsx".to_string(),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    expires_at: "2026-01-01T00:01:00Z".to_string(),
+                },
+            )
+            .await
+            .expect("create approval");
+
+            let approved = resolve_agent_approval_with_pool(
+                &pool,
+                AgentApprovalResolveInput {
+                    run_id: "run-expired-approval".to_string(),
+                    approval_id: "approval-expired".to_string(),
+                    decision: "approved".to_string(),
+                    resolved_at: "2026-01-01T00:02:00Z".to_string(),
+                },
+            )
+            .await;
+            assert!(approved.is_err(), "expired approvals must not be approved");
+
+            let expired = resolve_agent_approval_with_pool(
+                &pool,
+                AgentApprovalResolveInput {
+                    run_id: "run-expired-approval".to_string(),
+                    approval_id: "approval-expired".to_string(),
+                    decision: "expired".to_string(),
+                    resolved_at: "2026-01-01T00:02:00Z".to_string(),
+                },
+            )
+            .await
+            .expect("mark expired");
+
+            assert_eq!(expired.decision.as_deref(), Some("expired"));
 
             let _ = fs::remove_dir_all(root);
         });
