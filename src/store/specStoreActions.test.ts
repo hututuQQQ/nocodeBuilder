@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AgentRun } from "../agent-core/types";
 import type { ProjectConversation, ProjectConversationSummary, ProjectInfo } from "../services/projects";
 import type { DevelopmentSpec, GeneratedSpecRevisionPayload, SpecRevision } from "../spec-core/types";
 import {
@@ -7,11 +8,18 @@ import {
 } from "./specStoreActions";
 
 const fake = vi.hoisted(() => ({
+  agentRuns: new Map<string, unknown>(),
   createProjectConversation: vi.fn(),
   createSpec: vi.fn(),
   deleteUnattachedSpec: vi.fn(),
+  readSpec: vi.fn(),
   requestFeatureSpec: vi.fn(),
+  requestSpecRevision: vi.fn(),
+  runSpecTaskRuntime: vi.fn(),
+  saveSpec: vi.fn(),
   saveProjectConversation: vi.fn(),
+  switchProjectConversationMode: vi.fn(),
+  verificationReports: new Map<string, unknown>(),
 }));
 
 vi.mock("../agent/projectModifier", () => ({
@@ -20,11 +28,18 @@ vi.mock("../agent/projectModifier", () => ({
 }));
 
 vi.mock("../agent-runtime/runController", () => ({
-  runSpecTaskRuntime: vi.fn(),
+  runSpecTaskRuntime: (...args: unknown[]) => fake.runSpecTaskRuntime(...args),
 }));
 
 vi.mock("../services/agentRuntime", () => ({
   agentRuntimeApi: {
+    getLatestCheckpoint: vi.fn(async () => null),
+    getLatestVerificationReport: vi.fn(async (_projectId: string, runId: string) =>
+      fake.verificationReports.get(runId) ?? null,
+    ),
+    getRun: vi.fn(async (_projectId: string, runId: string) =>
+      fake.agentRuns.get(runId) ?? null,
+    ),
     readSiteSourceMap: vi.fn(async () => null),
     readSiteSpec: vi.fn(async () => null),
   },
@@ -56,6 +71,8 @@ vi.mock("../services/projects", () => ({
     readFile: vi.fn(async () => ""),
     saveProjectConversation: (...args: unknown[]) =>
       fake.saveProjectConversation(...args),
+    switchProjectConversationMode: (...args: unknown[]) =>
+      fake.switchProjectConversationMode(...args),
   },
 }));
 
@@ -64,27 +81,49 @@ vi.mock("../services/specs", () => ({
     createSpec: (...args: unknown[]) => fake.createSpec(...args),
     deleteUnattachedSpec: (...args: unknown[]) =>
       fake.deleteUnattachedSpec(...args),
+    readSpec: (...args: unknown[]) => fake.readSpec(...args),
+    saveSpec: (...args: unknown[]) => fake.saveSpec(...args),
   },
 }));
 
 vi.mock("../spec-runtime/requests", () => ({
   requestFeatureSpec: (...args: unknown[]) => fake.requestFeatureSpec(...args),
   requestInitialSpec: vi.fn(),
-  requestSpecRevision: vi.fn(),
+  requestSpecRevision: (...args: unknown[]) => fake.requestSpecRevision(...args),
 }));
 
 describe("spec store actions", () => {
   beforeEach(() => {
+    fake.agentRuns = new Map();
     fake.createProjectConversation.mockReset();
     fake.createSpec.mockReset();
     fake.deleteUnattachedSpec.mockReset();
+    fake.readSpec.mockReset();
     fake.requestFeatureSpec.mockReset();
+    fake.requestSpecRevision.mockReset();
+    fake.runSpecTaskRuntime.mockReset();
+    fake.saveSpec.mockReset();
     fake.saveProjectConversation.mockReset();
+    fake.switchProjectConversationMode.mockReset();
+    fake.verificationReports = new Map();
     fake.createSpec.mockImplementation(async (_projectId: string, spec: DevelopmentSpec) => spec);
     fake.deleteUnattachedSpec.mockResolvedValue(undefined);
+    fake.readSpec.mockImplementation(async (_projectId: string, specId: string) =>
+      createSpec({ id: specId, status: "completed" }),
+    );
     fake.requestFeatureSpec.mockResolvedValue(createGeneratedPayload());
+    fake.requestSpecRevision.mockResolvedValue(createGeneratedPayload());
+    fake.runSpecTaskRuntime.mockResolvedValue({
+      run: null,
+      verificationReport: null,
+    });
+    fake.saveSpec.mockImplementation(async (_projectId: string, spec: DevelopmentSpec) => spec);
     fake.saveProjectConversation.mockImplementation(
       async (_projectId: string, conversation: ProjectConversation) => conversation,
+    );
+    fake.switchProjectConversationMode.mockImplementation(
+      async (projectId: string, input: Record<string, unknown>) =>
+        createConversation(projectId, input),
     );
   });
 
@@ -168,6 +207,353 @@ describe("spec store actions", () => {
     expect(store.get().currentConversation).toBeNull();
     expect(store.get().currentSpec).toBeNull();
     expect(store.get().projectError).toBe("host gate rejected");
+  });
+
+  it("loads historical specs in Chat mode without activating them", async () => {
+    const historicalSpec = createSpec({
+      id: "spec-history",
+      status: "completed",
+    });
+    fake.readSpec.mockResolvedValue(historicalSpec);
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: null,
+        conversationId: "conversation-1",
+        mode: "chat",
+        specIds: ["spec-history"],
+        title: "Chat iteration",
+      }),
+    });
+    const actions = createSpecActions(store as never);
+    store.set(actions as unknown as Partial<StoreState>);
+
+    await actions.loadCurrentSpec();
+
+    expect(fake.readSpec).toHaveBeenCalledWith("project-1", "spec-history");
+    expect(store.get().currentSpec).toBeNull();
+    expect(store.get().historicalSpecs).toEqual([historicalSpec]);
+  });
+
+  it("persists a task runId before launching Spec runtime", async () => {
+    const revision = createExecutableRevision({
+      tasks: [createExecutableTask("task-1")],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "review",
+    });
+    const conversation = createConversation("project-1", {
+      activeSpecId: spec.id,
+      conversationId: spec.conversationId,
+      mode: "spec",
+      specIds: [spec.id],
+      title: "Spec iteration",
+    });
+    const store = createStore({
+      currentConversation: conversation,
+      currentSpec: spec,
+    });
+    fake.runSpecTaskRuntime.mockImplementation(async (input: RuntimeInput) => {
+      const runningTask = store.get().currentSpec?.revisions[0].tasks[0];
+
+      expect(runningTask).toMatchObject({
+        runId: input.runId,
+        status: "running",
+      });
+      expect(input.runId).toMatch(/^run-/);
+
+      return {
+        run: createRun(input.runId, { status: "paused" }),
+        verificationReport: null,
+      };
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.approveAndExecuteCurrentSpec();
+
+    expect(fake.runSpecTaskRuntime).toHaveBeenCalledTimes(1);
+    expect(store.get().currentSpec?.status).toBe("building");
+    expect(store.get().currentSpec?.revisions[0].tasks[0].status).toBe("running");
+  });
+
+  it("marks a missing AgentRun as retryable blocked instead of leaving it running", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-missing",
+          status: "running",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    const task = store.get().currentSpec?.revisions[0].tasks[0];
+    expect(store.get().currentSpec?.status).toBe("blocked");
+    expect(task).toMatchObject({
+      error: "AgentRun run-missing was not found.",
+      status: "failed",
+    });
+  });
+
+  it("keeps waiting approval runs as running during Spec reconcile", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-waiting",
+          status: "running",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    fake.agentRuns.set("run-waiting", createRun("run-waiting", {
+      phase: "waiting_approval",
+      status: "waiting_approval",
+    }));
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(store.get().currentSpec?.status).toBe("building");
+    expect(store.get().currentSpec?.revisions[0].tasks[0]).toMatchObject({
+      runId: "run-waiting",
+      status: "running",
+    });
+  });
+
+  it("rejects direct Chat switching while Spec execution is locked", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-active",
+          status: "running",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    const store = createStore({
+      currentAgentRun: createRun("run-active", {
+        contract: createSpecRunContract(spec, revision.tasks[0]),
+      }),
+      currentConversation: createConversation("project-1", {
+        activeSpecId: spec.id,
+        conversationId: spec.conversationId,
+        mode: "spec",
+        specIds: [spec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.switchCurrentIterationToChat();
+
+    expect(fake.switchProjectConversationMode).not.toHaveBeenCalled();
+    expect(store.get().currentConversation?.mode).toBe("spec");
+    expect(store.get().projectError).toBe(
+      "Cancel the active Spec execution before switching to Chat.",
+    );
+  });
+
+  it("cancels the running Spec before switching to Chat", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-active",
+          status: "running",
+        }),
+        createExecutableTask("task-2", {
+          dependencyIds: ["task-1"],
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    const conversation = createConversation("project-1", {
+      activeSpecId: spec.id,
+      conversationId: spec.conversationId,
+      mode: "spec",
+      specIds: [spec.id],
+      title: "Spec iteration",
+    });
+    const store = createStore({
+      cancelCurrentAgentRunAndWait: vi.fn(async () =>
+        createRun("run-active", {
+          contract: createSpecRunContract(spec, revision.tasks[0]),
+          status: "cancelled",
+        }),
+      ),
+      currentAgentRun: createRun("run-active", {
+        contract: createSpecRunContract(spec, revision.tasks[0]),
+      }),
+      currentConversation: conversation,
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.switchCurrentIterationToChat({ cancelActiveSpec: true });
+
+    const cancelledSpec = fake.saveSpec.mock.calls[0][1] as DevelopmentSpec;
+    expect(cancelledSpec.status).toBe("cancelled");
+    expect(cancelledSpec.revisions[0].tasks.map((task) => task.status)).toEqual([
+      "cancelled",
+      "cancelled",
+    ]);
+    expect(fake.switchProjectConversationMode).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({
+        activeSpecId: null,
+        conversationId: conversation.id,
+        targetMode: "chat",
+      }),
+    );
+    expect(store.get().currentConversation?.mode).toBe("chat");
+    expect(store.get().currentConversation?.activeSpecId).toBeNull();
+    expect(store.get().currentSpec).toBeNull();
+  });
+
+  it("keeps Spec mode when cancellation does not reach cancelled", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-active",
+          status: "running",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    const store = createStore({
+      cancelCurrentAgentRunAndWait: vi.fn(async () =>
+        createRun("run-active", {
+          contract: createSpecRunContract(spec, revision.tasks[0]),
+          status: "failed",
+        }),
+      ),
+      currentAgentRun: createRun("run-active", {
+        contract: createSpecRunContract(spec, revision.tasks[0]),
+      }),
+      currentConversation: createConversation("project-1", {
+        activeSpecId: spec.id,
+        conversationId: spec.conversationId,
+        mode: "spec",
+        specIds: [spec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.switchCurrentIterationToChat({ cancelActiveSpec: true });
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(fake.switchProjectConversationMode).not.toHaveBeenCalled();
+    expect(store.get().currentConversation?.mode).toBe("spec");
+    expect(store.get().projectError).toBe(
+      "AgentRun cancellation did not reach cancelled state.",
+    );
+  });
+
+  it("restores review state when a revision request fails", async () => {
+    fake.requestSpecRevision.mockRejectedValue(new Error("revision failed"));
+    const revision = createExecutableRevision();
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "review",
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: spec.id,
+        conversationId: spec.conversationId,
+        mode: "spec",
+        modeChangedAt: "2026-01-01T00:00:00.000Z",
+        specIds: [spec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.reviseCurrentSpec("Tighten the requirements");
+
+    expect(store.get().currentSpec?.status).toBe("review");
+    expect(store.get().currentSpec?.currentRevisionId).toBe(revision.id);
+    expect(store.get().projectError).toBe("revision failed");
+  });
+
+  it("discards stale revision responses after the active Spec changes", async () => {
+    const revision = createExecutableRevision();
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "review",
+    });
+    const replacementSpec = createSpec({
+      conversationId: "conversation-2",
+      id: "spec-2",
+      status: "review",
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: spec.id,
+        conversationId: spec.conversationId,
+        mode: "spec",
+        modeChangedAt: "2026-01-01T00:00:00.000Z",
+        specIds: [spec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: spec,
+    });
+    fake.requestSpecRevision.mockImplementation(async () => {
+      store.set({
+        currentConversation: createConversation("project-1", {
+          activeSpecId: replacementSpec.id,
+          conversationId: replacementSpec.conversationId,
+          mode: "spec",
+          modeChangedAt: "2026-01-01T00:01:00.000Z",
+          specIds: [replacementSpec.id],
+          title: "Other Spec",
+        }),
+        currentSpec: replacementSpec,
+      });
+      return createGeneratedPayload();
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.reviseCurrentSpec("Tighten the requirements");
+
+    expect(fake.saveSpec).toHaveBeenCalledTimes(1);
+    expect(store.get().currentSpec).toBe(replacementSpec);
+    expect(store.get().currentSpec?.revisions).toHaveLength(1);
   });
 
   it("recursively blocks all pending downstream tasks", () => {
@@ -268,9 +654,11 @@ describe("spec store actions", () => {
 
 function createStore(patch: Partial<StoreState> = {}) {
   let state: StoreState = {
+    cancelCurrentAgentRunAndWait: vi.fn(async () => null),
     changeHistory: [],
     chatMessages: [],
     conversationSummaries: [],
+    currentAgentRun: null,
     currentConversation: null,
     currentProject: createProject(),
     currentSpec: null,
@@ -290,6 +678,10 @@ function createStore(patch: Partial<StoreState> = {}) {
     isVerifyingSpec: false,
     projectError: null,
     projects: [createProject()],
+    runProjectCommand: vi.fn(async () => ({
+      output: "ok",
+      success: true,
+    })),
     showArchivedConversations: false,
     terminalLogs: [],
     ...patch,
@@ -327,18 +719,20 @@ function createConversation(
   const now = "2026-01-01T00:00:00.000Z";
 
   return {
-    activeSpecId: input.activeSpecId as string,
+    activeSpecId: (input.activeSpecId ?? null) as string | null,
     archivedAt: null,
     createdAt: now,
-    id: input.conversationId as string,
-    kind: "iteration",
+    id: (input.conversationId as string | undefined) ?? "conversation-1",
+    kind: (input.kind as ProjectConversation["kind"] | undefined) ?? "iteration",
     lastMessageAt: now,
     messages: [],
-    mode: "spec",
-    modeChangedAt: now,
+    mode: (input.targetMode as ProjectConversation["mode"] | undefined) ??
+      (input.mode as ProjectConversation["mode"] | undefined) ??
+      "spec",
+    modeChangedAt: (input.modeChangedAt as string | undefined) ?? now,
     projectId,
-    specIds: input.specIds as string[],
-    title: input.title as string,
+    specIds: (input.specIds as string[] | undefined) ?? [],
+    title: (input.title as string | undefined) ?? "Spec iteration",
     updatedAt: now,
   };
 }
@@ -406,6 +800,18 @@ function createSpec(patch: Partial<DevelopmentSpec> & { tasks?: SpecRevision["ta
   };
 }
 
+function createExecutableRevision(
+  patch: Partial<SpecRevision> = {},
+): SpecRevision {
+  const payload = createGeneratedPayload();
+
+  return createRevision({
+    requirements: payload.requirements,
+    tasks: [createExecutableTask("task-1")],
+    ...patch,
+  });
+}
+
 function createRevision(patch: Partial<SpecRevision> = {}): SpecRevision {
   return {
     brief: "Spec",
@@ -434,6 +840,19 @@ function createRevision(patch: Partial<SpecRevision> = {}): SpecRevision {
   };
 }
 
+function createExecutableTask(
+  id: string,
+  patch: Partial<SpecRevision["tasks"][number]> = {},
+): SpecRevision["tasks"][number] {
+  return createTask(id, {
+    acceptanceCriteriaIds: ["criterion-1"],
+    allowedPaths: ["app/page.tsx"],
+    expectedFiles: ["app/page.tsx"],
+    requirementIds: ["story-1"],
+    ...patch,
+  });
+}
+
 function createTask(
   id: string,
   patch: Partial<SpecRevision["tasks"][number]> = {},
@@ -452,10 +871,100 @@ function createTask(
   };
 }
 
+function createRun(runId: string, patch: Partial<AgentRun> = {}): AgentRun {
+  const now = "2026-01-01T00:00:00.000Z";
+
+  return {
+    cancelRequested: false,
+    completedAt: undefined,
+    contract: {
+      acceptanceCriteria: [],
+      budget: {
+        maxModelTurns: 1,
+        maxMutations: 1,
+        maxRepairCycles: 1,
+        maxToolCalls: 1,
+      },
+      objective: "Run task",
+      permissions: {
+        databaseChange: "deny",
+        dependencyChange: "deny",
+        fileDelete: "deny",
+        fileWrite: true,
+        previewDeployment: "deny",
+        productionDeployment: "deny",
+      },
+      scope: {
+        allowedPaths: ["app/page.tsx"],
+        forbiddenPaths: [],
+      },
+      taskType: "component_edit",
+    },
+    conversationId: "conversation-1",
+    id: runId,
+    modelTurns: 0,
+    mutationCount: 0,
+    pauseRequested: false,
+    phase: "planning",
+    projectId: "project-1",
+    repairCycles: 0,
+    startedAt: now,
+    stateVersion: 1,
+    status: "planning",
+    toolCalls: 0,
+    updatedAt: now,
+    ...patch,
+  };
+}
+
+function createSpecRunContract(
+  spec: DevelopmentSpec,
+  task: SpecRevision["tasks"][number],
+): AgentRun["contract"] {
+  return {
+    acceptanceCriteria: spec.revisions[0].requirements.acceptanceCriteria,
+    budget: {
+      maxModelTurns: 1,
+      maxMutations: 1,
+      maxRepairCycles: 1,
+      maxToolCalls: 1,
+    },
+    objective: task.objective,
+    permissions: {
+      databaseChange: "deny",
+      dependencyChange: "deny",
+      fileDelete: "deny",
+      fileWrite: true,
+      previewDeployment: "deny",
+      productionDeployment: "deny",
+    },
+    scope: {
+      allowedPaths: task.allowedPaths,
+      forbiddenPaths: [],
+    },
+    source: {
+      acceptanceCriteriaIds: task.acceptanceCriteriaIds,
+      executionMode: "modify",
+      mode: "spec",
+      requirementIds: task.requirementIds,
+      revisionId: spec.currentRevisionId,
+      specId: spec.id,
+      taskId: task.id,
+    },
+    taskType: "component_edit",
+  };
+}
+
+type RuntimeInput = {
+  runId: string;
+};
+
 type StoreState = {
+  cancelCurrentAgentRunAndWait: () => Promise<AgentRun | null>;
   changeHistory: unknown[];
   chatMessages: ProjectConversation["messages"];
   conversationSummaries: ProjectConversationSummary[];
+  currentAgentRun: AgentRun | null;
   currentConversation: ProjectConversation | null;
   currentProject: ProjectInfo | null;
   currentSpec: DevelopmentSpec | null;
@@ -470,6 +979,10 @@ type StoreState = {
   isVerifyingSpec: boolean;
   projectError: string | null;
   projects: ProjectInfo[];
+  runProjectCommand: () => Promise<{
+    output: string;
+    success: boolean;
+  }>;
   showArchivedConversations: boolean;
   terminalLogs: string[];
 };
