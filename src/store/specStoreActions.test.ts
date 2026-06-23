@@ -672,6 +672,43 @@ describe("spec store actions", () => {
     expect(store.get().currentConversation?.mode).toBe("chat");
   });
 
+  it("keeps Spec mode when a running task is missing its runId during cancel switch", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          status: "running",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    const cancelCurrentAgentRunAndWait = vi.fn(async () => null);
+    const store = createStore({
+      cancelCurrentAgentRunAndWait,
+      currentAgentRun: null,
+      currentConversation: createConversation("project-1", {
+        activeSpecId: spec.id,
+        conversationId: spec.conversationId,
+        mode: "spec",
+        specIds: [spec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.switchCurrentIterationToChat({ cancelActiveSpec: true });
+
+    expect(cancelCurrentAgentRunAndWait).not.toHaveBeenCalled();
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(fake.switchProjectConversationMode).not.toHaveBeenCalled();
+    expect(store.get().currentConversation?.mode).toBe("spec");
+    expect(store.get().projectError).toBe("Running task is missing its AgentRun id.");
+  });
+
   it("keeps Spec mode when cancellation does not reach cancelled", async () => {
     const revision = createExecutableRevision({
       tasks: [

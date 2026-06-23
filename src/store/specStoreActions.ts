@@ -678,8 +678,12 @@ async function loadRunningSpecRun(
   const revision = getCurrentSpecRevision(spec);
   const runningTask = revision.tasks.find((task) => task.status === "running");
 
-  if (!runningTask?.runId) {
+  if (!runningTask) {
     return null;
+  }
+
+  if (!runningTask.runId) {
+    throw new Error("Running task is missing its AgentRun id.");
   }
 
   const run = await agentRuntimeApi.getRun(projectId, runningTask.runId);
