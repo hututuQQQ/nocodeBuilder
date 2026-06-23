@@ -112,7 +112,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
       }
 
       try {
-        const specs = await Promise.all(
+        const results = await Promise.allSettled(
           conversation.specIds.map((specId) => specApi.readSpec(project.id, specId)),
         );
 
@@ -123,8 +123,31 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
           return;
         }
 
+        const specs = results
+          .filter((result): result is PromiseFulfilledResult<DevelopmentSpec> =>
+            result.status === "fulfilled",
+          )
+          .map((result) => result.value);
+        const failedLoads = results.flatMap((result, index) =>
+          result.status === "rejected"
+            ? [
+                `${conversation.specIds[index]}: ${getProjectErrorMessage(
+                  result.reason,
+                )}`,
+              ]
+            : [],
+        );
+
         set({ historicalSpecs: specs });
+
+        if (failedLoads.length > 0) {
+          recordSpecError(
+            set,
+            new Error(`Failed to load Spec history: ${failedLoads.join("; ")}`),
+          );
+        }
       } catch (error) {
+        set({ historicalSpecs: [] });
         recordSpecError(set, error);
       }
     },

@@ -348,6 +348,47 @@ describe("spec store actions", () => {
     expect(store.get().historicalSpecs).toEqual([historicalSpec]);
   });
 
+  it("keeps readable Chat history specs when one historical Spec cannot load", async () => {
+    const readableSpec = createSpec({
+      id: "spec-readable",
+      status: "completed",
+    });
+    fake.readSpec.mockImplementation(async (_projectId: string, specId: string) => {
+      if (specId === "spec-missing") {
+        throw new Error("spec file missing");
+      }
+
+      return readableSpec;
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: null,
+        conversationId: "conversation-1",
+        mode: "chat",
+        specIds: ["spec-readable", "spec-missing"],
+        title: "Chat iteration",
+      }),
+      historicalSpecs: [
+        createSpec({
+          id: "spec-stale",
+          status: "completed",
+        }),
+      ],
+    });
+    const actions = createSpecActions(store as never);
+    store.set(actions as unknown as Partial<StoreState>);
+
+    await actions.loadCurrentSpec();
+
+    expect(fake.readSpec).toHaveBeenCalledWith("project-1", "spec-readable");
+    expect(fake.readSpec).toHaveBeenCalledWith("project-1", "spec-missing");
+    expect(store.get().currentSpec).toBeNull();
+    expect(store.get().historicalSpecs).toEqual([readableSpec]);
+    expect(store.get().projectError).toBe(
+      "Failed to load Spec history: spec-missing: spec file missing",
+    );
+  });
+
   it("persists a task runId before launching Spec runtime", async () => {
     const revision = createExecutableRevision({
       tasks: [createExecutableTask("task-1")],
