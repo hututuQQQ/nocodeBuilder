@@ -70,31 +70,33 @@ export function validateGeneratedSpecRevisionPayload(
   };
 }
 
-export function validateDevelopmentSpec(spec: DevelopmentSpec): DevelopmentSpec {
-  if (!spec.id.trim()) {
-    throw new Error("Spec id is required.");
+export function validateDevelopmentSpec(value: unknown): DevelopmentSpec {
+  if (!isRecord(value)) {
+    throw new Error("Spec must be an object.");
   }
 
-  if (!spec.projectId.trim()) {
-    throw new Error("Spec projectId is required.");
-  }
+  const spec = value as Partial<DevelopmentSpec>;
 
-  if (!spec.conversationId.trim()) {
-    throw new Error("Spec conversationId is required.");
-  }
+  readRequiredString(spec.id, "Spec id", 200);
+  readRequiredString(spec.projectId, "Spec projectId", 200);
+  readRequiredString(spec.conversationId, "Spec conversationId", 200);
+  const kind = spec.kind;
+  const status = spec.status;
 
-  if (spec.kind !== "initial_build" && spec.kind !== "feature") {
+  if (kind !== "initial_build" && kind !== "feature") {
     throw new Error("Spec kind is invalid.");
   }
 
-  if (!SPEC_STATUSES.has(spec.status)) {
+  if (typeof status !== "string" || !SPEC_STATUSES.has(status)) {
     throw new Error("Spec status is invalid.");
   }
 
-  assertIsoTimestamp(spec.createdAt, "Spec createdAt");
-  assertIsoTimestamp(spec.updatedAt, "Spec updatedAt");
+  const createdAt = readRequiredString(spec.createdAt, "Spec createdAt", 80);
+  const updatedAt = readRequiredString(spec.updatedAt, "Spec updatedAt", 80);
+  assertIsoTimestamp(createdAt, "Spec createdAt");
+  assertIsoTimestamp(updatedAt, "Spec updatedAt");
 
-  if (new Date(spec.updatedAt).getTime() < new Date(spec.createdAt).getTime()) {
+  if (new Date(updatedAt).getTime() < new Date(createdAt).getTime()) {
     throw new Error("Spec updatedAt cannot be before createdAt.");
   }
 
@@ -122,7 +124,7 @@ export function validateDevelopmentSpec(spec: DevelopmentSpec): DevelopmentSpec 
     throw new Error("Spec failureMessage must be a string.");
   }
 
-  if (spec.finalVerification) {
+  if (spec.finalVerification !== undefined) {
     validateFinalVerification(spec.finalVerification);
   }
 
@@ -130,28 +132,36 @@ export function validateDevelopmentSpec(spec: DevelopmentSpec): DevelopmentSpec 
     throw new Error("Completed Spec requires completedAt and successful finalVerification.");
   }
 
-  if (spec.revisions.length === 0) {
+  const revisions = readArray(spec.revisions, "Spec revisions");
+
+  if (revisions.length === 0) {
     throw new Error("Spec must include at least one revision.");
   }
 
+  const validatedRevisions = revisions.map((revision) =>
+    validateRevision(revision, kind),
+  );
   const revisionIds = assertUnique(
-    spec.revisions.map((revision) => revision.id),
+    validatedRevisions.map((revision) => revision.id),
     "revision id",
   );
+  const currentRevisionId = readRequiredString(
+    spec.currentRevisionId,
+    "Spec currentRevisionId",
+    200,
+  );
 
-  if (!revisionIds.has(spec.currentRevisionId)) {
+  if (!revisionIds.has(currentRevisionId)) {
     throw new Error("Spec currentRevisionId must reference a revision.");
   }
 
-  spec.revisions.forEach((revision, index) => {
+  validatedRevisions.forEach((revision, index) => {
     if (revision.version !== index + 1) {
       throw new Error("Spec revision versions must be consecutive.");
     }
-
-    validateRevision(revision, spec.kind);
   });
 
-  return spec;
+  return value as DevelopmentSpec;
 }
 
 export function validateSpecForApproval(spec: DevelopmentSpec): SpecRevision {
@@ -221,12 +231,20 @@ export function computeAcceptanceResults(
   });
 }
 
-function validateRevision(revision: SpecRevision, kind: DevelopmentSpec["kind"]) {
-  if (!revision.id.trim()) {
-    throw new Error("Spec revision id is required.");
+function validateRevision(
+  value: unknown,
+  kind: DevelopmentSpec["kind"],
+): SpecRevision {
+  if (!isRecord(value)) {
+    throw new Error("Spec revision must be an object.");
   }
 
-  if (!Number.isInteger(revision.version) || revision.version < 1) {
+  const revision = value as Partial<SpecRevision>;
+  readRequiredString(revision.id, "Spec revision id", 200);
+  readRequiredString(revision.brief, "Spec revision brief", 4000);
+  const version = revision.version;
+
+  if (typeof version !== "number" || !Number.isInteger(version) || version < 1) {
     throw new Error("Spec revision version must be a positive integer.");
   }
 
@@ -236,14 +254,20 @@ function validateRevision(revision: SpecRevision, kind: DevelopmentSpec["kind"])
     assertIsoTimestamp(revision.approvedAt, "Spec revision approvedAt");
   }
 
-  for (const task of revision.tasks) {
-    validateTaskRuntimeFields(task);
+  const requirements = validatePersistedRequirements(revision.requirements);
+  validatePersistedDesign(revision.design);
+  const tasks = readArray(revision.tasks, "Spec revision tasks").map(
+    validatePersistedTask,
+  );
+
+  if (tasks.length === 0) {
+    throw new Error("Spec requires at least one task.");
   }
 
-  validateRevisionParts(revision.requirements, revision.tasks);
+  validateRevisionParts(requirements, tasks);
 
   if (kind === "initial_build") {
-    const hasBootstrapTask = revision.tasks.some((task) =>
+    const hasBootstrapTask = tasks.some((task) =>
       /\b(package\.json|next|bootstrap|initial|scaffold|foundation|base)\b/i.test(
         [task.title, task.objective, ...task.expectedFiles].join(" "),
       ),
@@ -255,34 +279,164 @@ function validateRevision(revision: SpecRevision, kind: DevelopmentSpec["kind"])
       );
     }
   }
+
+  return value as SpecRevision;
 }
 
-function validateTaskRuntimeFields(task: SpecTask) {
-  if (!TASK_STATUSES.has(task.status)) {
-    throw new Error(`Task ${task.id} has invalid status.`);
+function validatePersistedRequirements(value: unknown): SpecRequirements {
+  if (!isRecord(value)) {
+    throw new Error("Spec requirements must be an object.");
   }
 
-  if (task.runId !== undefined && (typeof task.runId !== "string" || !task.runId.trim())) {
-    throw new Error(`Task ${task.id} runId must be a non-empty string.`);
+  const userStories = readArray(
+    value.userStories,
+    "Spec requirements.userStories",
+  ).map((story) => {
+    if (!isRecord(story)) {
+      throw new Error("Spec user story must be an object.");
+    }
+
+    return {
+      description: readRequiredString(
+        story.description,
+        "Spec userStory.description",
+        1200,
+      ),
+      id: readIdentifier(story.id, "Spec userStory.id"),
+    };
+  });
+  const acceptanceCriteria = readArray(
+    value.acceptanceCriteria,
+    "Spec requirements.acceptanceCriteria",
+  ).map((criterion) => {
+    if (!isRecord(criterion)) {
+      throw new Error("Spec acceptance criterion must be an object.");
+    }
+
+    if (typeof criterion.required !== "boolean") {
+      throw new Error("Spec acceptanceCriterion.required must be a boolean.");
+    }
+
+    return {
+      description: readRequiredString(
+        criterion.description,
+        "Spec acceptanceCriterion.description",
+        1600,
+      ),
+      id: readIdentifier(criterion.id, "Spec acceptanceCriterion.id"),
+      required: criterion.required,
+    };
+  });
+
+  return {
+    acceptanceCriteria,
+    constraints: readStringArray(value.constraints, "Spec requirements.constraints"),
+    goal: readRequiredString(value.goal, "Spec requirements.goal", 2000),
+    outOfScope: readStringArray(value.outOfScope, "Spec requirements.outOfScope"),
+    unresolvedQuestions: readStringArray(
+      value.unresolvedQuestions,
+      "Spec requirements.unresolvedQuestions",
+    ),
+    userStories,
+  };
+}
+
+function validatePersistedDesign(value: unknown): SpecDesign {
+  if (!isRecord(value)) {
+    throw new Error("Spec design must be an object.");
   }
 
-  if (task.error !== undefined && typeof task.error !== "string") {
-    throw new Error(`Task ${task.id} error must be a string.`);
+  readArray(value.pages, "Spec design.pages").forEach((page) => {
+    if (!isRecord(page)) {
+      throw new Error("Spec design page must be an object.");
+    }
+
+    readRequiredString(page.route, "Spec design.pages.route", 200);
+    readRequiredString(page.purpose, "Spec design.pages.purpose", 1000);
+  });
+  readArray(value.components, "Spec design.components").forEach((component) => {
+    if (!isRecord(component)) {
+      throw new Error("Spec design component must be an object.");
+    }
+
+    readRequiredString(component.name, "Spec design.components.name", 160);
+    readRequiredString(
+      component.responsibility,
+      "Spec design.components.responsibility",
+      1000,
+    );
+  });
+
+  return {
+    components: value.components as SpecDesign["components"],
+    dataModel: readStringArray(value.dataModel, "Spec design.dataModel"),
+    integrations: readStringArray(value.integrations, "Spec design.integrations"),
+    pages: value.pages as SpecDesign["pages"],
+    summary: readRequiredString(value.summary, "Spec design.summary", 3000),
+    technicalDecisions: readStringArray(
+      value.technicalDecisions,
+      "Spec design.technicalDecisions",
+    ),
+    verificationStrategy: readStringArray(
+      value.verificationStrategy,
+      "Spec design.verificationStrategy",
+    ),
+  };
+}
+
+function validatePersistedTask(value: unknown): SpecTask {
+  if (!isRecord(value)) {
+    throw new Error("Spec task must be an object.");
+  }
+
+  const id = readIdentifier(value.id, "Spec task.id");
+  const status = value.status;
+
+  if (typeof status !== "string" || !TASK_STATUSES.has(status)) {
+    throw new Error(`Task ${id} has invalid status.`);
+  }
+
+  if (value.runId !== undefined && (typeof value.runId !== "string" || !value.runId.trim())) {
+    throw new Error(`Task ${id} runId must be a non-empty string.`);
+  }
+
+  if (value.error !== undefined && typeof value.error !== "string") {
+    throw new Error(`Task ${id} error must be a string.`);
   }
 
   if (
-    task.blockedByTaskId !== undefined &&
-    (typeof task.blockedByTaskId !== "string" || !task.blockedByTaskId.trim())
+    value.blockedByTaskId !== undefined &&
+    (typeof value.blockedByTaskId !== "string" || !value.blockedByTaskId.trim())
   ) {
-    throw new Error(`Task ${task.id} blockedByTaskId must be a non-empty string.`);
+    throw new Error(`Task ${id} blockedByTaskId must be a non-empty string.`);
   }
+
+  return {
+    acceptanceCriteriaIds: readIdentifierArray(
+      value.acceptanceCriteriaIds,
+      "Spec task.acceptanceCriteriaIds",
+    ),
+    allowedPaths: readPathArray(value.allowedPaths, "Spec task.allowedPaths"),
+    blockedByTaskId: value.blockedByTaskId as string | undefined,
+    dependencyIds: readIdentifierArray(value.dependencyIds, "Spec task.dependencyIds", {
+      allowEmpty: true,
+    }),
+    error: value.error as string | undefined,
+    expectedFiles: readPathArray(value.expectedFiles, "Spec task.expectedFiles", {
+      allowEmpty: true,
+    }),
+    id,
+    objective: readRequiredString(value.objective, "Spec task.objective", 3000),
+    requirementIds: readIdentifierArray(value.requirementIds, "Spec task.requirementIds"),
+    runId: value.runId as string | undefined,
+    status: status as SpecTask["status"],
+    title: readRequiredString(value.title, "Spec task.title", 240),
+  };
 }
 
-function validateFinalVerification(
-  finalVerification: DevelopmentSpec["finalVerification"],
-) {
-  if (!finalVerification) {
-    return;
+function validateFinalVerification(finalVerification: unknown) {
+  if (!isRecord(finalVerification)) {
+    throw new Error("Spec finalVerification must be an object.");
   }
 
   if (
@@ -532,7 +686,7 @@ function assertUnique(values: string[], label: string) {
   return seen;
 }
 
-function assertIsoTimestamp(value: string, label: string) {
+function assertIsoTimestamp(value: unknown, label: string) {
   if (typeof value !== "string" || !value.trim()) {
     throw new Error(`${label} is required.`);
   }

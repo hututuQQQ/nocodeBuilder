@@ -109,6 +109,40 @@ describe("Spec validators", () => {
     ).toThrow(/invalid status/i);
   });
 
+  it("rejects malformed persisted Spec structures explicitly", () => {
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec(),
+        revisions: "not-an-array",
+      } as unknown),
+    ).toThrow(/Spec revisions must be an array/i);
+
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec(),
+        finalVerification: "",
+      } as unknown),
+    ).toThrow(/finalVerification must be an object/i);
+  });
+
+  it("requires persisted acceptance criteria to keep explicit required flags", () => {
+    const spec = createSpec({
+      requirements: {
+        ...createGeneratedPayload().requirements,
+        acceptanceCriteria: [
+          {
+            description: "The hero content is visible.",
+            id: "criterion-1",
+          } as never,
+        ],
+      },
+    });
+
+    expect(() => validateDevelopmentSpec(spec)).toThrow(
+      /acceptanceCriterion\.required must be a boolean/i,
+    );
+  });
+
   it("requires completed specs to include successful final verification", () => {
     expect(() =>
       validateDevelopmentSpec({
