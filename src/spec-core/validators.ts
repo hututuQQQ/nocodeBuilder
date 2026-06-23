@@ -241,6 +241,79 @@ export function computeAcceptanceResults(
   });
 }
 
+export function computePersistedAcceptanceResults(
+  spec: DevelopmentSpec,
+): SpecAcceptanceResult[] {
+  const revision = getCurrentSpecRevision(spec);
+  const verificationReports = new Map<string, "passed" | "failed" | "pending">();
+  const acceptanceEvidencePassed =
+    spec.finalVerification?.success === true ||
+    (spec.finalVerification?.success === false &&
+      spec.finalVerification.command !== "acceptance criteria");
+  const allTaskRunsCompleted = revision.tasks.every(
+    (task) => task.status === "passed" && Boolean(task.runId),
+  );
+
+  if (acceptanceEvidencePassed && allTaskRunsCompleted) {
+    for (const task of revision.tasks) {
+      if (task.runId) {
+        verificationReports.set(task.runId, "passed");
+      }
+    }
+  }
+
+  return computeAcceptanceResults(revision, verificationReports).map((result) =>
+    enrichPersistedAcceptanceResult(spec, revision, result),
+  );
+}
+
+function enrichPersistedAcceptanceResult(
+  spec: DevelopmentSpec,
+  revision: SpecRevision,
+  result: SpecAcceptanceResult,
+): SpecAcceptanceResult {
+  const linkedTasks = revision.tasks.filter((task) =>
+    result.taskIds.includes(task.id),
+  );
+  const taskFailures = linkedTasks
+    .filter((task) => ["failed", "cancelled", "blocked"].includes(task.status))
+    .map((task) => `${task.id}: ${task.error || task.status}`);
+  const finalVerificationOutput = spec.finalVerification?.output.trim();
+  const criterionFailedFinalVerification =
+    spec.finalVerification?.success === false &&
+    spec.finalVerification.command === "acceptance criteria" &&
+    finalVerificationOutput?.includes(result.criterionId);
+
+  if (taskFailures.length > 0) {
+    return {
+      ...result,
+      summary: taskFailures.join("\n"),
+    };
+  }
+
+  if (criterionFailedFinalVerification) {
+    return {
+      ...result,
+      status: "failed",
+      summary: finalVerificationOutput,
+    };
+  }
+
+  if (result.summary) {
+    return result;
+  }
+
+  if (result.status === "pending") {
+    return {
+      ...result,
+      summary: finalVerificationOutput ||
+        "Waiting for verification report evidence from linked task runs.",
+    };
+  }
+
+  return result;
+}
+
 function validateRevision(
   value: unknown,
   kind: DevelopmentSpec["kind"],

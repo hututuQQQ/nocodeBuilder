@@ -3,6 +3,7 @@ import type { DevelopmentSpec } from "./types";
 import {
   canRetrySpecVerification,
   computeAcceptanceResults,
+  computePersistedAcceptanceResults,
   validateDevelopmentSpec,
   validateGeneratedSpecRevisionPayload,
   validateSpecForApproval,
@@ -276,6 +277,86 @@ describe("Spec validators", () => {
       ["run-1", "passed"],
     ]));
     expect(failed.status).toBe("failed");
+  });
+
+  it("keeps persisted acceptance results pending until final evidence exists", () => {
+    const spec = createSpec({
+      tasks: [
+        {
+          ...createGeneratedPayload().tasks[0],
+          runId: "run-1",
+          status: "passed",
+        },
+      ],
+    });
+    const [result] = computePersistedAcceptanceResults(spec);
+
+    expect(result).toMatchObject({
+      criterionId: "criterion-1",
+      runIds: ["run-1"],
+      status: "pending",
+      summary: "Waiting for verification report evidence from linked task runs.",
+      taskIds: ["task-1"],
+    });
+  });
+
+  it("uses successful final verification as persisted acceptance evidence", () => {
+    const spec = {
+      ...createSpec({
+        tasks: [
+          {
+            ...createGeneratedPayload().tasks[0],
+            runId: "run-1",
+            status: "passed" as const,
+          },
+        ],
+      }),
+      completedAt: "2026-06-24T00:02:00Z",
+      finalVerification: {
+        checkedAt: "2026-06-24T00:02:00Z",
+        command: "npm run build",
+        output: "build ok",
+        success: true,
+      },
+      status: "completed" as const,
+    };
+    const [result] = computePersistedAcceptanceResults(spec);
+
+    expect(result).toMatchObject({
+      criterionId: "criterion-1",
+      runIds: ["run-1"],
+      status: "passed",
+      taskIds: ["task-1"],
+    });
+  });
+
+  it("projects failed final acceptance evidence with a failure summary", () => {
+    const spec = {
+      ...createSpec({
+        tasks: [
+          {
+            ...createGeneratedPayload().tasks[0],
+            runId: "run-1",
+            status: "passed" as const,
+          },
+        ],
+      }),
+      failureMessage: "Required acceptance criteria are not all passing: criterion-1.",
+      finalVerification: {
+        checkedAt: "2026-06-24T00:02:00Z",
+        command: "acceptance criteria",
+        output: "Required acceptance criteria are not all passing: criterion-1.",
+        success: false,
+      },
+      status: "blocked" as const,
+    };
+    const [result] = computePersistedAcceptanceResults(spec);
+
+    expect(result).toMatchObject({
+      criterionId: "criterion-1",
+      status: "failed",
+      summary: "Required acceptance criteria are not all passing: criterion-1.",
+    });
   });
 });
 

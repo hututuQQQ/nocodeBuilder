@@ -23,6 +23,7 @@ import type {
 } from "../../spec-core/types";
 import {
   canRetrySpecVerification,
+  computePersistedAcceptanceResults,
   getCurrentSpecRevision,
 } from "../../spec-core/validators";
 import { AgentRunPanel } from "../chat/AgentRunPanel";
@@ -483,36 +484,13 @@ function BuildView({
   }
 
   const revision = getCurrentSpecRevision(spec);
-  const acceptanceResults = revision.requirements.acceptanceCriteria.map((criterion) => {
-    const linkedTasks = tasks.filter((task) =>
-      task.acceptanceCriteriaIds.includes(criterion.id),
-    );
-    const runIds = linkedTasks
-      .map((task) => task.runId)
-      .filter((runId): runId is string => Boolean(runId));
-    let status: "passed" | "failed" | "pending" = "pending";
-
-    if (
-      criterion.required && linkedTasks.length === 0 ||
-      linkedTasks.some((task) =>
-        ["failed", "cancelled", "blocked"].includes(task.status),
-      )
-    ) {
-      status = "failed";
-    } else if (
-      linkedTasks.length > 0 &&
-      linkedTasks.every((task) => task.status === "passed" && task.runId)
-    ) {
-      status = "passed";
-    }
-
-    return {
+  const criteriaById = new Map(
+    revision.requirements.acceptanceCriteria.map((criterion) => [
+      criterion.id,
       criterion,
-      linkedTasks,
-      runIds,
-      status,
-    };
-  });
+    ]),
+  );
+  const acceptanceResults = computePersistedAcceptanceResults(spec);
 
   return (
     <section className="rounded-md border border-zinc-800 bg-zinc-950/70 p-4">
@@ -524,9 +502,25 @@ function BuildView({
           </div>
           <p className="mt-1 text-xs text-zinc-500">Tasks passed</p>
           {spec.finalVerification ? (
-            <p className="mt-3 rounded border border-emerald-400/30 bg-emerald-400/10 px-2 py-1.5 text-xs text-emerald-100">
-              Final build passed
-            </p>
+            <div className={`mt-3 rounded border px-2 py-1.5 text-xs ${
+              spec.finalVerification.success
+                ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-100"
+                : "border-red-400/30 bg-red-400/10 text-red-100"
+            }`}>
+              <p className="font-medium">
+                {spec.finalVerification.success
+                  ? "Final verification passed"
+                  : "Final verification failed"}
+              </p>
+              <p className="mt-1 break-words text-[11px] opacity-80">
+                {spec.finalVerification.command}
+              </p>
+              {!spec.finalVerification.success && spec.finalVerification.output ? (
+                <p className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap rounded border border-current/20 px-2 py-1.5 text-[11px] leading-4 opacity-90">
+                  {spec.finalVerification.output}
+                </p>
+              ) : null}
+            </div>
           ) : null}
           {canRetrySpecVerification(spec) ? (
             <button
@@ -549,20 +543,26 @@ function BuildView({
               {acceptanceResults.map((result) => (
                 <div
                   className="rounded border border-zinc-800 bg-zinc-950/60 px-3 py-2"
-                  key={result.criterion.id}
+                  key={result.criterionId}
                 >
                   <div className="flex items-start justify-between gap-3">
                     <p className="min-w-0 text-xs leading-5 text-zinc-300">
-                      {result.criterion.description}
+                      {criteriaById.get(result.criterionId)?.description ??
+                        result.criterionId}
                     </p>
                     <StatusPill status={result.status} />
                   </div>
                   <p className="mt-1 text-[11px] leading-4 text-zinc-500">
-                    Tasks: {result.linkedTasks.map((task) => task.id).join(", ") || "none"}
+                    Tasks: {result.taskIds.join(", ") || "none"}
                   </p>
                   <p className="mt-1 text-[11px] leading-4 text-zinc-500">
                     Runs: {result.runIds.join(", ") || "none"}
                   </p>
+                  {result.summary ? (
+                    <p className="mt-2 whitespace-pre-wrap rounded border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-[11px] leading-4 text-zinc-400">
+                      {result.summary}
+                    </p>
+                  ) : null}
                 </div>
               ))}
             </div>
