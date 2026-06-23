@@ -400,6 +400,10 @@ describe("spec store actions", () => {
 
     expect(store.get().currentSpec?.status).toBe("blocked");
     expect(store.get().currentSpec?.failureMessage).toContain("criterion-1");
+    expect(store.get().currentSpec?.finalVerification).toMatchObject({
+      command: "acceptance criteria",
+      success: false,
+    });
     expect(store.get().runProjectCommand).not.toHaveBeenCalled();
   });
 
@@ -432,7 +436,83 @@ describe("spec store actions", () => {
 
     expect(store.get().currentSpec?.status).toBe("blocked");
     expect(store.get().currentSpec?.failureMessage).toContain("criterion-1");
+    expect(store.get().currentSpec?.finalVerification).toMatchObject({
+      command: "acceptance criteria",
+      success: false,
+    });
     expect(store.get().runProjectCommand).not.toHaveBeenCalled();
+  });
+
+  it("does not retry verification without a failed final verification marker", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-1",
+          status: "passed",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      failureMessage: "Unrelated blocked state.",
+      revisions: [revision],
+      status: "blocked",
+    });
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.retrySpecVerification();
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(store.get().runProjectCommand).not.toHaveBeenCalled();
+    expect(store.get().currentSpec).toBe(spec);
+  });
+
+  it("retries verification after a failed final verification", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-1",
+          status: "passed",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      failureMessage: "Final npm run build failed:\nbuild failed",
+      finalVerification: {
+        checkedAt: "2026-01-01T00:03:00.000Z",
+        command: "npm run build",
+        output: "build failed",
+        success: false,
+      },
+      revisions: [revision],
+      status: "blocked",
+    });
+    fake.agentRuns.set("run-1", createRun("run-1", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "completed",
+      status: "completed",
+    }));
+    fake.verificationReports.set("run-1", createVerificationReport("run-1", "passed"));
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.retrySpecVerification();
+
+    expect(store.get().currentSpec?.status).toBe("completed");
+    expect(store.get().currentSpec?.finalVerification).toMatchObject({
+      command: "npm run build",
+      success: true,
+    });
+    expect(store.get().runProjectCommand).toHaveBeenCalledWith(
+      "project-1",
+      "npm run build",
+    );
   });
 
   it("completes when every required criterion and final build pass", async () => {

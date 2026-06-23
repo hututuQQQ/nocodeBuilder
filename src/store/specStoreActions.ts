@@ -484,7 +484,12 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
     retrySpecVerification: async () => {
       const spec = get().currentSpec;
 
-      if (!spec || spec.status !== "blocked" || !hasAllTasksPassed(spec)) {
+      if (
+        !spec ||
+        spec.status !== "blocked" ||
+        !hasAllTasksPassed(spec) ||
+        spec.finalVerification?.success !== false
+      ) {
         return;
       }
 
@@ -1006,13 +1011,14 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
   });
 
   if (failedCriteria.length > 0) {
+    const output = `Required acceptance criteria are not all passing: ${failedCriteria
+      .map((criterion) => criterion.id)
+      .join(", ")}.`;
     await saveSpecToStore(
       store,
       markSpecBlocked(
-        spec,
-        `Required acceptance criteria are not all passing: ${failedCriteria
-          .map((criterion) => criterion.id)
-          .join(", ")}.`,
+        markFinalVerificationFailed(spec, "acceptance criteria", output),
+        output,
       ),
     );
     return;
@@ -1028,7 +1034,10 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
   if (installResult && !installResult.success) {
     await saveSpecToStore(
       store,
-      markSpecBlocked(spec, `Final npm install failed:\n${installResult.output}`),
+      markSpecBlocked(
+        markFinalVerificationFailed(spec, "npm install", installResult.output),
+        `Final npm install failed:\n${installResult.output}`,
+      ),
     );
     return;
   }
@@ -1036,11 +1045,16 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
   const buildResult = await store.get().runProjectCommand(project.id, "npm run build");
 
   if (!buildResult?.success) {
+    const output = buildResult?.output ?? "No command output.";
     await saveSpecToStore(
       store,
       markSpecBlocked(
-        spec,
-        `Final npm run build failed:\n${buildResult?.output ?? "No command output."}`,
+        markFinalVerificationFailed(
+          spec,
+          installRequired ? "npm install && npm run build" : "npm run build",
+          output,
+        ),
+        `Final npm run build failed:\n${output}`,
       ),
     );
     return;
@@ -1078,6 +1092,22 @@ async function saveSpecToStore(store: StoreAccess, spec: DevelopmentSpec) {
   }));
 
   return saved;
+}
+
+function markFinalVerificationFailed(
+  spec: DevelopmentSpec,
+  command: string,
+  output: string,
+): DevelopmentSpec {
+  return {
+    ...spec,
+    finalVerification: {
+      checkedAt: new Date().toISOString(),
+      command,
+      output,
+      success: false,
+    },
+  };
 }
 
 function applyConversationAndSpec(
