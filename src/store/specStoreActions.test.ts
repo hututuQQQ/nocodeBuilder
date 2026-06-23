@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentRun } from "../agent-core/types";
+import type { AgentRun, VerificationReport } from "../agent-core/types";
 import type { ProjectConversation, ProjectConversationSummary, ProjectInfo } from "../services/projects";
 import type { DevelopmentSpec, GeneratedSpecRevisionPayload, SpecRevision } from "../spec-core/types";
 import {
@@ -9,6 +9,7 @@ import {
 
 const fake = vi.hoisted(() => ({
   agentRuns: new Map<string, unknown>(),
+  checkpoints: new Map<string, unknown>(),
   createProjectConversation: vi.fn(),
   createSpec: vi.fn(),
   deleteUnattachedSpec: vi.fn(),
@@ -33,7 +34,9 @@ vi.mock("../agent-runtime/runController", () => ({
 
 vi.mock("../services/agentRuntime", () => ({
   agentRuntimeApi: {
-    getLatestCheckpoint: vi.fn(async () => null),
+    getLatestCheckpoint: vi.fn(async (_projectId: string, runId: string) =>
+      fake.checkpoints.get(runId) ?? null,
+    ),
     getLatestVerificationReport: vi.fn(async (_projectId: string, runId: string) =>
       fake.verificationReports.get(runId) ?? null,
     ),
@@ -95,6 +98,7 @@ vi.mock("../spec-runtime/requests", () => ({
 describe("spec store actions", () => {
   beforeEach(() => {
     fake.agentRuns = new Map();
+    fake.checkpoints = new Map();
     fake.createProjectConversation.mockReset();
     fake.createSpec.mockReset();
     fake.deleteUnattachedSpec.mockReset();
@@ -337,6 +341,152 @@ describe("spec store actions", () => {
       runId: "run-waiting",
       status: "running",
     });
+  });
+
+  it("blocks completion when a required acceptance criterion is pending", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-1",
+          status: "passed",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "verifying",
+    });
+    fake.agentRuns.set("run-1", createRun("run-1", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "completed",
+      status: "completed",
+    }));
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    expect(store.get().currentSpec?.status).toBe("blocked");
+    expect(store.get().currentSpec?.failureMessage).toContain("criterion-1");
+    expect(store.get().runProjectCommand).not.toHaveBeenCalled();
+  });
+
+  it("blocks completion when a required acceptance criterion failed", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-1",
+          status: "passed",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "verifying",
+    });
+    fake.agentRuns.set("run-1", createRun("run-1", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "completed",
+      status: "completed",
+    }));
+    fake.verificationReports.set("run-1", createVerificationReport("run-1", "failed"));
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    expect(store.get().currentSpec?.status).toBe("blocked");
+    expect(store.get().currentSpec?.failureMessage).toContain("criterion-1");
+    expect(store.get().runProjectCommand).not.toHaveBeenCalled();
+  });
+
+  it("completes when every required criterion and final build pass", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-1",
+          status: "passed",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "verifying",
+    });
+    fake.agentRuns.set("run-1", createRun("run-1", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "completed",
+      status: "completed",
+    }));
+    fake.verificationReports.set("run-1", createVerificationReport("run-1", "passed"));
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    expect(store.get().currentSpec?.status).toBe("completed");
+    expect(store.get().currentSpec?.finalVerification).toMatchObject({
+      command: "npm run build",
+      success: true,
+    });
+    expect(store.get().runProjectCommand).toHaveBeenCalledWith(
+      "project-1",
+      "npm run build",
+    );
+  });
+
+  it("runs npm install before final build when a Feature Spec changes package.json", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-1",
+          status: "passed",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      kind: "feature",
+      revisions: [revision],
+      status: "verifying",
+    });
+    fake.agentRuns.set("run-1", createRun("run-1", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "completed",
+      status: "completed",
+    }));
+    fake.verificationReports.set("run-1", createVerificationReport("run-1", "passed"));
+    fake.checkpoints.set("run-1", {
+      packageChanged: true,
+    });
+    const runProjectCommand = vi.fn(async (_projectId: string, command: string) => ({
+      output: `${command} ok`,
+      success: true,
+    }));
+    const store = createStore({
+      currentSpec: spec,
+      runProjectCommand,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    expect(runProjectCommand.mock.calls.map((call) => call[1])).toEqual([
+      "npm install",
+      "npm run build",
+    ]);
+    expect(store.get().currentSpec?.finalVerification?.command).toBe(
+      "npm install && npm run build",
+    );
   });
 
   it("rejects direct Chat switching while Spec execution is locked", async () => {
@@ -917,6 +1067,23 @@ function createRun(runId: string, patch: Partial<AgentRun> = {}): AgentRun {
   };
 }
 
+function createVerificationReport(
+  runId: string,
+  status: VerificationReport["status"],
+): VerificationReport {
+  return {
+    artifactIds: [],
+    checks: [],
+    createdAt: "2026-01-01T00:02:00.000Z",
+    id: `report-${runId}`,
+    missingEvidence: status === "passed" ? [] : ["criterion failed"],
+    newlyIntroducedFailures: [],
+    repairFeedback: status === "passed" ? [] : ["Fix the criterion"],
+    runId,
+    status,
+  };
+}
+
 function createSpecRunContract(
   spec: DevelopmentSpec,
   task: SpecRevision["tasks"][number],
@@ -979,7 +1146,7 @@ type StoreState = {
   isVerifyingSpec: boolean;
   projectError: string | null;
   projects: ProjectInfo[];
-  runProjectCommand: () => Promise<{
+  runProjectCommand: (projectId: string, command: string) => Promise<{
     output: string;
     success: boolean;
   }>;
