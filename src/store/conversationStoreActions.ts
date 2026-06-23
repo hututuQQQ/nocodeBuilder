@@ -88,6 +88,15 @@ export function createConversationActions({
         return null;
       }
 
+      const conversationInput: CreateProjectConversationInput =
+        typeof input === "object" && input
+          ? input
+          : {
+              kind: "iteration",
+              mode: "chat",
+              title: input,
+            };
+
       if (isSpecWorkflowBusy(get())) {
         const message =
           "Wait for the current Spec operation to finish before creating a new iteration.";
@@ -102,17 +111,26 @@ export function createConversationActions({
         return null;
       }
 
+      if (
+        conversationInput.kind === "iteration" &&
+        !canCreateIterationFromState(get(), targetProjectId)
+      ) {
+        const message =
+          "conversation: initial build must complete before creating iterations";
+
+        set((state) => ({
+          projectError: message,
+          terminalLogs: appendLogs(state.terminalLogs, [
+            "[conversation] New iteration blocked until Initial Spec completes.",
+          ]),
+        }));
+
+        return null;
+      }
+
       set({ isCreatingConversation: true, projectError: null });
 
       try {
-        const conversationInput: CreateProjectConversationInput =
-          typeof input === "object" && input
-            ? input
-            : {
-                kind: "iteration",
-                mode: "chat",
-                title: input,
-              };
         const conversation = await projectApi.createProjectConversation(
           targetProjectId,
           conversationInput,
@@ -327,6 +345,31 @@ function isSpecWorkflowBusy(state: AppState) {
       state.isExecutingSpec ||
       state.isVerifyingSpec ||
       state.isSwitchingIterationMode,
+  );
+}
+
+function canCreateIterationFromState(state: AppState, projectId: string) {
+  if (state.currentProject?.id !== projectId) {
+    return false;
+  }
+
+  const projectSummaries = state.conversationSummaries.filter(
+    (summary) => summary.projectId === projectId,
+  );
+
+  if (projectSummaries.some((summary) => summary.kind === "iteration")) {
+    return true;
+  }
+
+  const initialBuild = projectSummaries.find(
+    (summary) => summary.kind === "initial_build",
+  );
+
+  return Boolean(
+    initialBuild &&
+      state.currentConversation?.id === initialBuild.id &&
+      state.currentSpec?.id === initialBuild.activeSpecId &&
+      state.currentSpec.status === "completed",
   );
 }
 

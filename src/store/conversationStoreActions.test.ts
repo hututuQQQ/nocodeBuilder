@@ -99,6 +99,133 @@ describe("conversation store actions", () => {
       ]),
     );
   });
+
+  it("does not create an iteration before the Initial Spec completes", async () => {
+    const initialBuild = createSummary({
+      activeSpecId: "spec-initial",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      title: "Initial build",
+    });
+    const store = createStore({
+      conversationSummaries: [initialBuild],
+      currentConversation: createConversation({
+        activeSpecId: "spec-initial",
+        id: "conversation-initial",
+        kind: "initial_build",
+        mode: "spec",
+        specIds: ["spec-initial"],
+        title: "Initial build",
+      }),
+      currentSpec: {
+        id: "spec-initial",
+        status: "review",
+      },
+    });
+    const actions = createConversationActions(store as never);
+
+    const conversation = await actions.createConversation("project-1", {
+      kind: "iteration",
+      mode: "chat",
+      title: "Follow-up",
+    });
+
+    expect(conversation).toBeNull();
+    expect(fake.createProjectConversation).not.toHaveBeenCalled();
+    expect(store.get().projectError).toBe(
+      "conversation: initial build must complete before creating iterations",
+    );
+    expect(store.get().terminalLogs).toEqual(
+      expect.arrayContaining([
+        "[conversation] New iteration blocked until Initial Spec completes.",
+      ]),
+    );
+  });
+
+  it("creates the first iteration after the Initial Spec completes", async () => {
+    const initialBuild = createSummary({
+      activeSpecId: "spec-initial",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      title: "Initial build",
+    });
+    const iteration = createConversation({
+      id: "conversation-iteration",
+      title: "Follow-up",
+    });
+    fake.createProjectConversation.mockResolvedValue(iteration);
+    const store = createStore({
+      conversationSummaries: [initialBuild],
+      currentConversation: createConversation({
+        activeSpecId: "spec-initial",
+        id: "conversation-initial",
+        kind: "initial_build",
+        mode: "spec",
+        specIds: ["spec-initial"],
+        title: "Initial build",
+      }),
+      currentSpec: {
+        id: "spec-initial",
+        status: "completed",
+      },
+    });
+    const actions = createConversationActions(store as never);
+
+    await expect(
+      actions.createConversation("project-1", {
+        kind: "iteration",
+        mode: "chat",
+        title: "Follow-up",
+      }),
+    ).resolves.toEqual(iteration);
+
+    expect(fake.createProjectConversation).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({
+        kind: "iteration",
+        mode: "chat",
+        title: "Follow-up",
+      }),
+    );
+  });
+
+  it("allows later iterations once the project already has an iteration", async () => {
+    const iteration = createConversation({
+      id: "conversation-next",
+      title: "Next",
+    });
+    fake.createProjectConversation.mockResolvedValue(iteration);
+    const store = createStore({
+      conversationSummaries: [
+        createSummary({
+          activeSpecId: "spec-initial",
+          id: "conversation-initial",
+          kind: "initial_build",
+          mode: "spec",
+          title: "Initial build",
+        }),
+        createSummary({
+          id: "conversation-existing",
+          kind: "iteration",
+          mode: "chat",
+          title: "Existing iteration",
+        }),
+      ],
+    });
+    const actions = createConversationActions(store as never);
+
+    await expect(
+      actions.createConversation("project-1", {
+        kind: "iteration",
+        mode: "chat",
+        title: "Next",
+      }),
+    ).resolves.toEqual(iteration);
+
+    expect(fake.createProjectConversation).toHaveBeenCalledTimes(1);
+  });
 });
 
 function createStore(patch: Partial<StoreState> = {}) {
