@@ -29,8 +29,10 @@ export function PreviewPanel() {
   const previewRefreshKey = useAppStore((state) => state.previewRefreshKey);
   const previewUrl = useAppStore((state) => state.previewUrl);
   const refreshPreview = useAppStore((state) => state.refreshPreview);
+  const selectedSiteNodeId = useAppStore((state) => state.selectedSiteNodeId);
   const startDevServer = useAppStore((state) => state.startDevServer);
   const stopDevServer = useAppStore((state) => state.stopDevServer);
+  const clearSelectedSiteNode = useAppStore((state) => state.clearSelectedSiteNode);
   const [isVercelDialogOpen, setIsVercelDialogOpen] = useState(false);
   const [token, setToken] = useState("");
   const [scope, setScope] = useState("");
@@ -200,6 +202,7 @@ export function PreviewPanel() {
         isDeploying={isDeploying}
         isStartingDevServer={isStartingDevServer}
         onCloseDeploymentTab={handleCloseDeploymentTab}
+        onClearSelectedSiteNode={clearSelectedSiteNode}
         onDeployClick={() => void handleDeployClick()}
         onOpenBrowser={() => void openPreviewInBrowser(activePreviewUrl ?? undefined)}
         onOpenVercelDialog={() => void openVercelDialog()}
@@ -215,6 +218,7 @@ export function PreviewPanel() {
             void stopDevServer(currentProject.id);
           }
         }}
+        selectedSiteNodeId={selectedSiteNodeId}
       />
 
       <PreviewFrame

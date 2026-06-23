@@ -309,7 +309,7 @@ function buildTaskLedger(
   const pending = risks.length > 0 ? ["Repair the latest failing observation."] : [];
 
   if (workingSummary.changedFiles.length > 0 && risks.length === 0) {
-    pending.push("Verify changed files and finish when the user request is handled.");
+    pending.push("Verify changed files and propose finish_candidate when the user request is handled.");
   }
 
   return {
@@ -317,7 +317,7 @@ function buildTaskLedger(
     nextStep:
       risks.length > 0
         ? "Use the latest error and relevant file context for a focused repair."
-        : "Choose the smallest useful next tool call or finish if complete.",
+        : "Choose the smallest useful next tool call or finish_candidate if complete.",
     objective: compactText(userRequest, 360),
     pending,
     risks,

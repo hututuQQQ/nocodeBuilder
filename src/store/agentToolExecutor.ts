@@ -10,6 +10,10 @@ import {
 } from "../agent/project/pathRules";
 import { validatePackageJsonContent } from "../agent/project/packageValidation";
 import { getAgentToolDefinition } from "../agent/project/toolRegistry";
+import { ensureSiteIndex, refreshSiteIndex } from "../adapters/siteIrAdapter";
+import { flattenNodes, findSiteNode } from "../agent-core/site-ir/siteIndex";
+import type { PageSpec, SiteNode, SiteSpec } from "../agent-core/types";
+import { agentRuntimeApi } from "../services/agentRuntime";
 import {
   CommandResult,
   FileTree,
@@ -30,6 +34,27 @@ const MAX_TOOL_OUTPUT_CHARS = 18_000;
 const MAX_READ_FILE_CHARS = 24_000;
 const MAX_GREP_FILES = 250;
 
+export const AGENT_TOOL_EXECUTOR_NAMES = new Set<string>([
+  "apply_supabase_schema",
+  "delete_files",
+  "edit_file",
+  "find_site_node",
+  "get_page_spec",
+  "get_site_spec",
+  "glob_files",
+  "grep_files",
+  "list_files",
+  "read_files",
+  "refresh_preview",
+  "refresh_site_index",
+  "resolve_node_source",
+  "run_command",
+  "start_dev_server",
+  "stop_dev_server",
+  "update_design_tokens",
+  "write_files",
+]);
+
 export type AgentReadFileState = {
   content: string;
   contentHash: string;
@@ -38,10 +63,13 @@ export type AgentReadFileState = {
 };
 
 export type AgentRunState = {
+  packageBaselineJson: string | null;
   readFiles: Map<string, AgentReadFileState>;
 };
 
 export type AgentToolResult = {
+  changedFiles?: string[];
+  deletedFiles?: string[];
   didChangeFiles?: boolean;
   didChangePackage?: boolean;
   observation: AgentObservation;
@@ -49,6 +77,7 @@ export type AgentToolResult = {
 
 export function createAgentRunState(): AgentRunState {
   return {
+    packageBaselineJson: null,
     readFiles: new Map(),
   };
 }
@@ -236,6 +265,7 @@ async function executeAgentToolCore(
           runState,
           step.args.path,
         );
+        rememberPackageBaseline(runState, step.args.path, currentContent);
         const nextContent = applyTextEdit(currentContent, step.args);
 
         if (step.args.path === "package.json") {
@@ -252,6 +282,7 @@ async function executeAgentToolCore(
         ensureCurrentProject(store, project.id);
 
         return {
+          changedFiles: changeRecord.files.map((file) => file.path),
           didChangeFiles: true,
           didChangePackage: step.args.path === "package.json",
           observation: createAgentObservation({
@@ -266,6 +297,13 @@ async function executeAgentToolCore(
       case "write_files": {
         for (const file of step.args.files) {
           await requireFreshReadForExistingFile(project, runState, file.path);
+          if (file.path === "package.json") {
+            rememberPackageBaseline(
+              runState,
+              file.path,
+              runState.readFiles.get(file.path)?.content ?? null,
+            );
+          }
         }
 
         const changeRecord = await writeAgentFiles(
@@ -280,6 +318,7 @@ async function executeAgentToolCore(
         ensureCurrentProject(store, project.id);
 
         return {
+          changedFiles: changeRecord.files.map((file) => file.path),
           didChangeFiles: true,
           didChangePackage: step.args.files.some(
             (file) => file.path === "package.json",
@@ -307,6 +346,8 @@ async function executeAgentToolCore(
         ensureCurrentProject(store, project.id);
 
         return {
+          changedFiles: changeRecord.files.map((file) => file.path),
+          deletedFiles: step.args.paths,
           didChangeFiles: true,
           observation: createAgentObservation({
             content: formatChangeRecordMessage(step.args.summary, changeRecord),
@@ -338,6 +379,105 @@ async function executeAgentToolCore(
             ok: true,
             step: observationStep,
             summary: step.args.summary,
+            tool: step.tool,
+          }),
+        };
+      }
+      case "get_site_spec": {
+        const siteSpec = await ensureSiteIndex(project, store.get().fileTree);
+
+        return {
+          observation: createAgentObservation({
+            content: JSON.stringify(siteSpec, null, 2),
+            ok: true,
+            step: observationStep,
+            summary: `Loaded SiteSpec with ${siteSpec.pages.length} page(s).`,
+            tool: step.tool,
+          }),
+        };
+      }
+      case "get_page_spec": {
+        const siteSpec = await ensureSiteIndex(project, store.get().fileTree);
+        const page = findPageSpec(siteSpec, step.args);
+
+        return {
+          observation: createAgentObservation({
+            content: JSON.stringify({ page }, null, 2),
+            ok: Boolean(page),
+            step: observationStep,
+            summary: page
+              ? `Loaded page spec for ${page.route}.`
+              : "No matching page spec was found.",
+            tool: step.tool,
+          }),
+        };
+      }
+      case "find_site_node": {
+        const siteSpec = await ensureSiteIndex(project, store.get().fileTree);
+        const matches = findSiteNodes(siteSpec, step.args);
+
+        return {
+          observation: createAgentObservation({
+            content: JSON.stringify({ matches }, null, 2),
+            ok: matches.length > 0,
+            step: observationStep,
+            summary: `Found ${matches.length} SiteSpec node match(es).`,
+            tool: step.tool,
+          }),
+        };
+      }
+      case "resolve_node_source": {
+        const siteSpec = await ensureSiteIndex(project, store.get().fileTree);
+        const sourceMap = await agentRuntimeApi.readSiteSourceMap(project.id);
+        const source =
+          sourceMap?.entries.find((entry) => entry.nodeId === step.args.nodeId) ??
+          findSiteNode(siteSpec, step.args.nodeId)?.source ??
+          null;
+
+        return {
+          observation: createAgentObservation({
+            content: JSON.stringify({ nodeId: step.args.nodeId, source }, null, 2),
+            ok: Boolean(source),
+            step: observationStep,
+            summary: source
+              ? `Resolved ${step.args.nodeId} to ${source.path}.`
+              : `No source mapping found for ${step.args.nodeId}.`,
+            tool: step.tool,
+          }),
+        };
+      }
+      case "refresh_site_index": {
+        const siteSpec = await refreshSiteIndex(project, store.get().fileTree);
+
+        return {
+          observation: createAgentObservation({
+            content: JSON.stringify(
+              {
+                pages: siteSpec.pages.length,
+                reason: step.args.reason,
+                reusableComponents: siteSpec.reusableComponents.length,
+              },
+              null,
+              2,
+            ),
+            ok: true,
+            step: observationStep,
+            summary: `Refreshed SiteSpec with ${siteSpec.pages.length} page(s).`,
+            tool: step.tool,
+          }),
+        };
+      }
+      case "update_design_tokens": {
+        const result = await updateDesignTokens(store, project, step.args);
+
+        return {
+          changedFiles: result.changedFiles,
+          didChangeFiles: true,
+          observation: createAgentObservation({
+            content: JSON.stringify(result, null, 2),
+            ok: true,
+            step: observationStep,
+            summary: step.args.summary ?? "Updated design tokens.",
             tool: step.tool,
           }),
         };
@@ -406,6 +546,241 @@ async function ensureFileTree(store: StoreAccess, project: ProjectInfo) {
   return fileTree;
 }
 
+function findPageSpec(
+  siteSpec: SiteSpec,
+  args: { pageId?: string; route?: string },
+): PageSpec | null {
+  return (
+    siteSpec.pages.find(
+      (page) =>
+        (args.pageId && page.id === args.pageId) ||
+        (args.route && page.route === args.route),
+    ) ?? null
+  );
+}
+
+function findSiteNodes(
+  siteSpec: SiteSpec,
+  args: {
+    label?: string;
+    nodeId?: string;
+    route?: string;
+    textHint?: string;
+  },
+) {
+  const pages = args.route
+    ? siteSpec.pages.filter((page) => page.route === args.route)
+    : siteSpec.pages;
+  const normalized = {
+    label: args.label?.toLowerCase(),
+    nodeId: args.nodeId?.toLowerCase(),
+    textHint: args.textHint?.toLowerCase(),
+  };
+
+  return pages.flatMap((page) =>
+    flattenNodes(page.nodes)
+      .filter((node) => matchesSiteNode(node, normalized))
+      .map((node) => ({
+        node,
+        page: {
+          id: page.id,
+          route: page.route,
+          title: page.title,
+        },
+      })),
+  );
+}
+
+function matchesSiteNode(
+  node: SiteNode,
+  query: { label?: string; nodeId?: string; textHint?: string },
+) {
+  if (query.nodeId && node.id.toLowerCase() === query.nodeId) {
+    return true;
+  }
+
+  if (query.label && node.label?.toLowerCase().includes(query.label)) {
+    return true;
+  }
+
+  if (!query.textHint) {
+    return false;
+  }
+
+  const haystack = [
+    node.id,
+    node.label,
+    node.type,
+    JSON.stringify(node.props ?? {}),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return haystack.includes(query.textHint);
+}
+
+async function updateDesignTokens(
+  store: StoreAccess,
+  project: ProjectInfo,
+  args: Extract<AgentToolCallStep, { tool: "update_design_tokens" }>["args"],
+) {
+  const fileTree = await ensureFileTree(store, project);
+  const siteSpec = await ensureSiteIndex(project, fileTree);
+  const tokenPath = findDesignTokenPath(fileTree);
+  const tokenFileExisted = hasFilePath(fileTree, tokenPath);
+  const currentContent = await readOptionalProjectFile(project.id, tokenPath);
+  const mergedDesignSystem = {
+    colors: {
+      ...siteSpec.designSystem.colors,
+      ...(args.tokens.colors ?? {}),
+    },
+    radii: {
+      ...siteSpec.designSystem.radii,
+      ...(args.tokens.radii ?? {}),
+    },
+    spacing: {
+      ...siteSpec.designSystem.spacing,
+      ...(args.tokens.spacing ?? {}),
+    },
+    typography: {
+      ...siteSpec.designSystem.typography,
+      ...(args.tokens.typography ?? {}),
+    },
+  };
+  const nextContent = updateCssTokenBlock(currentContent, mergedDesignSystem);
+  const nextSiteSpec: SiteSpec = {
+    ...siteSpec,
+    designSystem: mergedDesignSystem,
+  };
+
+  let cssChanged = false;
+
+  try {
+    const changeRecord = await writeAgentFiles(
+      store,
+      project,
+      [{ content: nextContent, path: tokenPath }],
+      args.summary ?? "Updated design tokens.",
+    );
+    cssChanged = true;
+    await agentRuntimeApi.writeSiteSpec(project.id, nextSiteSpec);
+    store.set({ fileTree: await projectApi.listFiles(project.id) });
+
+    return {
+      changedFiles: changeRecord.files.map((file) => file.path),
+      designSystem: nextSiteSpec.designSystem,
+      tokenPath,
+    };
+  } catch (error) {
+    const rollbackErrors: string[] = [];
+
+    if (cssChanged) {
+      try {
+        if (tokenFileExisted) {
+          await writeAgentFiles(
+            store,
+            project,
+            [{ content: currentContent, path: tokenPath }],
+            "Rolled back design token CSS after metadata update failed.",
+          );
+        } else {
+          await deleteAgentFiles(
+            store,
+            project,
+            [tokenPath],
+            "Rolled back design token CSS after metadata update failed.",
+          );
+        }
+      } catch (rollbackError) {
+        rollbackErrors.push(getProjectErrorMessage(rollbackError));
+      }
+    }
+
+    try {
+      await agentRuntimeApi.writeSiteSpec(project.id, siteSpec);
+    } catch (rollbackError) {
+      rollbackErrors.push(getProjectErrorMessage(rollbackError));
+    }
+
+    const message = getProjectErrorMessage(error);
+    const rollbackSuffix = rollbackErrors.length > 0
+      ? ` Rollback also reported: ${rollbackErrors.join("; ")}`
+      : "";
+    throw new Error(`update_design_tokens failed before committing CSS/SiteSpec together: ${message}.${rollbackSuffix}`);
+  }
+}
+
+function findDesignTokenPath(fileTree: FileTree) {
+  const files = flattenFileTree(fileTree).map((file) => file.path);
+
+  return (
+    [
+      "app/globals.css",
+      "styles/globals.css",
+      "styles/tokens.css",
+      "styles/nocode-tokens.css",
+    ].find((path) => files.includes(path)) ?? "styles/nocode-tokens.css"
+  );
+}
+
+async function readOptionalProjectFile(projectId: string, path: string) {
+  try {
+    return await projectApi.readFile(projectId, path);
+  } catch (error) {
+    const message = getProjectErrorMessage(error).toLowerCase();
+
+    if (message.includes("not found")) {
+      return "";
+    }
+
+    throw error;
+  }
+}
+
+function updateCssTokenBlock(
+  currentContent: string,
+  tokens: SiteSpec["designSystem"],
+) {
+  const declarations = Object.entries(tokens)
+    .flatMap(([group, values]) =>
+      Object.entries(values ?? {}).map(
+        ([key, value]) => `  --ncb-${toCssTokenName(group)}-${toCssTokenName(key)}: ${value};`,
+      ),
+    )
+    .sort();
+  const block = [
+    "/* nocode-builder-design-tokens:start */",
+    ":root {",
+    ...declarations,
+    "}",
+    "/* nocode-builder-design-tokens:end */",
+  ].join("\n");
+  const pattern =
+    /\/\* nocode-builder-design-tokens:start \*\/[\s\S]*?\/\* nocode-builder-design-tokens:end \*\//;
+
+  if (pattern.test(currentContent)) {
+    return currentContent.replace(pattern, block);
+  }
+
+  return [currentContent.trimEnd(), "", block, ""].filter(Boolean).join("\n");
+}
+
+function toCssTokenName(value: string) {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .replace(/[^a-zA-Z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
+}
+
+function flattenFileTree(fileTree: FileTree): FileTree[] {
+  return [
+    fileTree,
+    ...(fileTree.children ?? []).flatMap((child) => flattenFileTree(child)),
+  ];
+}
+
 function rememberReadFile(
   runState: AgentRunState,
   path: string,
@@ -417,6 +792,18 @@ function rememberReadFile(
     path,
     readAt: new Date().toISOString(),
   });
+}
+
+function rememberPackageBaseline(
+  runState: AgentRunState,
+  path: string,
+  content: string | null,
+) {
+  if (path !== "package.json" || runState.packageBaselineJson !== null || content === null) {
+    return;
+  }
+
+  runState.packageBaselineJson = content;
 }
 
 async function requireFreshReadState(
@@ -746,6 +1133,18 @@ export function formatAgentToolLabel(step: AgentToolCallStep) {
       return `run_command ${step.args.command}`;
     case "apply_supabase_schema":
       return `apply_supabase_schema ${step.args.tables.map((table) => table.name).join(", ")}`;
+    case "get_site_spec":
+      return "get_site_spec";
+    case "get_page_spec":
+      return `get_page_spec ${step.args.route ?? step.args.pageId ?? ""}`.trim();
+    case "find_site_node":
+      return `find_site_node ${step.args.nodeId ?? step.args.label ?? step.args.textHint ?? step.args.route ?? ""}`.trim();
+    case "update_design_tokens":
+      return "update_design_tokens";
+    case "resolve_node_source":
+      return `resolve_node_source ${step.args.nodeId}`;
+    case "refresh_site_index":
+      return "refresh_site_index";
     default:
       return step.tool;
   }

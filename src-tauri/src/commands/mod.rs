@@ -64,6 +64,11 @@ pub fn open_preview_in_browser(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn probe_preview_url(url: String) -> Result<preview::PreviewProbeResult, String> {
+    preview::probe_preview_url(url)
+}
+
+#[tauri::command]
 pub async fn deploy_to_vercel(
     app: AppHandle,
     project_id: String,

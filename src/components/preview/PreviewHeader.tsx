@@ -23,6 +23,7 @@ type PreviewHeaderProps = {
   isDeploying: boolean;
   isStartingDevServer: boolean;
   onCloseDeploymentTab: () => void;
+  onClearSelectedSiteNode: () => void;
   onDeployClick: () => void;
   onOpenBrowser: () => void;
   onOpenVercelDialog: () => void;
@@ -30,6 +31,7 @@ type PreviewHeaderProps = {
   onSelectTab: (tab: PreviewTab) => void;
   onStartPreview: () => void;
   onStopPreview: () => void;
+  selectedSiteNodeId: string | null;
 };
 
 export function PreviewHeader({
@@ -44,6 +46,7 @@ export function PreviewHeader({
   isDeploying,
   isStartingDevServer,
   onCloseDeploymentTab,
+  onClearSelectedSiteNode,
   onDeployClick,
   onOpenBrowser,
   onOpenVercelDialog,
@@ -51,6 +54,7 @@ export function PreviewHeader({
   onSelectTab,
   onStartPreview,
   onStopPreview,
+  selectedSiteNodeId,
 }: PreviewHeaderProps) {
   return (
     <header className="flex h-12 shrink-0 items-center justify-between border-b border-zinc-800 px-4">
@@ -111,6 +115,20 @@ export function PreviewHeader({
         <span className="min-w-0 truncate rounded border border-zinc-800 px-2 py-1 text-xs text-zinc-500">
           {activePreviewUrl ?? devServerStatus}
         </span>
+        {selectedSiteNodeId ? (
+          <span className="flex max-w-44 min-w-0 items-center rounded border border-teal-400/30 bg-teal-400/10 pl-2 text-xs text-teal-100">
+            <span className="truncate">{selectedSiteNodeId}</span>
+            <button
+              aria-label="Clear selected preview node"
+              className="grid size-6 shrink-0 place-items-center text-teal-200/70 transition hover:text-teal-50"
+              onClick={onClearSelectedSiteNode}
+              title="Clear selected preview node"
+              type="button"
+            >
+              <X size={12} aria-hidden="true" />
+            </button>
+          </span>
+        ) : null}
       </div>
       <div className="flex items-center gap-2">
         <button

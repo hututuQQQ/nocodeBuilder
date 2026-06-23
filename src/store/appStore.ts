@@ -17,6 +17,7 @@ import {
 import type { ChatMessage } from "./chatMessages";
 import type { ChangeRecord } from "./changeHistory";
 import { createChatActions } from "./chatStoreActions";
+import { createAgentRunActions } from "./agentRunStoreActions";
 import { appendLogs, type CommandRun, type CommandRunLink } from "./commandLogs";
 import { createCommandActions } from "./commandStoreActions";
 import { createConversationActions } from "./conversationStoreActions";
@@ -24,6 +25,14 @@ import { createDeploymentActions } from "./deploymentStoreActions";
 import { createPreviewActions } from "./previewStoreActions";
 import { createProjectActions } from "./projectStoreActions";
 import { createReviewActions } from "./reviewStoreActions";
+import type {
+  AgentApproval,
+  AgentEvent,
+  AgentRun,
+  PreviewDiagnostic,
+  PreviewVerificationSession,
+  VerificationReport,
+} from "../agent-core/types";
 
 export type { ChatMessage } from "./chatMessages";
 export type { ChangeRecord, FileChangeSummary } from "./changeHistory";
@@ -33,14 +42,20 @@ type DevServerStatus = "stopped" | "starting" | "running" | "failed";
 export type AppState = {
   activeCommand: string | null;
   activeCommandRunId: string | null;
+  agentEvents: AgentEvent[];
+  agentRuns: AgentRun[];
   commandRuns: CommandRun[];
+  currentAgentApproval: AgentApproval | null;
+  currentAgentRun: AgentRun | null;
   currentProject: ProjectInfo | null;
+  currentVerificationReport: VerificationReport | null;
   devServerStatus: DevServerStatus;
   projects: ProjectInfo[];
   fileTree: FileTree | null;
   selectedFilePath: string | null;
   selectedFileContent: string;
   selectedChangeFilePath: string | null;
+  selectedSiteNodeId: string | null;
   conversationSummaries: ProjectConversationSummary[];
   currentConversation: ProjectConversation | null;
   chatMessages: ChatMessage[];
@@ -48,6 +63,9 @@ export type AppState = {
   terminalLogs: string[];
   previewRefreshKey: number;
   previewUrl: string | null;
+  previewDiagnostics: PreviewDiagnostic[];
+  previewVerificationSession: PreviewVerificationSession | null;
+  previewVerificationSessions: PreviewVerificationSession[];
   lastDeploymentUrl: string | null;
   isInstallingDependencies: boolean;
   isLoadingProjects: boolean;
@@ -66,7 +84,10 @@ export type AppState = {
   showArchivedConversations: boolean;
   archiveConversation: (conversationId: string) => Promise<void>;
   archiveCurrentConversation: () => Promise<void>;
+  approveCurrentAgentApproval: () => Promise<void>;
   bootstrapProject: (projectId: string) => Promise<void>;
+  cancelCurrentAgentRun: () => Promise<void>;
+  clearSelectedSiteNode: () => void;
   createConversation: (
     projectId?: string,
     title?: string,
@@ -78,6 +99,7 @@ export type AppState = {
   deployCurrentProject: (
     options: VercelDeployOptions,
   ) => Promise<VercelDeploymentInfo | null>;
+  denyCurrentAgentApproval: () => Promise<void>;
   handleCommandOutput: (event: CommandOutputEvent) => void;
   handleCommandStatus: (event: CommandStatusEvent) => void;
   loadProjectConversations: (
@@ -85,20 +107,27 @@ export type AppState = {
     options?: { ensureConversation?: boolean; initialTitle?: string },
   ) => Promise<void>;
   loadProjectChangeHistory: (projectId: string) => Promise<void>;
+  loadAgentRuns: (projectId: string) => Promise<void>;
   loadProjects: () => Promise<void>;
   openProjectFolder: (projectId: string) => Promise<void>;
   openPreviewInBrowser: (url?: string) => Promise<void>;
   readProjectFile: (path: string) => Promise<void>;
   refreshPreview: () => void;
+  recordPreviewDiagnostic: (
+    diagnostic: Omit<PreviewDiagnostic, "id" | "runId" | "timestamp">,
+  ) => void;
   acceptAllChanges: () => Promise<void>;
   acceptChangedFile: (path: string) => Promise<void>;
   persistProjectChangeHistory: (
     projectId: string,
     records: ChangeRecord[],
   ) => Promise<void>;
+  pauseCurrentAgentRun: () => Promise<void>;
   recordProjectChange: (record: ChangeRecord) => Promise<void>;
   revertAllChanges: () => Promise<void>;
   revertChangedFile: (path: string) => Promise<void>;
+  recoverCurrentAgentRun: () => Promise<void>;
+  resumeCurrentAgentRun: () => Promise<void>;
   runProjectCommand: (
     projectId: string,
     command: string,
@@ -115,6 +144,8 @@ export type AppState = {
     },
   ) => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
+  sendAgentSteering: (content: string) => Promise<void>;
+  setSelectedSiteNode: (nodeId: string | null) => void;
   setShowArchivedConversations: (showArchived: boolean) => Promise<void>;
   startDevServer: (projectId: string) => Promise<void>;
   stopDevServer: (projectId: string) => Promise<void>;
@@ -124,14 +155,20 @@ export type AppState = {
 const initialState = {
   activeCommand: null,
   activeCommandRunId: null,
+  agentEvents: [],
+  agentRuns: [],
   commandRuns: [],
+  currentAgentApproval: null,
+  currentAgentRun: null,
   currentProject: null,
+  currentVerificationReport: null,
   devServerStatus: "stopped" as DevServerStatus,
   projects: [],
   fileTree: null,
   selectedFilePath: null,
   selectedFileContent: "",
   selectedChangeFilePath: null,
+  selectedSiteNodeId: null,
   conversationSummaries: [],
   currentConversation: null,
   chatMessages: [],
@@ -139,6 +176,9 @@ const initialState = {
   terminalLogs: [],
   previewRefreshKey: 0,
   previewUrl: null,
+  previewDiagnostics: [],
+  previewVerificationSession: null,
+  previewVerificationSessions: [],
   lastDeploymentUrl: null,
   isInstallingDependencies: false,
   isLoadingProjects: false,
@@ -159,30 +199,41 @@ const initialState = {
   AppState,
   | "archiveConversation"
   | "archiveCurrentConversation"
+  | "approveCurrentAgentApproval"
   | "bootstrapProject"
+  | "cancelCurrentAgentRun"
+  | "clearSelectedSiteNode"
   | "createConversation"
   | "createProject"
   | "deployCurrentProject"
+  | "denyCurrentAgentApproval"
   | "handleCommandOutput"
   | "handleCommandStatus"
   | "loadProjectConversations"
   | "loadProjectChangeHistory"
+  | "loadAgentRuns"
   | "loadProjects"
   | "openProjectFolder"
   | "openPreviewInBrowser"
   | "readProjectFile"
   | "refreshPreview"
+  | "recordPreviewDiagnostic"
   | "acceptAllChanges"
   | "acceptChangedFile"
   | "persistProjectChangeHistory"
+  | "pauseCurrentAgentRun"
   | "recordProjectChange"
   | "revertAllChanges"
   | "revertChangedFile"
+  | "recoverCurrentAgentRun"
+  | "resumeCurrentAgentRun"
   | "runProjectCommand"
   | "selectReviewFile"
   | "selectConversation"
   | "selectProject"
   | "sendMessage"
+  | "sendAgentSteering"
+  | "setSelectedSiteNode"
   | "setShowArchivedConversations"
   | "startDevServer"
   | "stopDevServer"
@@ -194,6 +245,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
   return {
     ...initialState,
+    ...createAgentRunActions(store),
     ...createCommandActions(store),
     ...createConversationActions(store),
     ...createDeploymentActions(store),

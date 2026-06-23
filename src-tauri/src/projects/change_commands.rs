@@ -2,11 +2,7 @@ use std::{fs, path::Path};
 
 use serde::{Deserialize, Serialize};
 
-use super::{
-    metadata::METADATA_DIR,
-    types::ProjectChangeRecord,
-    workspace::resolve_project_dir,
-};
+use super::{metadata::METADATA_DIR, types::ProjectChangeRecord, workspace::resolve_project_dir};
 
 const CHANGE_HISTORY_FILE: &str = "change-history.json";
 const MAX_CHANGE_HISTORY_RECORDS: usize = 50;
@@ -21,7 +17,9 @@ pub fn list_project_change_history(project_id: String) -> Result<Vec<ProjectChan
     let project_dir = resolve_project_dir(&project_id)?;
     let mut history = read_change_history_file(&project_dir)?;
 
-    history.records.retain(|record| record.project_id == project_id);
+    history
+        .records
+        .retain(|record| record.project_id == project_id);
     Ok(history.records)
 }
 

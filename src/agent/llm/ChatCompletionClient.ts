@@ -141,19 +141,21 @@ export class ChatCompletionClient {
     body: Record<string, unknown>,
     options: ChatJsonOptions,
   ): Promise<RawChatCompletionResponse> {
+    throwIfAborted(options.signal);
+
     if (isTauriRuntime()) {
       if (options.onDelta) {
-        return this.invokeNativeChatCompletionStream(body, options.onDelta);
+        return this.invokeNativeChatCompletionStream(body, options);
       }
 
-      return this.invokeNativeChatCompletion(body);
+      return this.invokeNativeChatCompletion(body, options);
     }
 
     if (options.onDelta) {
-      return this.fetchChatCompletionStream(body, options.onDelta);
+      return this.fetchChatCompletionStream(body, options);
     }
 
-    return this.fetchChatCompletion(body);
+    return this.fetchChatCompletion(body, options);
   }
 
   private validateConfig() {
@@ -174,18 +176,19 @@ export class ChatCompletionClient {
 
   private async invokeNativeChatCompletion(
     body: Record<string, unknown>,
+    options: ChatJsonOptions,
   ): Promise<RawChatCompletionResponse> {
     try {
-      const response = await invoke<NativeChatCompletionResponse>(
-        "llm_chat_completion",
-        {
+      const response = await raceAbort(
+        invoke<NativeChatCompletionResponse>("llm_chat_completion", {
           request: {
             apiKey: this.config.apiKey,
             body,
             provider: this.config.provider,
             url: this.getChatCompletionsUrl(),
           },
-        },
+        }),
+        options.signal,
       );
 
       return {
@@ -200,7 +203,7 @@ export class ChatCompletionClient {
 
   private async invokeNativeChatCompletionStream(
     body: Record<string, unknown>,
-    onDelta: (delta: string) => void,
+    options: ChatJsonOptions,
   ): Promise<RawChatCompletionResponse> {
     const requestId = `${this.config.provider}-${Date.now()}-${Math.random()
       .toString(16)
@@ -210,15 +213,14 @@ export class ChatCompletionClient {
         return;
       }
 
-      if (event.payload.delta) {
-        onDelta(event.payload.delta);
+      if (event.payload.delta && !options.signal?.aborted) {
+        options.onDelta?.(event.payload.delta);
       }
     });
 
     try {
-      const response = await invoke<NativeChatCompletionResponse>(
-        "llm_chat_completion_stream",
-        {
+      const response = await raceAbort(
+        invoke<NativeChatCompletionResponse>("llm_chat_completion_stream", {
           request: {
             apiKey: this.config.apiKey,
             body,
@@ -226,7 +228,8 @@ export class ChatCompletionClient {
             requestId,
             url: this.getChatCompletionsUrl(),
           },
-        },
+        }),
+        options.signal,
       );
 
       return {
@@ -243,9 +246,11 @@ export class ChatCompletionClient {
 
   private async fetchChatCompletion(
     body: Record<string, unknown>,
+    options: ChatJsonOptions,
   ): Promise<RawChatCompletionResponse> {
     const controller = new AbortController();
     const timeoutId = globalThis.setTimeout(() => controller.abort(), 30000);
+    const unlistenAbort = linkAbortSignals(options.signal, controller);
 
     try {
       const response = await fetch(this.getChatCompletionsUrl(), {
@@ -266,16 +271,18 @@ export class ChatCompletionClient {
     } catch (error) {
       throw createNetworkError(error, this.provider.label);
     } finally {
+      unlistenAbort();
       globalThis.clearTimeout(timeoutId);
     }
   }
 
   private async fetchChatCompletionStream(
     body: Record<string, unknown>,
-    onDelta: (delta: string) => void,
+    options: ChatJsonOptions,
   ): Promise<RawChatCompletionResponse> {
     const controller = new AbortController();
     const timeoutId = globalThis.setTimeout(() => controller.abort(), 120000);
+    const unlistenAbort = linkAbortSignals(options.signal, controller);
 
     try {
       const response = await fetch(this.getChatCompletionsUrl(), {
@@ -326,7 +333,7 @@ export class ChatCompletionClient {
 
           if (delta) {
             assistantContent += delta;
-            onDelta(delta);
+            options.onDelta?.(delta);
           }
         }
       }
@@ -336,7 +343,7 @@ export class ChatCompletionClient {
 
         if (delta) {
           assistantContent += delta;
-          onDelta(delta);
+          options.onDelta?.(delta);
         }
       }
 
@@ -350,6 +357,7 @@ export class ChatCompletionClient {
     } catch (error) {
       throw createNetworkError(error, this.provider.label);
     } finally {
+      unlistenAbort();
       globalThis.clearTimeout(timeoutId);
     }
   }
@@ -400,6 +408,56 @@ export class ChatCompletionClient {
 
 function isTauriRuntime() {
   return "__TAURI_INTERNALS__" in globalThis;
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw new DOMException("The model request was cancelled.", "AbortError");
+  }
+}
+
+function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) {
+    return promise;
+  }
+
+  throwIfAborted(signal);
+
+  return new Promise((resolve, reject) => {
+    function handleAbort() {
+      reject(new DOMException("The model request was cancelled.", "AbortError"));
+    }
+
+    signal.addEventListener("abort", handleAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", handleAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", handleAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+function linkAbortSignals(source: AbortSignal | undefined, target: AbortController) {
+  if (!source) {
+    return () => undefined;
+  }
+
+  if (source.aborted) {
+    target.abort();
+    return () => undefined;
+  }
+
+  function abortTarget() {
+    target.abort();
+  }
+
+  source.addEventListener("abort", abortTarget, { once: true });
+  return () => source.removeEventListener("abort", abortTarget);
 }
 
 function createNetworkError(error: unknown, providerLabel: string) {

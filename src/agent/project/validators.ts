@@ -91,13 +91,13 @@ export function validateAgentStepResponse(
     };
   }
 
-  if (value.type === "finish") {
+  if (value.type === "finish" || value.type === "finish_candidate") {
     if (typeof value.summary !== "string" || !value.summary.trim()) {
-      throw new Error("Invalid model response: finish.summary is required.");
+      throw new Error("Invalid model response: finish_candidate.summary is required.");
     }
 
     return {
-      type: "finish",
+      type: "finish_candidate",
       summary: value.summary.trim(),
       verification:
         typeof value.verification === "string" && value.verification.trim()
@@ -145,7 +145,7 @@ export function validateAgentStepResponse(
 
   if (value.type !== "tool_call") {
     throw new Error(
-      'Invalid model response: type must be "answer", "tool_call", "tool_calls", or "finish".',
+      'Invalid model response: type must be "answer", "tool_call", "tool_calls", or "finish_candidate".',
     );
   }
 
@@ -173,6 +173,7 @@ function validateAgentToolCall(
     case "start_dev_server":
     case "stop_dev_server":
     case "refresh_preview":
+    case "get_site_spec":
       return {
         type: "tool_call",
         tool,
@@ -268,9 +269,133 @@ function validateAgentToolCall(
         rationale,
         args: validateSupabaseSchemaInput(args),
       };
+    case "get_page_spec":
+      return {
+        type: "tool_call",
+        tool,
+        rationale,
+        args: validateGetPageSpecArgs(args),
+      };
+    case "find_site_node":
+      return {
+        type: "tool_call",
+        tool,
+        rationale,
+        args: validateFindSiteNodeArgs(args),
+      };
+    case "update_design_tokens":
+      return {
+        type: "tool_call",
+        tool,
+        rationale,
+        args: validateDesignTokenArgs(args),
+      };
+    case "resolve_node_source":
+      return {
+        type: "tool_call",
+        tool,
+        rationale,
+        args: {
+          nodeId: validateTextArg(args.nodeId, "resolve_node_source.nodeId", 160),
+        },
+      };
+    case "refresh_site_index":
+      return {
+        type: "tool_call",
+        tool,
+        rationale,
+        args: {
+          reason:
+            typeof args.reason === "string" && args.reason.trim()
+              ? args.reason.trim()
+              : undefined,
+        },
+      };
   }
 
   throw new Error(`Invalid model response: unknown tool "${tool}".`);
+}
+
+function validateGetPageSpecArgs(args: Record<string, unknown>) {
+  const route =
+    typeof args.route === "string" && args.route.trim()
+      ? args.route.trim()
+      : undefined;
+  const pageId =
+    typeof args.pageId === "string" && args.pageId.trim()
+      ? args.pageId.trim()
+      : undefined;
+
+  if (!route && !pageId) {
+    throw new Error("Invalid model response: get_page_spec requires route or pageId.");
+  }
+
+  return { pageId, route };
+}
+
+function validateFindSiteNodeArgs(args: Record<string, unknown>) {
+  const result = {
+    label: optionalTrimmedText(args.label),
+    nodeId: optionalTrimmedText(args.nodeId),
+    route: optionalTrimmedText(args.route),
+    textHint: optionalTrimmedText(args.textHint),
+  };
+
+  if (!result.label && !result.nodeId && !result.route && !result.textHint) {
+    throw new Error(
+      "Invalid model response: find_site_node requires nodeId, label, route, or textHint.",
+    );
+  }
+
+  return result;
+}
+
+function validateDesignTokenArgs(args: Record<string, unknown>) {
+  if (!isRecord(args.tokens)) {
+    throw new Error("Invalid model response: update_design_tokens.tokens is required.");
+  }
+
+  const tokens = {
+    colors: validateOptionalStringRecord(args.tokens.colors, "tokens.colors"),
+    radii: validateOptionalStringRecord(args.tokens.radii, "tokens.radii"),
+    spacing: validateOptionalStringRecord(args.tokens.spacing, "tokens.spacing"),
+    typography: validateOptionalStringRecord(args.tokens.typography, "tokens.typography"),
+  };
+
+  if (!tokens.colors && !tokens.radii && !tokens.spacing && !tokens.typography) {
+    throw new Error(
+      "Invalid model response: update_design_tokens.tokens must include colors, typography, spacing, or radii.",
+    );
+  }
+
+  return {
+    summary: validateSummaryArg(args.summary, "Updated design tokens."),
+    tokens,
+  };
+}
+
+function validateOptionalStringRecord(value: unknown, label: string) {
+  if (typeof value === "undefined") {
+    return undefined;
+  }
+
+  if (!isRecord(value)) {
+    throw new Error(`Invalid model response: ${label} must be an object.`);
+  }
+
+  const entries = Object.entries(value).map(([key, item]) => {
+    if (!key.trim() || typeof item !== "string") {
+      throw new Error(`Invalid model response: ${label} must map strings to strings.`);
+    }
+
+    return [key.trim(), item.trim()] as const;
+  });
+
+  return Object.fromEntries(entries);
+}
+
+function optionalTrimmedText(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function validateSinglePath(

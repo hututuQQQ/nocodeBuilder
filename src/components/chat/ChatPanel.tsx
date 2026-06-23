@@ -23,6 +23,7 @@ import {
   getAiProviderDefinition,
   type AiProviderId,
 } from "../../services/aiProviders";
+import { AgentRunPanel } from "./AgentRunPanel";
 
 type ChatPanelProps = {
   activeProvider: AiProviderId;
@@ -58,15 +59,20 @@ export function ChatPanel({
     (state) => state.isLoadingConversations,
   );
   const isModifyingProject = useAppStore((state) => state.isModifyingProject);
+  const currentAgentRun = useAppStore((state) => state.currentAgentRun);
   const sendMessage = useAppStore((state) => state.sendMessage);
   const isBusy =
     isGeneratingProject ||
     isModifyingProject ||
     isCreatingConversation ||
     isLoadingConversations;
+  const canSteerActiveRun = Boolean(
+    currentAgentRun && !isTerminalAgentRun(currentAgentRun.status),
+  );
   const isArchived = Boolean(currentConversation?.archivedAt);
   const canChat = Boolean(currentProject && currentConversation && !isArchived);
-  const canSend = canChat && !isBusy && Boolean(draft.trim());
+  const canSend =
+    canChat && Boolean(draft.trim()) && (!isBusy || canSteerActiveRun);
   const provider = getAiProviderDefinition(activeProvider);
   const activeSelection = { provider: activeProvider, model: activeModel };
   const availableModelOptions =
@@ -216,6 +222,7 @@ export function ChatPanel({
         onScroll={handleMessageScroll}
         ref={scrollContainerRef}
       >
+        <AgentRunPanel />
         {!currentProject ? (
           <div className="grid h-full place-items-center">
             <div className="max-w-[320px] rounded-md border border-dashed border-zinc-800 bg-zinc-900/30 px-4 py-6 text-center text-sm leading-6 text-zinc-500">
@@ -251,7 +258,7 @@ export function ChatPanel({
       >
         <textarea
           className="h-20 min-h-20 flex-1 resize-none rounded-md border border-zinc-800 bg-zinc-900 px-3 py-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/10"
-          disabled={!canChat || isBusy}
+          disabled={!canChat || (isBusy && !canSteerActiveRun)}
           onKeyDown={handleDraftKeyDown}
           onChange={(event) => setDraft(event.currentTarget.value)}
           placeholder={
@@ -259,7 +266,9 @@ export function ChatPanel({
               ? "Select a project first"
               : isArchived
                 ? "Restore this chat to continue"
-                : "Tell the builder what to change..."
+                : canSteerActiveRun
+                  ? "Add steering for the current run..."
+                  : "Tell the builder what to change..."
           }
           value={draft}
         />
@@ -273,11 +282,15 @@ export function ChatPanel({
           ) : (
             <SendHorizontal size={16} aria-hidden="true" />
           )}
-          {isBusy ? "Writing" : "Send"}
+          {isBusy && canSteerActiveRun ? "Steer" : isBusy ? "Writing" : "Send"}
         </button>
       </form>
     </main>
   );
+}
+
+function isTerminalAgentRun(status: string) {
+  return ["completed", "failed", "cancelled", "budget_exceeded"].includes(status);
 }
 
 function encodeModelSelection(selection: ConfiguredModelOption) {

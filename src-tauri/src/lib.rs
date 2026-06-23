@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
+mod agent_storage;
 mod app_storage;
 mod commands;
 mod credentials;
@@ -234,6 +235,28 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_storage::read_app_storage,
             app_storage::write_app_storage,
+            agent_storage::append_agent_event,
+            agent_storage::claim_agent_approval,
+            agent_storage::create_agent_approval,
+            agent_storage::create_agent_run,
+            agent_storage::get_agent_run,
+            agent_storage::get_latest_verification_report,
+            agent_storage::get_latest_agent_checkpoint,
+            agent_storage::get_pending_agent_approval,
+            agent_storage::list_agent_approvals,
+            agent_storage::list_agent_events,
+            agent_storage::list_agent_runs,
+            agent_storage::read_agent_artifact,
+            agent_storage::read_site_source_map,
+            agent_storage::read_site_spec,
+            agent_storage::record_agent_progress,
+            agent_storage::resolve_agent_approval,
+            agent_storage::save_agent_checkpoint,
+            agent_storage::save_verification_report,
+            agent_storage::transition_agent_run,
+            agent_storage::write_agent_artifact,
+            agent_storage::write_site_source_map,
+            agent_storage::write_site_spec,
             credentials::has_ai_provider_secret,
             credentials::save_ai_provider_secret,
             llm_chat_completion,
@@ -246,6 +269,7 @@ pub fn run() {
             commands::start_dev_server,
             commands::stop_dev_server,
             commands::open_preview_in_browser,
+            commands::probe_preview_url,
             commands::supabase_proxy_request,
             commands::test_supabase_database_url,
             commands::test_vercel_token,

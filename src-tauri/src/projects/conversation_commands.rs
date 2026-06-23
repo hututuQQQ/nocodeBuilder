@@ -155,8 +155,9 @@ fn load_conversation_index(
                 path.display()
             )
         })?;
-        let mut index = serde_json::from_str::<ConversationIndex>(&content)
-            .map_err(|error| format!("conversation: failed to parse conversation index: {error}"))?;
+        let mut index = serde_json::from_str::<ConversationIndex>(&content).map_err(|error| {
+            format!("conversation: failed to parse conversation index: {error}")
+        })?;
 
         index
             .conversations
