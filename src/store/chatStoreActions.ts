@@ -122,6 +122,22 @@ async function handleSpecConversationMessage(
     activeRun &&
     !isTerminalRun(activeRun)
   ) {
+    if (!isCurrentSpecTaskRun(get(), activeRun)) {
+      const assistantMessage = createChatMessage(
+        "assistant",
+        "The active AgentRun is not attached to the current Spec task, so this message was not applied as steering. Wait for the Spec state to reconcile or use the Spec controls.",
+      );
+      const nextConversation = appendConversationMessage(store, assistantMessage);
+      void persistConversation(store, nextConversation);
+      set((state) => ({
+        projectError: "AgentRun does not belong to the current Spec task.",
+        terminalLogs: appendLogs(state.terminalLogs, [
+          "[spec] Steering blocked because the active AgentRun does not belong to the current Spec task.",
+        ]),
+      }));
+      return;
+    }
+
     await get().sendAgentSteering(message);
     set((state) => ({
       terminalLogs: appendLogs(state.terminalLogs, [
@@ -165,5 +181,31 @@ function isTerminalRun(run: AppState["currentAgentRun"]) {
   return (
     !run ||
     ["completed", "failed", "cancelled", "budget_exceeded"].includes(run.status)
+  );
+}
+
+function isCurrentSpecTaskRun(state: AppState, run: AppState["currentAgentRun"]) {
+  const conversation = state.currentConversation;
+  const spec = state.currentSpec;
+  const source = run?.contract.source;
+
+  if (!run || !conversation || !spec || source?.mode !== "spec") {
+    return false;
+  }
+
+  const revision = spec.revisions.find(
+    (item) => item.id === spec.currentRevisionId,
+  );
+  const runningTask = revision?.tasks.find((task) => task.status === "running");
+
+  return (
+    conversation.mode === "spec" &&
+    conversation.activeSpecId === spec.id &&
+    run.conversationId === conversation.id &&
+    source.specId === spec.id &&
+    source.revisionId === revision?.id &&
+    Boolean(runningTask) &&
+    runningTask?.runId === run.id &&
+    source.taskId === runningTask?.id
   );
 }

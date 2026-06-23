@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { compileTaskContract } from "../agent-core/contract/taskContract";
+import type { AgentRun } from "../agent-core/types";
+import type { DevelopmentSpec } from "../spec-core/types";
 import { createChatActions } from "./chatStoreActions";
 
 vi.mock("./agentWorkflow", () => ({
@@ -45,12 +48,71 @@ describe("chat store actions", () => {
       "Wait for the Spec revision to finish before sending messages.",
     );
   });
+
+  it("adds Spec execution messages as steering only for the current running task", async () => {
+    const run = createRun("run-current", {
+      contract: createSpecContract({ taskId: "task-1" }),
+    });
+    const sendAgentSteering = vi.fn(async () => undefined);
+    const store = createStore({
+      currentAgentRun: run,
+      currentConversation: createConversation({
+        activeSpecId: "spec-1",
+        mode: "spec",
+        specIds: ["spec-1"],
+      }),
+      currentSpec: createSpec({ runId: run.id }),
+      sendAgentSteering,
+    });
+    const actions = createChatActions(store as never);
+
+    await actions.sendMessage("try a smaller change");
+
+    expect(sendAgentSteering).toHaveBeenCalledWith("try a smaller change");
+    expect(store.get().chatMessages).toHaveLength(1);
+    expect(store.get().terminalLogs).toContain(
+      `[spec] Added message as steering for run ${run.id}.`,
+    );
+  });
+
+  it("does not treat a non-current Spec run as message steering", async () => {
+    const run = createRun("run-other", {
+      contract: createSpecContract({ taskId: "task-other" }),
+    });
+    const sendAgentSteering = vi.fn(async () => undefined);
+    const store = createStore({
+      currentAgentRun: run,
+      currentConversation: createConversation({
+        activeSpecId: "spec-1",
+        mode: "spec",
+        specIds: ["spec-1"],
+      }),
+      currentSpec: createSpec({ runId: "run-current" }),
+      sendAgentSteering,
+    });
+    const actions = createChatActions(store as never);
+
+    await actions.sendMessage("try a smaller change");
+
+    expect(sendAgentSteering).not.toHaveBeenCalled();
+    expect(store.get().projectError).toBe(
+      "AgentRun does not belong to the current Spec task.",
+    );
+    expect(store.get().chatMessages).toHaveLength(2);
+    expect((store.get().chatMessages[1] as { role?: string }).role).toBe(
+      "assistant",
+    );
+    expect(store.get().terminalLogs).toContain(
+      "[spec] Steering blocked because the active AgentRun does not belong to the current Spec task.",
+    );
+  });
 });
 
 function createStore(patch: Partial<StoreState> = {}) {
   let state: StoreState = {
     changeHistory: [],
     chatMessages: [],
+    conversationSummaries: [],
     createConversation: async () => null,
     currentAgentRun: null,
     currentConversation: null,
@@ -63,6 +125,7 @@ function createStore(patch: Partial<StoreState> = {}) {
       path: "D:/projects/project-1",
       updatedAt: "2026-01-01T00:00:00.000Z",
     },
+    currentSpec: null,
     isGeneratingProject: false,
     isModifyingProject: false,
     isRevisingSpec: false,
@@ -107,8 +170,9 @@ function createConversation(patch: Partial<StoreState["currentConversation"]> = 
 type StoreState = {
   changeHistory: unknown[];
   chatMessages: unknown[];
+  conversationSummaries: unknown[];
   createConversation: () => Promise<null>;
-  currentAgentRun: null;
+  currentAgentRun: AgentRun | null;
   currentConversation: {
     activeSpecId: string | null;
     archivedAt: string | null;
@@ -133,6 +197,7 @@ type StoreState = {
     path: string;
     updatedAt: string;
   } | null;
+  currentSpec: DevelopmentSpec | null;
   isGeneratingProject: boolean;
   isModifyingProject: boolean;
   isRevisingSpec: boolean;
@@ -140,3 +205,112 @@ type StoreState = {
   sendAgentSteering: ReturnType<typeof vi.fn>;
   terminalLogs: string[];
 };
+
+function createRun(runId: string, patch: Partial<AgentRun> = {}): AgentRun {
+  const now = "2026-01-01T00:00:00.000Z";
+
+  return {
+    cancelRequested: false,
+    completedAt: undefined,
+    contract: createSpecContract({}),
+    conversationId: "conversation-1",
+    id: runId,
+    modelTurns: 0,
+    mutationCount: 0,
+    pauseRequested: false,
+    phase: "planning",
+    projectId: "project-1",
+    repairCycles: 0,
+    startedAt: now,
+    stateVersion: 1,
+    status: "planning",
+    toolCalls: 0,
+    updatedAt: now,
+    ...patch,
+  };
+}
+
+function createSpecContract({
+  taskId = "task-1",
+}: {
+  taskId?: string;
+}): AgentRun["contract"] {
+  return {
+    ...compileTaskContract({
+      objective: "Run a Spec task",
+      taskType: "component_edit",
+    }),
+    source: {
+      acceptanceCriteriaIds: ["criterion-1"],
+      executionMode: "modify",
+      mode: "spec",
+      requirementIds: ["story-1"],
+      revisionId: "rev-1",
+      specId: "spec-1",
+      taskId,
+    },
+  };
+}
+
+function createSpec({ runId }: { runId: string }): DevelopmentSpec {
+  return {
+    conversationId: "conversation-1",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    currentRevisionId: "rev-1",
+    id: "spec-1",
+    kind: "feature",
+    projectId: "project-1",
+    revisions: [
+      {
+        brief: "Spec",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        design: {
+          components: [],
+          dataModel: [],
+          integrations: [],
+          pages: [],
+          summary: "Design",
+          technicalDecisions: [],
+          verificationStrategy: [],
+        },
+        id: "rev-1",
+        requirements: {
+          acceptanceCriteria: [
+            {
+              description: "Criterion",
+              id: "criterion-1",
+              required: true,
+            },
+          ],
+          constraints: [],
+          goal: "Goal",
+          outOfScope: [],
+          unresolvedQuestions: [],
+          userStories: [
+            {
+              description: "Story",
+              id: "story-1",
+            },
+          ],
+        },
+        tasks: [
+          {
+            acceptanceCriteriaIds: ["criterion-1"],
+            allowedPaths: ["app/page.tsx"],
+            dependencyIds: [],
+            expectedFiles: ["app/page.tsx"],
+            id: "task-1",
+            objective: "Run current task",
+            requirementIds: ["story-1"],
+            runId,
+            status: "running",
+            title: "Current task",
+          },
+        ],
+        version: 1,
+      },
+    ],
+    status: "building",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+}
