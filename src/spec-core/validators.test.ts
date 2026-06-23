@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DevelopmentSpec } from "./types";
 import {
+  computeAcceptanceResults,
   validateDevelopmentSpec,
   validateGeneratedSpecRevisionPayload,
   validateSpecForApproval,
@@ -84,6 +85,93 @@ describe("Spec validators", () => {
     });
 
     expect(() => validateSpecForApproval(spec)).toThrow(/not covered/i);
+  });
+
+  it("rejects invalid persisted runtime status fields", () => {
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec(),
+        status: "mystery" as DevelopmentSpec["status"],
+      }),
+    ).toThrow(/status is invalid/i);
+
+    expect(() =>
+      validateDevelopmentSpec(
+        createSpec({
+          tasks: [
+            {
+              ...createGeneratedPayload().tasks[0],
+              status: "weird" as DevelopmentSpec["revisions"][number]["tasks"][number]["status"],
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/invalid status/i);
+  });
+
+  it("requires completed specs to include successful final verification", () => {
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec(),
+        completedAt: "2026-06-24T00:01:00Z",
+        status: "completed",
+      }),
+    ).toThrow(/finalVerification/i);
+  });
+
+  it("requires revision versions to be consecutive", () => {
+    const spec = createSpec();
+    const secondRevision = {
+      ...spec.revisions[0],
+      id: "rev-2",
+      version: 3,
+    };
+
+    expect(() =>
+      validateDevelopmentSpec({
+        ...spec,
+        revisions: [...spec.revisions, secondRevision],
+      }),
+    ).toThrow(/consecutive/i);
+  });
+
+  it("computes acceptance results from task and report evidence", () => {
+    const spec = createSpec({
+      tasks: [
+        {
+          ...createGeneratedPayload().tasks[0],
+          runId: "run-1",
+          status: "passed",
+        },
+      ],
+    });
+    const [result] = computeAcceptanceResults(spec.revisions[0], new Map([
+      ["run-1", "passed"],
+    ]));
+
+    expect(result).toMatchObject({
+      criterionId: "criterion-1",
+      runIds: ["run-1"],
+      status: "passed",
+      taskIds: ["task-1"],
+    });
+
+    const [pending] = computeAcceptanceResults(spec.revisions[0], new Map());
+    expect(pending.status).toBe("pending");
+
+    const failedSpec = createSpec({
+      tasks: [
+        {
+          ...createGeneratedPayload().tasks[0],
+          runId: "run-1",
+          status: "failed",
+        },
+      ],
+    });
+    const [failed] = computeAcceptanceResults(failedSpec.revisions[0], new Map([
+      ["run-1", "passed"],
+    ]));
+    expect(failed.status).toBe("failed");
   });
 });
 

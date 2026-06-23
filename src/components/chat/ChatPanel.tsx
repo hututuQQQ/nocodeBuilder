@@ -44,6 +44,7 @@ export function ChatPanel({
   const [draft, setDraft] = useState("");
   const [modelError, setModelError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
+  const [selectedHistorySpecId, setSelectedHistorySpecId] = useState<string | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const shouldStickToBottomRef = useRef(true);
@@ -87,6 +88,8 @@ export function ChatPanel({
   const canChat = Boolean(currentProject && currentConversation && !isArchived);
   const canSend =
     canChat && Boolean(draft.trim()) && (!isBusy || canSteerActiveRun);
+  const selectedHistorySpec =
+    historicalSpecs.find((spec) => spec.id === selectedHistorySpecId) ?? null;
   const provider = getAiProviderDefinition(activeProvider);
   const activeSelection = { provider: activeProvider, model: activeModel };
   const availableModelOptions =
@@ -113,6 +116,15 @@ export function ChatPanel({
       messagesEndRef.current?.scrollIntoView({ block: "end" });
     }
   }, [chatMessages]);
+
+  useEffect(() => {
+    if (
+      selectedHistorySpecId &&
+      !historicalSpecs.some((spec) => spec.id === selectedHistorySpecId)
+    ) {
+      setSelectedHistorySpecId(null);
+    }
+  }, [historicalSpecs, selectedHistorySpecId]);
 
   function handleMessageScroll() {
     const container = scrollContainerRef.current;
@@ -246,9 +258,19 @@ export function ChatPanel({
             </div>
             <div className="mt-2 space-y-1">
               {historicalSpecs.map((spec) => (
-                <div
-                  className="flex min-w-0 items-center gap-2 rounded border border-zinc-800 bg-zinc-900/40 px-2 py-1.5 text-xs"
+                <button
+                  className={`flex w-full min-w-0 items-center gap-2 rounded border px-2 py-1.5 text-left text-xs transition ${
+                    selectedHistorySpecId === spec.id
+                      ? "border-blue-400/40 bg-blue-400/10"
+                      : "border-zinc-800 bg-zinc-900/40 hover:border-zinc-700"
+                  }`}
                   key={spec.id}
+                  onClick={() =>
+                    setSelectedHistorySpecId(
+                      selectedHistorySpecId === spec.id ? null : spec.id,
+                    )
+                  }
+                  type="button"
                 >
                   <span className="min-w-0 flex-1 truncate text-zinc-300">
                     {spec.revisions.find((revision) => revision.id === spec.currentRevisionId)?.brief ?? spec.id}
@@ -256,9 +278,12 @@ export function ChatPanel({
                   <span className="shrink-0 rounded border border-zinc-800 px-2 py-0.5 text-zinc-500">
                     {spec.status}
                   </span>
-                </div>
+                </button>
               ))}
             </div>
+            {selectedHistorySpec ? (
+              <SpecHistoryPreview spec={selectedHistorySpec} />
+            ) : null}
           </section>
         ) : null}
         {!currentProject ? (
@@ -342,6 +367,87 @@ function decodeModelSelection(value: string): ConfiguredModelOption {
     provider: provider as AiProviderId,
     model: modelParts.join(":"),
   };
+}
+
+function SpecHistoryPreview({
+  spec,
+}: {
+  spec: {
+    currentRevisionId: string;
+    revisions: Array<{
+      id: string;
+      requirements: {
+        acceptanceCriteria: Array<{
+          description: string;
+          id: string;
+          required: boolean;
+        }>;
+        goal: string;
+      };
+      tasks: Array<{
+        id: string;
+        runId?: string;
+        status: string;
+        title: string;
+      }>;
+    }>;
+  };
+}) {
+  const revision =
+    spec.revisions.find((item) => item.id === spec.currentRevisionId) ??
+    spec.revisions[0];
+
+  if (!revision) {
+    return null;
+  }
+
+  return (
+    <div className="mt-3 rounded border border-zinc-800 bg-zinc-900/40 p-3">
+      <p className="text-xs leading-5 text-zinc-300">
+        {revision.requirements.goal}
+      </p>
+      <div className="mt-3 grid gap-3 lg:grid-cols-2">
+        <div>
+          <h3 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+            Criteria
+          </h3>
+          <div className="mt-2 space-y-1">
+            {revision.requirements.acceptanceCriteria.map((criterion) => (
+              <div
+                className="rounded border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] leading-4 text-zinc-400"
+                key={criterion.id}
+              >
+                {criterion.required ? "Required · " : ""}
+                {criterion.description}
+              </div>
+            ))}
+          </div>
+        </div>
+        <div>
+          <h3 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+            Tasks
+          </h3>
+          <div className="mt-2 space-y-1">
+            {revision.tasks.map((task) => (
+              <div
+                className="rounded border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] leading-4 text-zinc-400"
+                key={task.id}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="min-w-0 truncate">{task.title}</span>
+                  <span className="shrink-0 text-zinc-600">{task.status}</span>
+                </div>
+                <div className="mt-1 text-zinc-600">
+                  {task.id}
+                  {task.runId ? ` · ${task.runId}` : ""}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function UserMessage({ message }: { message: ChatMessage }) {

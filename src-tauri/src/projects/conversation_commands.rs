@@ -708,6 +708,8 @@ fn conversation_file_path(project_dir: &Path, conversation_id: &str) -> PathBuf 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::sync::{Mutex, OnceLock};
 
     #[test]
     fn initial_build_requires_spec_mode_and_active_spec() {
@@ -759,5 +761,211 @@ mod tests {
             &vec!["spec-1".to_string(), "spec-2".to_string()],
         )
         .is_ok());
+    }
+
+    #[test]
+    fn initial_build_gate_rejects_iteration_and_archive_until_completed() {
+        with_temp_home(|| {
+            let project =
+                crate::projects::project_commands::create_project("Initial Gate Test".to_string())
+                    .expect("create project");
+            let conversation_id = "conv-initial".to_string();
+            let spec_id = "spec-initial".to_string();
+            let spec = json!({
+                "id": spec_id,
+                "projectId": project.id,
+                "conversationId": conversation_id,
+                "kind": "initial_build",
+                "status": "review",
+                "currentRevisionId": "rev-1",
+                "revisions": [],
+                "createdAt": "2026-01-01T00:00:00Z",
+                "updatedAt": "2026-01-01T00:00:00Z"
+            });
+
+            crate::spec_storage::create_development_spec(project.id.clone(), spec)
+                .expect("create initial spec");
+            create_project_conversation(
+                project.id.clone(),
+                CreateProjectConversationInput {
+                    active_spec_id: Some(spec_id.clone()),
+                    conversation_id: Some(conversation_id.clone()),
+                    kind: "initial_build".to_string(),
+                    mode: "spec".to_string(),
+                    spec_ids: Some(vec![spec_id.clone()]),
+                    title: Some("Initial build".to_string()),
+                },
+            )
+            .expect("create initial conversation");
+
+            let duplicate = create_project_conversation(
+                project.id.clone(),
+                CreateProjectConversationInput {
+                    active_spec_id: Some(spec_id.clone()),
+                    conversation_id: Some("conv-initial-2".to_string()),
+                    kind: "initial_build".to_string(),
+                    mode: "spec".to_string(),
+                    spec_ids: Some(vec![spec_id.clone()]),
+                    title: None,
+                },
+            )
+            .expect_err("duplicate initial build must fail");
+            assert!(duplicate.contains("initial build already exists"));
+
+            let iteration_error = create_project_conversation(
+                project.id.clone(),
+                CreateProjectConversationInput {
+                    active_spec_id: None,
+                    conversation_id: Some("conv-iteration".to_string()),
+                    kind: "iteration".to_string(),
+                    mode: "chat".to_string(),
+                    spec_ids: None,
+                    title: None,
+                },
+            )
+            .expect_err("incomplete initial build must block iteration");
+            assert_eq!(
+                iteration_error,
+                "conversation: initial build must complete before creating iterations"
+            );
+
+            assert!(
+                archive_project_conversation(project.id.clone(), conversation_id.clone())
+                    .expect_err("incomplete initial build archive must fail")
+                    .contains("initial build must complete")
+            );
+
+            let completed_spec = json!({
+                "id": spec_id,
+                "projectId": project.id,
+                "conversationId": conversation_id,
+                "kind": "initial_build",
+                "status": "completed",
+                "currentRevisionId": "rev-1",
+                "revisions": [],
+                "createdAt": "2026-01-01T00:00:00Z",
+                "updatedAt": "2026-01-01T00:00:01Z"
+            });
+            crate::spec_storage::save_development_spec(project.id.clone(), completed_spec)
+                .expect("save completed spec");
+
+            create_project_conversation(
+                project.id.clone(),
+                CreateProjectConversationInput {
+                    active_spec_id: None,
+                    conversation_id: Some("conv-iteration".to_string()),
+                    kind: "iteration".to_string(),
+                    mode: "chat".to_string(),
+                    spec_ids: None,
+                    title: Some("Follow up".to_string()),
+                },
+            )
+            .expect("completed initial build allows iteration");
+        });
+    }
+
+    #[test]
+    fn switch_mode_rejects_spec_from_another_conversation() {
+        with_temp_home(|| {
+            let project = crate::projects::project_commands::create_project(
+                "Spec Ownership Test".to_string(),
+            )
+            .expect("create project");
+            let initial_conversation_id = "conv-initial".to_string();
+            let initial_spec_id = "spec-initial".to_string();
+
+            crate::spec_storage::create_development_spec(
+                project.id.clone(),
+                json!({
+                    "id": initial_spec_id,
+                    "projectId": project.id,
+                    "conversationId": initial_conversation_id,
+                    "kind": "initial_build",
+                    "status": "completed",
+                    "currentRevisionId": "rev-1",
+                    "revisions": [],
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": "2026-01-01T00:00:00Z"
+                }),
+            )
+            .expect("create completed initial spec");
+            create_project_conversation(
+                project.id.clone(),
+                CreateProjectConversationInput {
+                    active_spec_id: Some(initial_spec_id),
+                    conversation_id: Some(initial_conversation_id),
+                    kind: "initial_build".to_string(),
+                    mode: "spec".to_string(),
+                    spec_ids: Some(vec!["spec-initial".to_string()]),
+                    title: Some("Initial build".to_string()),
+                },
+            )
+            .expect("create initial conversation");
+
+            let conversation = create_project_conversation(
+                project.id.clone(),
+                CreateProjectConversationInput {
+                    active_spec_id: None,
+                    conversation_id: Some("conv-target".to_string()),
+                    kind: "iteration".to_string(),
+                    mode: "chat".to_string(),
+                    spec_ids: None,
+                    title: Some("Target".to_string()),
+                },
+            )
+            .expect("create target iteration");
+
+            crate::spec_storage::create_development_spec(
+                project.id.clone(),
+                json!({
+                    "id": "spec-other",
+                    "projectId": project.id,
+                    "conversationId": "conv-other",
+                    "kind": "feature",
+                    "status": "review",
+                    "currentRevisionId": "rev-1",
+                    "revisions": [],
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": "2026-01-01T00:00:00Z"
+                }),
+            )
+            .expect("create other conversation spec");
+
+            let error = switch_project_conversation_mode(
+                project.id.clone(),
+                SwitchProjectConversationModeInput {
+                    active_spec_id: Some("spec-other".to_string()),
+                    conversation_id: conversation.id,
+                    spec_ids: vec!["spec-other".to_string()],
+                    target_mode: "spec".to_string(),
+                },
+            )
+            .expect_err("other conversation spec must be rejected");
+
+            assert!(error.contains("spec does not belong to conversation"));
+        });
+    }
+
+    fn with_temp_home(run: impl FnOnce()) {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let old_home = std::env::var_os("HOME");
+        let root = std::env::temp_dir().join(format!(
+            "conversation-command-test-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+
+        std::fs::create_dir_all(&root).expect("create temp home");
+        std::env::set_var("HOME", &root);
+
+        run();
+
+        if let Some(home) = old_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

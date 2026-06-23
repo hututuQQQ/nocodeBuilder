@@ -429,7 +429,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
     retrySpecTask: async (taskId) => {
       const spec = get().currentSpec;
 
-      if (!spec || get().isExecutingSpec || !["blocked", "building"].includes(spec.status)) {
+      if (!spec || get().isExecutingSpec || spec.status !== "blocked") {
         return;
       }
 
@@ -473,7 +473,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
     retrySpecVerification: async () => {
       const spec = get().currentSpec;
 
-      if (!spec) {
+      if (!spec || spec.status !== "blocked" || !hasAllTasksPassed(spec)) {
         return;
       }
 
@@ -482,9 +482,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
       try {
         await verifyCompletedTasks(
           store,
-          spec.status === "blocked"
-            ? transitionSpecStatus(spec, "verifying")
-            : spec,
+          transitionSpecStatus(spec, "verifying"),
         );
       } catch (error) {
         recordSpecError(set, error);
@@ -618,8 +616,8 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
 
             const latestRun = await get().cancelCurrentAgentRunAndWait();
 
-            if (latestRun && !isTerminalRunStatus(latestRun.status)) {
-              throw new Error("AgentRun cancellation did not reach a terminal state.");
+            if (latestRun?.status !== "cancelled") {
+              throw new Error("AgentRun cancellation did not reach cancelled state.");
             }
           }
 
@@ -820,7 +818,21 @@ async function reconcileAndContinueSpecExecution(
 
   const run = await agentRuntimeApi.getRun(project.id, runningTask.runId);
 
-  if (!run || !isTerminalRunStatus(run.status)) {
+  if (!run) {
+    await saveSpecToStore(
+      store,
+      markSpecBlocked(
+        updateTask(spec, runningTask.id, {
+          error: `AgentRun ${runningTask.runId} was not found.`,
+          status: "failed",
+        }),
+        `Task ${runningTask.title} failed.`,
+      ),
+    );
+    return;
+  }
+
+  if (!isTerminalRunStatus(run.status)) {
     return;
   }
 
@@ -890,6 +902,15 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
 
   for (const task of revision.tasks) {
     if (!task.runId) {
+      continue;
+    }
+
+    const run = await agentRuntimeApi
+      .getRun(project.id, task.runId)
+      .catch(() => null);
+
+    if (run?.status !== "completed") {
+      verificationReports.set(task.runId, "pending");
       continue;
     }
 
@@ -1347,12 +1368,21 @@ function isRunForSpec(
   }
 
   const revision = getCurrentSpecRevision(spec);
+  const runningTask = revision.tasks.find((task) => task.status === "running");
 
   return (
+    run.conversationId === spec.conversationId &&
     run.contract.source.specId === spec.id &&
     run.contract.source.revisionId === revision.id &&
-    revision.tasks.some((task) => task.id === run.contract.source?.taskId)
+    Boolean(runningTask) &&
+    runningTask?.id === run.contract.source.taskId
   );
+}
+
+function hasAllTasksPassed(spec: DevelopmentSpec) {
+  const revision = getCurrentSpecRevision(spec);
+
+  return revision.tasks.every((task) => task.status === "passed" && task.runId);
 }
 
 function isTerminalRunStatus(status: string) {
@@ -1374,9 +1404,12 @@ function isCurrentSpecSnapshot(
   return (
     state.currentProject?.id === snapshot.projectId &&
     state.currentConversation?.id === snapshot.conversationId &&
+    state.currentConversation?.mode === "spec" &&
+    state.currentConversation?.activeSpecId === snapshot.specId &&
     state.currentConversation?.modeChangedAt === snapshot.modeChangedAt &&
     state.currentSpec?.id === snapshot.specId &&
-    state.currentSpec.currentRevisionId === snapshot.currentRevisionId
+    state.currentSpec.currentRevisionId === snapshot.currentRevisionId &&
+    state.currentSpec.status !== "cancelled"
   );
 }
 

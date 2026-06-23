@@ -54,6 +54,7 @@ export function createAgentRunActions({ get, set }: StoreAccess): AgentRunAction
       }
 
       try {
+        assertCurrentSpecRunControl(get(), run);
         const persistedRun = await agentRuntimeApi.getRun(project.id, run.id) ?? run;
         const result = stateMachine.transition(persistedRun, { type: "request_cancel" });
         const { run: nextRun, event } = await agentRuntimeApi.transitionRun(
@@ -111,6 +112,7 @@ export function createAgentRunActions({ get, set }: StoreAccess): AgentRunAction
         return run;
       }
 
+      assertCurrentSpecRunControl(get(), run);
       await get().cancelCurrentAgentRun();
       return waitForTerminalRun(store, project.id, run.id);
     },
@@ -160,6 +162,7 @@ export function createAgentRunActions({ get, set }: StoreAccess): AgentRunAction
       }
 
       try {
+        assertCurrentSpecRunControl(get(), run);
         const result = stateMachine.transition(run, { type: "request_pause" });
         const { run: nextRun, event } = await agentRuntimeApi.transitionRun(
           project.id,
@@ -196,6 +199,7 @@ export function createAgentRunActions({ get, set }: StoreAccess): AgentRunAction
       }
 
       try {
+        assertCurrentSpecRunControl(get(), run);
         const event = await agentRuntimeApi.appendEvent(project.id, {
           runId: run.id,
           type: "steering.received",
@@ -232,6 +236,10 @@ async function recoverCurrentAgentRun(store: StoreAccess) {
     return;
   }
 
+  if (!validateCurrentSpecRunControl(store, run)) {
+    return;
+  }
+
   if (run.contract.source?.mode === "spec") {
     await runSpecTaskRuntime({
       contract: run.contract,
@@ -265,6 +273,7 @@ async function resolveCurrentAgentApproval(
   }
 
   try {
+    assertCurrentSpecRunControl(get(), run);
     const resolved = await agentRuntimeApi.resolveApproval(
       project.id,
       run.id,
@@ -322,6 +331,51 @@ async function resolveCurrentAgentApproval(
 
 function isTerminalRun(run: AgentRun) {
   return ["completed", "failed", "cancelled", "budget_exceeded"].includes(run.status);
+}
+
+function validateCurrentSpecRunControl(store: StoreAccess, run: AgentRun) {
+  try {
+    assertCurrentSpecRunControl(store.get(), run);
+    return true;
+  } catch (error) {
+    recordAgentActionError(store.set, error);
+    return false;
+  }
+}
+
+function assertCurrentSpecRunControl(state: AppState, run: AgentRun) {
+  if (run.contract.source?.mode !== "spec" && state.currentConversation?.mode !== "spec") {
+    return;
+  }
+
+  if (!isCurrentSpecRun(state, run)) {
+    throw new Error("AgentRun does not belong to the current Spec task.");
+  }
+}
+
+function isCurrentSpecRun(state: AppState, run: AgentRun) {
+  const conversation = state.currentConversation;
+  const spec = state.currentSpec;
+  const source = run.contract.source;
+
+  if (!conversation || !spec || source?.mode !== "spec") {
+    return false;
+  }
+
+  const revision = spec.revisions.find(
+    (item) => item.id === spec.currentRevisionId,
+  );
+  const runningTask = revision?.tasks.find((task) => task.status === "running");
+
+  return (
+    conversation.mode === "spec" &&
+    conversation.activeSpecId === spec.id &&
+    run.conversationId === conversation.id &&
+    source.specId === spec.id &&
+    source.revisionId === revision?.id &&
+    Boolean(runningTask) &&
+    source.taskId === runningTask?.id
+  );
 }
 
 async function waitForTerminalRun(

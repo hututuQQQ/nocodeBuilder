@@ -326,6 +326,11 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
 
                   {isCurrent ? (
                     <div className="mt-1 space-y-1 pl-4">
+                      {!showArchivedConversations && !canCreateIteration ? (
+                        <div className="px-2 py-1.5 text-xs text-zinc-500">
+                          Complete Initial Spec first
+                        </div>
+                      ) : null}
                       {isLoadingConversations ? (
                         <div className="flex items-center gap-2 px-2 py-2 text-xs text-zinc-500">
                           <Loader2
@@ -345,6 +350,17 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                         visibleConversations.map((conversation) => {
                           const isSelected =
                             currentConversation?.id === conversation.id;
+                          const hasIteration = conversationSummaries.some(
+                            (summary) => summary.kind === "iteration",
+                          );
+                          const archiveDisabled =
+                            conversation.kind === "initial_build" &&
+                            !hasIteration &&
+                            !isInitialBuildCompleted(
+                              conversation,
+                              currentConversation,
+                              currentSpec,
+                            );
 
                           return (
                             <div
@@ -399,7 +415,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                                 >
                                   <RotateCcw size={12} aria-hidden="true" />
                                 </button>
-                              ) : (
+                              ) : archiveDisabled ? null : (
                                 <button
                                   aria-label={`Archive ${conversation.title}`}
                                   className="grid size-6 shrink-0 place-items-center rounded text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-100"
@@ -686,6 +702,19 @@ function formatConversationMarker(conversation: ProjectConversationSummary) {
   }
 
   return conversation.mode === "spec" ? "Spec" : "Chat";
+}
+
+function isInitialBuildCompleted(
+  summary: ProjectConversationSummary,
+  currentConversation: ProjectConversation | null,
+  currentSpec: DevelopmentSpec | null,
+) {
+  return (
+    summary.kind === "initial_build" &&
+    currentConversation?.id === summary.id &&
+    currentSpec?.id === summary.activeSpecId &&
+    currentSpec.status === "completed"
+  );
 }
 
 function formatRelativeTime(value: string) {

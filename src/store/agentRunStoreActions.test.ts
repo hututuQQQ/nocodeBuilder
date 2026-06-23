@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { compileTaskContract } from "../agent-core/contract/taskContract";
 import type { AgentApproval, AgentEvent, AgentRun } from "../agent-core/types";
+import type { ProjectConversation } from "../services/projects";
+import type { DevelopmentSpec } from "../spec-core/types";
 import { createAgentRunActions } from "./agentRunStoreActions";
 
 const fake = vi.hoisted(() => ({
@@ -25,6 +27,10 @@ vi.mock("../agent-runtime/runController", () => ({
     fake.modifyCalls.push(args);
     return true;
   }),
+  runSpecTaskRuntime: vi.fn(async () => ({
+    run: null,
+    verificationReport: null,
+  })),
 }));
 
 vi.mock("../services/projects", () => ({
@@ -162,6 +168,45 @@ describe("agent run store actions", () => {
       id: approval.id,
     });
   });
+
+  it("does not cancel or steer a Spec run that is not the current running task", async () => {
+    const run = createRun("run-other-task", {
+      contract: {
+        ...compileTaskContract({
+          objective: "Spec run",
+          taskType: "component_edit",
+        }),
+        source: {
+          acceptanceCriteriaIds: ["criterion-1"],
+          executionMode: "modify",
+          mode: "spec",
+          requirementIds: ["story-1"],
+          revisionId: "rev-1",
+          specId: "spec-1",
+          taskId: "task-other",
+        },
+      },
+      conversationId: "conversation-1",
+      phase: "planning",
+      status: "planning",
+    });
+    fake.runs.set(run.id, run);
+    const store = createStore({
+      currentAgentRun: run,
+      currentConversation: createSpecConversation(),
+      currentSpec: createSpec(),
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await actions.cancelCurrentAgentRun();
+    await actions.sendAgentSteering("keep going");
+
+    expect(fake.events).toHaveLength(0);
+    expect(store.get().currentAgentRun?.status).toBe("planning");
+    expect(store.get().projectError).toContain(
+      "does not belong to the current Spec task",
+    );
+  });
 });
 
 function appendEvent(event: Omit<AgentEvent, "id" | "sequence">) {
@@ -189,6 +234,8 @@ function createStore(patch: Partial<StoreState> = {}) {
       path: "D:/projects/project-1",
       updatedAt: "2026-01-01T00:00:00.000Z",
     },
+    currentConversation: null,
+    currentSpec: null,
     currentVerificationReport: null,
     projectError: null,
     terminalLogs: [],
@@ -222,6 +269,8 @@ type StoreState = {
     path: string;
     updatedAt: string;
   } | null;
+  currentConversation: ProjectConversation | null;
+  currentSpec: DevelopmentSpec | null;
   currentVerificationReport: null;
   projectError: string | null;
   terminalLogs: string[];
@@ -252,6 +301,87 @@ function createRun(runId: string, patch: Partial<AgentRun> = {}): AgentRun {
     toolCalls: 0,
     updatedAt: now,
     ...patch,
+  };
+}
+
+function createSpecConversation(): ProjectConversation {
+  return {
+    activeSpecId: "spec-1",
+    archivedAt: null,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    id: "conversation-1",
+    kind: "iteration",
+    lastMessageAt: "2026-01-01T00:00:00.000Z",
+    messages: [],
+    mode: "spec",
+    modeChangedAt: "2026-01-01T00:00:00.000Z",
+    projectId: "project-1",
+    specIds: ["spec-1"],
+    title: "Spec iteration",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+function createSpec(): DevelopmentSpec {
+  return {
+    conversationId: "conversation-1",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    currentRevisionId: "rev-1",
+    id: "spec-1",
+    kind: "feature",
+    projectId: "project-1",
+    revisions: [
+      {
+        brief: "Spec",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        design: {
+          components: [],
+          dataModel: [],
+          integrations: [],
+          pages: [],
+          summary: "Design",
+          technicalDecisions: [],
+          verificationStrategy: [],
+        },
+        id: "rev-1",
+        requirements: {
+          acceptanceCriteria: [
+            {
+              description: "Criterion",
+              id: "criterion-1",
+              required: true,
+            },
+          ],
+          constraints: [],
+          goal: "Goal",
+          outOfScope: [],
+          unresolvedQuestions: [],
+          userStories: [
+            {
+              description: "Story",
+              id: "story-1",
+            },
+          ],
+        },
+        tasks: [
+          {
+            acceptanceCriteriaIds: ["criterion-1"],
+            allowedPaths: ["app/page.tsx"],
+            dependencyIds: [],
+            expectedFiles: ["app/page.tsx"],
+            id: "task-1",
+            objective: "Run current task",
+            requirementIds: ["story-1"],
+            runId: "run-current-task",
+            status: "running",
+            title: "Current task",
+          },
+        ],
+        version: 1,
+      },
+    ],
+    status: "building",
+    updatedAt: "2026-01-01T00:00:00.000Z",
   };
 }
 
