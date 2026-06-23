@@ -136,6 +136,34 @@ describe("Headless RunController", () => {
     expect(ports.events.map((event) => event.type)).toContain("tool.completed");
   });
 
+  it("consumes an approved action only once", async () => {
+    const deleteArgs = { paths: ["components/Old.tsx"], summary: "Remove obsolete component" };
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "tool_call", tool: "delete_files", args: deleteArgs },
+        { type: "tool_call", tool: "delete_files", args: deleteArgs },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    const controller = new RunController(ports);
+
+    const waiting = await controller.start({
+      contract: compileTaskContract({ objective: "Remove obsolete component" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-approval-consume",
+    });
+
+    expect(waiting.status).toBe("waiting_approval");
+    ports.resolveLatestApproval("approved");
+
+    const waitingAgain = await controller.resume("run-approval-consume");
+
+    expect(waitingAgain.status).toBe("waiting_approval");
+    expect(waitingAgain.toolCalls).toBe(1);
+    expect(ports.approvalRecords).toHaveLength(2);
+  });
+
   it("scenario E returns a policy observation after approval is denied", async () => {
     const deleteArgs = { paths: ["components/Old.tsx"], summary: "Remove obsolete component" };
     const ports = createFakePorts({
@@ -477,6 +505,15 @@ describe("Headless RunController", () => {
         workspaceEffects: {
           changedFiles: [],
           packageChanged: false,
+          readSnapshots: [
+            {
+              contentHash: `hash:${path}`,
+              path,
+              readAt: path === "app/a.tsx"
+                ? "2026-01-01T00:00:02.000Z"
+                : "2026-01-01T00:00:01.000Z",
+            },
+          ],
         },
       };
     };
@@ -493,6 +530,20 @@ describe("Headless RunController", () => {
     expect(run.toolCalls).toBe(2);
     expect(starts).toEqual(["app/a.tsx", "app/b.tsx"]);
     expect(ports.contexts[1]?.observations).toEqual(["read:app/a.tsx", "read:app/b.tsx"]);
+    expect(
+      ports.checkpointRecords[ports.checkpointRecords.length - 1]?.readSnapshots,
+    ).toEqual([
+      {
+        contentHash: "hash:app/a.tsx",
+        path: "app/a.tsx",
+        readAt: "2026-01-01T00:00:02.000Z",
+      },
+      {
+        contentHash: "hash:app/b.tsx",
+        path: "app/b.tsx",
+        readAt: "2026-01-01T00:00:01.000Z",
+      },
+    ]);
     expect(ports.events.map((event) => event.sequence)).toEqual(
       Array.from({ length: ports.events.length }, (_, index) => index + 1),
     );

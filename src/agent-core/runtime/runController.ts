@@ -151,6 +151,7 @@ type RunDriveState = {
   baselineCommandResults?: Record<string, unknown>;
   baselinePackageJson?: string | null;
   changedFiles: Set<string>;
+  consumedApprovalHashes: Set<string>;
   deletedFiles: Set<string>;
   finishSummary?: string;
   latestReportId?: string;
@@ -354,7 +355,14 @@ export class RunController {
       }
     }
 
-    const approvedHashes = await this.ports.approvals.listApprovedHashes(run.id);
+    const persistedApprovedHashes = await this.ports.approvals.listApprovedHashes(run.id);
+    const approvedHashes = new Set(
+      [...persistedApprovedHashes].filter((hash) => !state.consumedApprovalHashes.has(hash)),
+    );
+    const actionApprovalHash = normalizeApprovalHash(run.id, action.tool, action.args);
+    const willConsumeApprovalHash = approvedHashes.has(actionApprovalHash)
+      ? actionApprovalHash
+      : null;
     const policyDecision = this.policy.evaluate({
       approvedHashes,
       args: action.args,
@@ -442,7 +450,13 @@ export class RunController {
     }
 
     state.packageChanged ||= result.workspaceEffects?.packageChanged === true;
-    state.readSnapshots = result.workspaceEffects?.readSnapshots ?? state.readSnapshots;
+    state.readSnapshots = mergeReadSnapshots(
+      state.readSnapshots,
+      result.workspaceEffects?.readSnapshots ?? [],
+    );
+    if (willConsumeApprovalHash) {
+      state.consumedApprovalHashes.add(willConsumeApprovalHash);
+    }
 
     const mutationDelta = !tool.readOnly && changed.length + deleted.length > 0 ? 1 : 0;
     const nextRun = await this.ports.runStore.recordProgress(
@@ -631,7 +645,10 @@ export class RunController {
       }
 
       state.packageChanged ||= result.workspaceEffects?.packageChanged === true;
-      state.readSnapshots = result.workspaceEffects?.readSnapshots ?? state.readSnapshots;
+      state.readSnapshots = mergeReadSnapshots(
+        state.readSnapshots,
+        result.workspaceEffects?.readSnapshots ?? [],
+      );
       state.observations.push(result.structuredData ?? result.summary);
 
       await this.ports.eventStore.append({
@@ -825,6 +842,22 @@ export class RunController {
       return { run: nextRun, state };
     }
 
+    if (resolved.decision === "expired") {
+      state.observations.push(
+        "Previous approval expired. Request a new approval if the action is still needed.",
+      );
+      state.pendingApprovalAction = undefined;
+      const nextRun = await this.commit(
+        run,
+        this.machine.transition(run, {
+          approvalId: resolved.id,
+          type: "approval_expired",
+        }),
+      );
+      await this.saveCheckpoint(nextRun, state, "approval-expired");
+      return { run: nextRun, state };
+    }
+
     state.observations.push("Approval denied by user.");
     const nextRun = await this.commit(
       run,
@@ -936,6 +969,7 @@ export class RunController {
       baselineCommandResults: metadata.baselineCommandResults,
       baselinePackageJson: metadata.baselinePackageJson ?? checkpoint.packageBaselineJson,
       changedFiles: new Set(checkpoint.changedFiles),
+      consumedApprovalHashes: new Set(metadata.consumedApprovalHashes),
       deletedFiles: new Set(checkpoint.deletedFiles),
       finishSummary: metadata.finishSummary,
       latestReportId: checkpoint.latestReportId,
@@ -1013,6 +1047,7 @@ function createEmptyDriveState(
     baselineCommandResults: initial.baselineCommandResults,
     baselinePackageJson: initial.baselinePackageJson,
     changedFiles: new Set(),
+    consumedApprovalHashes: new Set(),
     deletedFiles: new Set(),
     finishSummary: undefined,
     observations: [],
@@ -1024,11 +1059,36 @@ function createEmptyDriveState(
   };
 }
 
+function mergeReadSnapshots(
+  currentSnapshots: AgentReadSnapshot[],
+  nextSnapshots: AgentReadSnapshot[],
+) {
+  const snapshotMap = new Map(
+    currentSnapshots.map((snapshot) => [snapshot.path, snapshot]),
+  );
+
+  for (const snapshot of nextSnapshots) {
+    const existing = snapshotMap.get(snapshot.path);
+
+    if (
+      !existing ||
+      new Date(snapshot.readAt).getTime() >= new Date(existing.readAt).getTime()
+    ) {
+      snapshotMap.set(snapshot.path, snapshot);
+    }
+  }
+
+  return [...snapshotMap.values()].sort((left, right) =>
+    left.path.localeCompare(right.path),
+  );
+}
+
 type CheckpointDriveStateMetadata = {
   answerMessage?: string;
   baselineArtifactId?: string;
   baselineCommandResults?: Record<string, unknown>;
   baselinePackageJson?: string | null;
+  consumedApprovalHashes?: string[];
   finishSummary?: string;
   pendingApprovalAction?: HeadlessToolCallAction;
   userPlan: unknown;
@@ -1044,6 +1104,7 @@ function writeDriveStateMetadata(state: RunDriveState) {
       baselineArtifactId: state.baselineArtifactId,
       baselineCommandResults: state.baselineCommandResults,
       baselinePackageJson: state.baselinePackageJson,
+      consumedApprovalHashes: [...state.consumedApprovalHashes],
       finishSummary: state.finishSummary,
       pendingApprovalAction: state.pendingApprovalAction,
     },
@@ -1080,6 +1141,11 @@ export function readRunDriveStateMetadata(plan: unknown): CheckpointDriveStateMe
       metadataRecord.baselinePackageJson === null
         ? metadataRecord.baselinePackageJson
         : undefined,
+    consumedApprovalHashes: Array.isArray(metadataRecord.consumedApprovalHashes)
+      ? metadataRecord.consumedApprovalHashes.filter(
+          (hash): hash is string => typeof hash === "string",
+        )
+      : [],
     finishSummary:
       typeof metadataRecord.finishSummary === "string"
         ? metadataRecord.finishSummary

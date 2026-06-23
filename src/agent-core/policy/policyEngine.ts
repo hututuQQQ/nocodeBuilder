@@ -159,30 +159,45 @@ export function normalizeApprovalHash(
   return hashText(stableStringify({ runId, toolName, args }));
 }
 
-function collectPaths(value: unknown): string[] {
+function collectPaths(value: unknown, parentKey = ""): string[] {
   if (typeof value !== "object" || value === null) {
     return [];
   }
 
   if (Array.isArray(value)) {
-    return value.flatMap(collectPaths);
+    return value.flatMap((item) => {
+      if (typeof item === "string" && isPathField(parentKey)) {
+        return [item.replace(/\\/g, "/")];
+      }
+
+      return collectPaths(item, parentKey);
+    });
   }
 
   const record = value as Record<string, unknown>;
   const paths: string[] = [];
 
   for (const [key, item] of Object.entries(record)) {
-    if (
-      typeof item === "string" &&
-      (key.toLowerCase().includes("path") || key === "file")
-    ) {
+    if (typeof item === "string" && isPathField(key)) {
       paths.push(item.replace(/\\/g, "/"));
     } else {
-      paths.push(...collectPaths(item));
+      paths.push(...collectPaths(item, key));
     }
   }
 
   return paths;
+}
+
+function isPathField(key: string) {
+  const normalized = key.toLowerCase();
+  return (
+    normalized === "file" ||
+    normalized === "files" ||
+    normalized === "path" ||
+    normalized === "paths" ||
+    normalized.endsWith("path") ||
+    normalized.endsWith("paths")
+  );
 }
 
 function isForbiddenPath(path: string, forbiddenPaths: string[]) {

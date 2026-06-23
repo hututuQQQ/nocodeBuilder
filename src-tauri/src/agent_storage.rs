@@ -2059,6 +2059,35 @@ mod tests {
             .await;
             assert!(approved.is_err(), "expired approvals must not be approved");
 
+            create_agent_approval_with_pool(
+                &pool,
+                AgentApprovalCreateInput {
+                    id: "approval-expired-denied".to_string(),
+                    run_id: "run-expired-approval".to_string(),
+                    tool_call_id: "tool-call-expired-denied".to_string(),
+                    tool_name: "delete_files".to_string(),
+                    normalized_args_hash: "12:expired-denied".to_string(),
+                    target_resources: vec!["components/Old.tsx".to_string()],
+                    exact_side_effect: "delete components/Old.tsx".to_string(),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    expires_at: "2026-01-01T00:01:00Z".to_string(),
+                },
+            )
+            .await
+            .expect("create second approval");
+
+            let denied = resolve_agent_approval_with_pool(
+                &pool,
+                AgentApprovalResolveInput {
+                    run_id: "run-expired-approval".to_string(),
+                    approval_id: "approval-expired-denied".to_string(),
+                    decision: "denied".to_string(),
+                    resolved_at: "2026-01-01T00:02:00Z".to_string(),
+                },
+            )
+            .await;
+            assert!(denied.is_err(), "expired approvals must not be denied");
+
             let expired = resolve_agent_approval_with_pool(
                 &pool,
                 AgentApprovalResolveInput {

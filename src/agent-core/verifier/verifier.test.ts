@@ -625,7 +625,131 @@ describe("AgentVerifier", () => {
     expect(report.checks.find((check) => check.id === "design-tokens"))
       .toMatchObject({
         status: "failed",
-        summary: "1 controlled CSS design token(s) differ from SiteSpec designSystem.",
+        summary:
+          "Design token mismatch: 1 value mismatch(es), 0 missing in CSS, 0 missing in SiteSpec.",
+        details: {
+          valueMismatches: [
+            {
+              cssName: "colors-primary",
+              cssValue: "#dc2626",
+              siteValue: "#0f766e",
+            },
+          ],
+        },
+      });
+  });
+
+  it("fails when SiteSpec tokens are missing from controlled CSS", async () => {
+    const run = createRun("Change the theme color", "full_site");
+    const verifier = new AgentVerifier({
+      httpProbe: async () => ({
+        ok: true,
+        status: 200,
+        summary: "ok",
+      }),
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+        "styles/nocode-tokens.css": [
+          "/* nocode-builder-design-tokens:start */",
+          ":root {",
+          "  --ncb-colors-primary: #0f766e;",
+          "}",
+          "/* nocode-builder-design-tokens:end */",
+        ].join("\n"),
+      }),
+      readSiteSpec: async () => ({
+        ...createSiteSpec(),
+        designSystem: {
+          ...createSiteSpec().designSystem,
+          colors: {
+            primary: "#0f766e",
+            secondary: "#164e63",
+          },
+        },
+      }),
+      runCommand: async (command) => ({
+        command,
+        exitCode: 0,
+        output: "ok",
+        success: true,
+      }),
+    });
+
+    const report = await verifier.verify({
+      changedFiles: ["styles/nocode-tokens.css"],
+      packageChanged: false,
+      previewUrl: "http://localhost:3000",
+      run,
+    });
+
+    expect(report.status).toBe("failed");
+    expect(report.checks.find((check) => check.id === "design-tokens"))
+      .toMatchObject({
+        status: "failed",
+        summary:
+          "Design token mismatch: 0 value mismatch(es), 1 missing in CSS, 0 missing in SiteSpec.",
+        details: {
+          missingInCss: ["colors-secondary"],
+        },
+      });
+  });
+
+  it("fails when controlled CSS tokens are missing from SiteSpec", async () => {
+    const run = createRun("Change the theme color", "full_site");
+    const verifier = new AgentVerifier({
+      httpProbe: async () => ({
+        ok: true,
+        status: 200,
+        summary: "ok",
+      }),
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+        "styles/nocode-tokens.css": [
+          "/* nocode-builder-design-tokens:start */",
+          ":root {",
+          "  --ncb-colors-primary: #0f766e;",
+          "  --ncb-colors-legacy-extra: #f97316;",
+          "}",
+          "/* nocode-builder-design-tokens:end */",
+        ].join("\n"),
+      }),
+      readSiteSpec: async () => ({
+        ...createSiteSpec(),
+        designSystem: {
+          ...createSiteSpec().designSystem,
+          colors: { primary: "#0f766e" },
+        },
+      }),
+      runCommand: async (command) => ({
+        command,
+        exitCode: 0,
+        output: "ok",
+        success: true,
+      }),
+    });
+
+    const report = await verifier.verify({
+      changedFiles: ["styles/nocode-tokens.css"],
+      packageChanged: false,
+      previewUrl: "http://localhost:3000",
+      run,
+    });
+
+    expect(report.status).toBe("failed");
+    expect(report.checks.find((check) => check.id === "design-tokens"))
+      .toMatchObject({
+        status: "failed",
+        summary:
+          "Design token mismatch: 0 value mismatch(es), 0 missing in CSS, 1 missing in SiteSpec.",
+        details: {
+          missingInSiteSpec: ["colors-legacy-extra"],
+        },
       });
   });
 

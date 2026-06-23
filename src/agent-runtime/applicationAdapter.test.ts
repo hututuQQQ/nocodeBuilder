@@ -14,11 +14,14 @@ const fake = vi.hoisted(() => ({
   approvals: [] as AgentApproval[],
   checkpoints: [] as AgentRunCheckpoint[],
   completedMessages: [] as string[],
+  commandCalls: [] as string[],
+  commandThrows: false,
   events: [] as AgentEvent[],
   failedMessages: [] as string[],
   generationFiles: [] as Array<{ content: string; path: string }>,
   modelContexts: [] as unknown[],
   previewProbeUrls: [] as string[],
+  projectFiles: {} as Record<string, string>,
   requireReadBeforeWrite: false,
   rejectNextCreateRun: false,
   reports: [] as VerificationReport[],
@@ -146,7 +149,7 @@ vi.mock("../services/projects", () => ({
         summary: "ok",
       };
     }),
-    readFile: vi.fn(async () => "{}"),
+    readFile: vi.fn(async (_projectId, path: string) => fake.projectFiles[path] ?? "{}"),
   },
 }));
 
@@ -335,11 +338,14 @@ describe("Application runtime adapter", () => {
     fake.approvals = [];
     fake.checkpoints = [];
     fake.completedMessages = [];
+    fake.commandCalls = [];
+    fake.commandThrows = false;
     fake.events = [];
     fake.failedMessages = [];
     fake.generationFiles = [];
     fake.modelContexts = [];
     fake.previewProbeUrls = [];
+    fake.projectFiles = {};
     fake.requireReadBeforeWrite = false;
     fake.rejectNextCreateRun = false;
     fake.reports = [];
@@ -371,6 +377,37 @@ describe("Application runtime adapter", () => {
       modelTurns: 1,
       toolCalls: 0,
     });
+  });
+
+  it("classifies answer tasks before baseline commands and skips build checks", async () => {
+    fake.actions = [
+      {
+        type: "answer",
+        message: "The app is healthy enough to answer this status question.",
+      },
+    ];
+    fake.commandThrows = true;
+    fake.projectFiles = {
+      "package.json": JSON.stringify({
+        scripts: {
+          build: "next build",
+          lint: "eslint .",
+          test: "vitest run",
+        },
+      }),
+    };
+    fake.verificationStatuses = ["passed"];
+    const store = createFakeStore();
+
+    const result = await modifyCurrentProjectRuntime(store, "status?");
+    const run = [...fake.runs.values()][0];
+
+    expect(result).toBe(true);
+    expect(run.contract.taskType).toBe("answer");
+    expect(run.status).toBe("completed");
+    expect(fake.commandCalls).toEqual([]);
+    expect(fake.previewProbeUrls).toEqual([]);
+    expect(fake.completedMessages[0]).toContain("The app is healthy enough");
   });
 
   it("routes read, edit, auto-verify, finish through the headless controller", async () => {
@@ -593,6 +630,78 @@ describe("Application runtime adapter", () => {
       decision: "expired",
     });
     expect(fake.events.map((event) => event.type)).toContain("approval.expired");
+  });
+
+  it("resumes a previously approved action even when current time is past expiresAt", async () => {
+    const deleteAction = {
+      type: "tool_call",
+      tool: "delete_files",
+      rationale: "Remove obsolete component",
+      args: {
+        paths: ["components/Old.tsx"],
+        summary: "Remove old component",
+      },
+    };
+    fake.actions = [deleteAction];
+    const store = createFakeStore();
+    await modifyCurrentProjectRuntime(store, "Remove obsolete component");
+    const waitingRun = [...fake.runs.values()][0];
+    fake.approvals[0] = {
+      ...fake.approvals[0],
+      decision: "approved",
+      expiresAt: "2000-01-01T00:10:00.000Z",
+      resolvedAt: "2000-01-01T00:01:00.000Z",
+    };
+    fake.actions = [{ type: "finish_candidate", summary: "Deleted old component" }];
+    fake.verificationStatuses = ["passed", "passed"];
+
+    const result = await modifyCurrentProjectRuntime(store, "Remove obsolete component", {
+      existingRun: waitingRun,
+    });
+
+    expect(result).toBe(true);
+    expect(fake.toolNames).toEqual(["delete_files"]);
+    expect(fake.runs.get(waitingRun.id)?.status).toBe("completed");
+  });
+
+  it("keeps an in-window denied decision valid after expiresAt", async () => {
+    fake.actions = [
+      {
+        type: "tool_call",
+        tool: "delete_files",
+        rationale: "Remove obsolete component",
+        args: {
+          paths: ["components/Old.tsx"],
+          summary: "Remove old component",
+        },
+      },
+    ];
+    const store = createFakeStore();
+    await modifyCurrentProjectRuntime(store, "Remove obsolete component");
+    const waitingRun = [...fake.runs.values()][0];
+    fake.approvals[0] = {
+      ...fake.approvals[0],
+      decision: "denied",
+      expiresAt: "2000-01-01T00:10:00.000Z",
+      resolvedAt: "2000-01-01T00:01:00.000Z",
+    };
+    fake.actions = [{ type: "finish_candidate", summary: "Skipped deletion" }];
+    fake.verificationStatuses = ["passed"];
+
+    const result = await modifyCurrentProjectRuntime(store, "Remove obsolete component", {
+      existingRun: waitingRun,
+    });
+
+    expect(result).toBe(true);
+    expect(fake.toolNames).toEqual([]);
+    expect(fake.modelContexts[1]).toMatchObject({
+      observations: expect.arrayContaining([
+        expect.objectContaining({
+          content: "Approval denied by user.",
+          summary: "Approval denied by user.",
+        }),
+      ]),
+    });
   });
 
   it("requires a fresh approval when approved args hash differs", async () => {
@@ -863,12 +972,17 @@ describe("Application runtime adapter", () => {
       },
     ];
 
-    const result = await modifyCurrentProjectRuntime(createFakeStore(), "status?");
+    const store = createFakeStore();
+    const result = await modifyCurrentProjectRuntime(store, "status?");
     const run = [...fake.runs.values()][0];
 
     expect(result).toBe(false);
     expect(run.status).toBe("cancelled");
     expect(fake.events.map((event) => event.type)).not.toContain("run.failed");
+    expect(fake.failedMessages).toEqual([]);
+    expect(fake.completedMessages).toContain("Run cancelled.");
+    expect((store as { get: () => { projectError: string | null } }).get().projectError)
+      .toBeNull();
   });
 
   it("preserves answerMessage in the final chat message", async () => {
@@ -1227,12 +1341,20 @@ function createFakeStore() {
     previewVerificationSession: null,
     previewVerificationSessions: [],
     projectError: null,
-    runProjectCommand: async (_projectId: string, command: string) => ({
-      command,
-      exitCode: 0,
-      output: "ok",
-      success: true,
-    }),
+    runProjectCommand: async (_projectId: string, command: string) => {
+      fake.commandCalls.push(command);
+
+      if (fake.commandThrows) {
+        throw new Error(`Unexpected command: ${command}`);
+      }
+
+      return {
+        command,
+        exitCode: 0,
+        output: "ok",
+        success: true,
+      };
+    },
     selectedSiteNodeId: null,
     startDevServer: async () => undefined,
     stopDevServer: async () => undefined,

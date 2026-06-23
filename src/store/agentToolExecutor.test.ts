@@ -85,6 +85,66 @@ describe("agentToolExecutor update_design_tokens", () => {
     );
   });
 
+  it("preserves existing tokens during incremental updates", async () => {
+    fake.siteSpec = {
+      ...createSiteSpec(),
+      designSystem: {
+        colors: {
+          primary: "#111111",
+          secondary: "#222222",
+        },
+        radii: {
+          card: "12px",
+        },
+        spacing: {},
+        typography: {},
+      },
+    };
+    fake.readFile.mockResolvedValue([
+      "/* nocode-builder-design-tokens:start */",
+      ":root {",
+      "  --ncb-colors-primary: #111111;",
+      "  --ncb-colors-secondary: #222222;",
+      "  --ncb-radii-card: 12px;",
+      "}",
+      "/* nocode-builder-design-tokens:end */",
+    ].join("\n"));
+
+    const result = await executeAgentTool(
+      createFakeStore(),
+      createProject(),
+      updateDesignTokensStep(),
+      1,
+      createAgentRunState(),
+    );
+    const writtenFiles = fake.writeAgentFiles.mock.calls[0]?.[2] as Array<{
+      content: string;
+      path: string;
+    }>;
+    const writtenCss = writtenFiles[0]?.content ?? "";
+
+    expect(result.observation.ok).toBe(true);
+    expect(writtenCss).toContain("--ncb-colors-primary: #0f766e;");
+    expect(writtenCss).toContain("--ncb-colors-secondary: #222222;");
+    expect(writtenCss).toContain("--ncb-radii-card: 12px;");
+    expect(fake.writeSiteSpec).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({
+        designSystem: {
+          colors: {
+            primary: "#0f766e",
+            secondary: "#222222",
+          },
+          radii: {
+            card: "12px",
+          },
+          spacing: {},
+          typography: {},
+        },
+      }),
+    );
+  });
+
   it("rolls back CSS when SiteSpec persistence fails", async () => {
     fake.writeSiteSpec.mockRejectedValueOnce(new Error("metadata write failed"));
 

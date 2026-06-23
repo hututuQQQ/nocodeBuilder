@@ -138,6 +138,13 @@ async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
     statusLines: [],
   };
   let finalRun: AgentRun | null = null;
+  const contract = existingRun
+    ? existingRun.contract
+    : compileTaskContract({
+        objective: userRequest,
+        selectedSiteNodeId: store.get().selectedSiteNodeId,
+        taskType: mode === "generate" ? "full_site" : undefined,
+      });
 
   store.set((state) => ({
     isGeneratingProject: mode === "generate",
@@ -157,7 +164,9 @@ async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
       await restoreAdapterState(project, existingRun, session);
       store.set({ currentAgentRun: existingRun });
     } else {
-      const baseline = await captureBaseline(store, project);
+      const baseline = contract.taskType === "answer"
+        ? createEmptyBaseline()
+        : await captureBaseline(store, project);
       session.baselineCommandResults = baseline.commandResults;
       session.baselinePackageJson = baseline.packageJson;
     }
@@ -183,11 +192,7 @@ async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
             baselineArtifactId: session.baselineArtifactId,
             baselineCommandResults: session.baselineCommandResults,
             baselinePackageJson: session.baselinePackageJson,
-            contract: compileTaskContract({
-              objective: userRequest,
-              selectedSiteNodeId: store.get().selectedSiteNodeId,
-              taskType: mode === "generate" ? "full_site" : undefined,
-            }),
+            contract,
             conversationId: store.get().currentConversation?.id ?? "conversation-default",
             projectId: project.id,
             runId: controllerRunId,
@@ -200,13 +205,25 @@ async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
     return finalRun.status === "completed";
   } catch (error) {
     const message = getProjectErrorMessage(error);
-    const cleanupMessage = await cleanupRunAfterRuntimeError({
+    const cleanupResult = await cleanupRunAfterRuntimeError({
       message,
       projectId: project.id,
       runId: controllerRunId,
       signalAborted: runAbortController.signal.aborted,
       store,
     });
+    const cleanupMessage = cleanupResult.message;
+
+    if (cleanupResult.run?.status === "cancelled") {
+      stream.completeWithTypewriter("Run cancelled.");
+      void persistCurrentConversation(store);
+      store.set((state) => ({
+        terminalLogs: appendLogs(state.terminalLogs, [
+          `[agent] Run ${cleanupResult.run?.id ?? controllerRunId} cancelled.`,
+        ]),
+      }));
+      return false;
+    }
 
     stream.failWithTypewriter(`Agent run failed: ${cleanupMessage}`);
     void persistCurrentConversation(store);
@@ -708,7 +725,7 @@ function createApprovalPort(
       const approvals = await agentRuntimeApi.listApprovals(projectId, runId);
       return [...approvals]
         .reverse()
-        .find((approval) => approval.decision && !isExpiredApproval(approval)) ?? null;
+        .find((approval) => approval.decision && approval.resolvedAt) ?? null;
     },
     getLatestUnresolved: async (runId) => {
       const approvals = await agentRuntimeApi.listApprovals(projectId, runId);
@@ -723,7 +740,9 @@ function createApprovalPort(
         approvals
           .filter(
             (approval) =>
-              approval.decision === "approved" && !isExpiredApproval(approval),
+              approval.decision === "approved" &&
+              approval.resolvedAt &&
+              wasResolvedBeforeExpiry(approval),
           )
           .map((approval) => approval.normalizedArgsHash),
       );
@@ -747,8 +766,22 @@ function createApprovalPort(
   };
 }
 
-function isExpiredApproval(approval: AgentApproval) {
-  return new Date(approval.expiresAt).getTime() <= Date.now();
+function wasResolvedBeforeExpiry(approval: AgentApproval) {
+  if (!approval.resolvedAt) {
+    return false;
+  }
+
+  return new Date(approval.resolvedAt).getTime() <= new Date(approval.expiresAt).getTime();
+}
+
+function createEmptyBaseline(): {
+  commandResults?: BaselineCommandResults;
+  packageJson: string | null;
+} {
+  return {
+    commandResults: undefined,
+    packageJson: null,
+  };
 }
 
 async function captureBaseline(store: StoreAccess, project: ProjectInfo) {
@@ -1012,12 +1045,12 @@ async function cleanupRunAfterRuntimeError({
   runId: string;
   signalAborted: boolean;
   store: StoreAccess;
-}) {
+}): Promise<{ message: string; run: AgentRun | null }> {
   try {
     const latestRun = await agentRuntimeApi.getRun(projectId, runId);
 
     if (!latestRun || shouldLeaveRunStateAfterError(latestRun)) {
-      return message;
+      return { message, run: latestRun };
     }
 
     const transition = latestRun.cancelRequested || signalAborted
@@ -1029,12 +1062,15 @@ async function cleanupRunAfterRuntimeError({
       transition,
     );
     projectRunToStore(store, run, event);
-    return message;
+    return { message, run };
   } catch (cleanupError) {
-    return [
-      message,
-      `Cleanup failed: ${getProjectErrorMessage(cleanupError)}`,
-    ].join("\n");
+    return {
+      message: [
+        message,
+        `Cleanup failed: ${getProjectErrorMessage(cleanupError)}`,
+      ].join("\n"),
+      run: null,
+    };
   }
 }
 
@@ -1080,6 +1116,11 @@ async function completeStreamForRun(
     return;
   }
 
+  if (run.status === "cancelled") {
+    stream.completeWithTypewriter("Run cancelled.");
+    return;
+  }
+
   stream.failWithTypewriter(`Run ended with status ${run.status}.`);
 }
 
@@ -1088,7 +1129,7 @@ async function loadApprovedPackageChangeKeys(projectId: string, runId: string) {
   const hasApprovedPackageChange = approvals.some(
     (approval) =>
       approval.decision === "approved" &&
-      !isExpiredApproval(approval) &&
+      wasResolvedBeforeExpiry(approval) &&
       approval.targetResources.some(
         (resource) => resource.replace(/\\/g, "/") === "package.json",
       ),
@@ -1104,7 +1145,7 @@ async function loadApprovedDeletionPaths(projectId: string, runId: string) {
     .filter(
       (approval) =>
         approval.decision === "approved" &&
-        !isExpiredApproval(approval) &&
+        wasResolvedBeforeExpiry(approval) &&
         approval.toolName === "delete_files",
     )
     .flatMap((approval) => approval.targetResources)

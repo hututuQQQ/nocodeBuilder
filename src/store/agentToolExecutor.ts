@@ -630,27 +630,28 @@ async function updateDesignTokens(
   const tokenPath = findDesignTokenPath(fileTree);
   const tokenFileExisted = hasFilePath(fileTree, tokenPath);
   const currentContent = await readOptionalProjectFile(project.id, tokenPath);
-  const nextContent = updateCssTokenBlock(currentContent, args.tokens);
+  const mergedDesignSystem = {
+    colors: {
+      ...siteSpec.designSystem.colors,
+      ...(args.tokens.colors ?? {}),
+    },
+    radii: {
+      ...siteSpec.designSystem.radii,
+      ...(args.tokens.radii ?? {}),
+    },
+    spacing: {
+      ...siteSpec.designSystem.spacing,
+      ...(args.tokens.spacing ?? {}),
+    },
+    typography: {
+      ...siteSpec.designSystem.typography,
+      ...(args.tokens.typography ?? {}),
+    },
+  };
+  const nextContent = updateCssTokenBlock(currentContent, mergedDesignSystem);
   const nextSiteSpec: SiteSpec = {
     ...siteSpec,
-    designSystem: {
-      colors: {
-        ...siteSpec.designSystem.colors,
-        ...(args.tokens.colors ?? {}),
-      },
-      radii: {
-        ...siteSpec.designSystem.radii,
-        ...(args.tokens.radii ?? {}),
-      },
-      spacing: {
-        ...siteSpec.designSystem.spacing,
-        ...(args.tokens.spacing ?? {}),
-      },
-      typography: {
-        ...siteSpec.designSystem.typography,
-        ...(args.tokens.typography ?? {}),
-      },
-    },
+    designSystem: mergedDesignSystem,
   };
 
   let cssChanged = false;
@@ -739,7 +740,7 @@ async function readOptionalProjectFile(projectId: string, path: string) {
 
 function updateCssTokenBlock(
   currentContent: string,
-  tokens: Extract<AgentToolCallStep, { tool: "update_design_tokens" }>["args"]["tokens"],
+  tokens: SiteSpec["designSystem"],
 ) {
   const declarations = Object.entries(tokens)
     .flatMap(([group, values]) =>

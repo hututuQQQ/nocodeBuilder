@@ -582,9 +582,10 @@ export class AgentVerifier {
     }
 
     const siteTokens = flattenSiteDesignTokens(siteSpec);
-    const mismatches = [...cssTokens.entries()]
+    const valueMismatches = [...cssTokens.entries()]
+      .filter(([cssName]) => siteTokens.has(cssName))
       .map(([cssName, cssValue]) => {
-        const siteValue = siteTokens.get(cssName);
+        const siteValue = siteTokens.get(cssName) ?? "";
 
         if (siteValue === cssValue) {
           return null;
@@ -593,22 +594,37 @@ export class AgentVerifier {
         return {
           cssName,
           cssValue,
-          siteValue: siteValue ?? null,
+          siteValue,
         };
       })
       .filter((mismatch): mismatch is {
         cssName: string;
         cssValue: string;
-        siteValue: string | null;
+        siteValue: string;
       } => mismatch !== null);
+    const missingInCss = [...siteTokens.keys()]
+      .filter((tokenName) => !cssTokens.has(tokenName))
+      .sort();
+    const missingInSiteSpec = [...cssTokens.keys()]
+      .filter((tokenName) => !siteTokens.has(tokenName))
+      .sort();
 
-    if (mismatches.length > 0) {
+    if (
+      valueMismatches.length > 0 ||
+      missingInCss.length > 0 ||
+      missingInSiteSpec.length > 0
+    ) {
       return failedCheck(
         "design-tokens",
         "DesignTokenVerifier",
-        `${mismatches.length} controlled CSS design token(s) differ from SiteSpec designSystem.`,
+        `Design token mismatch: ${valueMismatches.length} value mismatch(es), ${missingInCss.length} missing in CSS, ${missingInSiteSpec.length} missing in SiteSpec.`,
         false,
-        { mismatches, tokenPath: tokenFile.path },
+        {
+          missingInCss,
+          missingInSiteSpec,
+          tokenPath: tokenFile.path,
+          valueMismatches,
+        },
       );
     }
 
