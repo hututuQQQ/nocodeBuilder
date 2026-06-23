@@ -1,6 +1,7 @@
 import type {
   AgentRun,
   PreviewDiagnostic,
+  SiteSpec,
   TaskContract,
   VerificationCheck,
   VerificationReport,
@@ -56,6 +57,7 @@ export type VerifierPorts = {
     title: string;
   }) => Promise<string>;
   runCommand?: (command: string) => Promise<VerifierCommandResult | null>;
+  readSiteSpec?: () => Promise<SiteSpec | null>;
   startPreview?: () => Promise<string | null>;
   stopPreview?: () => Promise<void>;
   httpProbe?: (url: string) => Promise<{ ok: boolean; status: number; summary: string }>;
@@ -103,7 +105,9 @@ export class AgentVerifier {
     checks.push(await this.verifyStatic(input));
     checks.push(await this.verifyBuild(input));
     checks.push(await this.verifyPreview(input));
-    checks.push(...verifyAcceptanceCriteria(input.run.contract, input, checks));
+    const siteSpec = await this.readSiteSpec();
+    checks.push(await this.verifyDesignTokens(siteSpec));
+    checks.push(...verifyAcceptanceCriteria(input.run.contract, input, checks, siteSpec));
 
     const status = summarizeStatus(checks);
     const failedChecks = checks.filter((check) => check.status === "failed");
@@ -539,6 +543,117 @@ export class AgentVerifier {
     return JSON.parse(packageJson) as PackageJson;
   }
 
+  private async readSiteSpec() {
+    if (!this.ports.readSiteSpec) {
+      return null;
+    }
+
+    try {
+      return await this.ports.readSiteSpec();
+    } catch {
+      return null;
+    }
+  }
+
+  private async verifyDesignTokens(siteSpec: SiteSpec | null): Promise<VerificationCheck> {
+    if (!this.ports.readFile) {
+      return skippedCheck(
+        "design-tokens",
+        "DesignTokenVerifier",
+        "No file reader is available in this environment.",
+      );
+    }
+
+    if (!siteSpec) {
+      return skippedCheck(
+        "design-tokens",
+        "DesignTokenVerifier",
+        "No SiteSpec is available for design token consistency checks.",
+      );
+    }
+
+    const tokenFile = await this.readDesignTokenFile();
+
+    if (!tokenFile) {
+      return skippedCheck(
+        "design-tokens",
+        "DesignTokenVerifier",
+        "No controlled design token CSS block was found.",
+      );
+    }
+
+    const cssTokens = parseControlledCssTokens(tokenFile.content);
+
+    if (cssTokens.size === 0) {
+      return skippedCheck(
+        "design-tokens",
+        "DesignTokenVerifier",
+        "Controlled design token CSS block contains no token declarations.",
+      );
+    }
+
+    const siteTokens = flattenSiteDesignTokens(siteSpec);
+    const mismatches = [...cssTokens.entries()]
+      .map(([cssName, cssValue]) => {
+        const siteValue = siteTokens.get(cssName);
+
+        if (siteValue === cssValue) {
+          return null;
+        }
+
+        return {
+          cssName,
+          cssValue,
+          siteValue: siteValue ?? null,
+        };
+      })
+      .filter((mismatch): mismatch is {
+        cssName: string;
+        cssValue: string;
+        siteValue: string | null;
+      } => mismatch !== null);
+
+    if (mismatches.length > 0) {
+      return failedCheck(
+        "design-tokens",
+        "DesignTokenVerifier",
+        `${mismatches.length} controlled CSS design token(s) differ from SiteSpec designSystem.`,
+        false,
+        { mismatches, tokenPath: tokenFile.path },
+      );
+    }
+
+    return passedCheck(
+      "design-tokens",
+      "DesignTokenVerifier",
+      `${cssTokens.size} controlled CSS design token(s) match SiteSpec designSystem.`,
+      false,
+    );
+  }
+
+  private async readDesignTokenFile() {
+    const candidatePaths = [
+      "app/globals.css",
+      "styles/globals.css",
+      "styles/tokens.css",
+      "styles/nocode-tokens.css",
+    ];
+
+    for (const path of candidatePaths) {
+      try {
+        const content = await this.ports.readFile?.(path);
+
+        if (content?.includes("nocode-builder-design-tokens:start")) {
+          return { content, path };
+        }
+      } catch {
+        // Try the next conventional token file path.
+      }
+    }
+
+    return null;
+  }
+
   private async tryReadPackageJson() {
     try {
       return await this.readPackageJson();
@@ -845,6 +960,7 @@ function verifyAcceptanceCriteria(
   contract: TaskContract,
   input: VerificationInput,
   technicalChecks: VerificationCheck[],
+  siteSpec: SiteSpec | null,
 ): VerificationCheck[] {
   return contract.acceptanceCriteria.map((criterion) => {
     if (criterion.id === "verifier-passed") {
@@ -866,7 +982,7 @@ function verifyAcceptanceCriteria(
     }
 
     if (criterion.id === "request-addressed") {
-      const evidence = collectRequestAddressedEvidence(contract, input);
+      const evidence = collectRequestAddressedEvidence(contract, input, siteSpec);
 
       return evidence
         ? passedCheck(
@@ -895,6 +1011,7 @@ function verifyAcceptanceCriteria(
 function collectRequestAddressedEvidence(
   contract: TaskContract,
   input: VerificationInput,
+  siteSpec: SiteSpec | null,
 ) {
   const changedFiles = input.changedFiles.map(normalizeProjectPath);
 
@@ -918,15 +1035,131 @@ function collectRequestAddressedEvidence(
     return null;
   }
 
-  if (contract.scope.componentIds?.length) {
-    return `Changed ${changedFiles.length} file(s) while scoped to component(s): ${contract.scope.componentIds.join(", ")}.`;
+  const componentIds = contract.scope.componentIds ?? [];
+  if (componentIds.length > 0) {
+    const componentSourcePaths = siteSpec
+      ? collectComponentSourcePaths(siteSpec, componentIds)
+      : new Set<string>();
+    const matchingChangedFile = changedFiles.find((path) => componentSourcePaths.has(path));
+
+    return matchingChangedFile
+      ? `Changed ${matchingChangedFile} for scoped component(s): ${componentIds.join(", ")}.`
+      : null;
   }
 
-  if (contract.scope.pages?.length) {
-    return `Changed ${changedFiles.length} file(s) while scoped to page(s): ${contract.scope.pages.join(", ")}.`;
+  const pages = contract.scope.pages ?? [];
+  if (pages.length > 0) {
+    const pageSourcePaths = siteSpec
+      ? collectPageSourcePaths(siteSpec, pages)
+      : new Set<string>();
+    const matchingChangedFile = changedFiles.find((path) => pageSourcePaths.has(path));
+
+    return matchingChangedFile
+      ? `Changed ${matchingChangedFile} for scoped page(s): ${pages.join(", ")}.`
+      : null;
   }
 
   return `Changed ${changedFiles.length} task-scoped file(s).`;
+}
+
+function collectComponentSourcePaths(siteSpec: SiteSpec, componentIds: string[]) {
+  const componentIdSet = new Set(componentIds);
+  const paths = new Set<string>();
+
+  for (const component of siteSpec.reusableComponents) {
+    if (componentIdSet.has(component.id) && component.source?.path) {
+      paths.add(normalizeProjectPath(component.source.path));
+    }
+  }
+
+  for (const page of siteSpec.pages) {
+    for (const node of flattenSiteNodes(page.nodes)) {
+      if (componentIdSet.has(node.id) && node.source?.path) {
+        paths.add(normalizeProjectPath(node.source.path));
+      }
+    }
+  }
+
+  return paths;
+}
+
+function collectPageSourcePaths(siteSpec: SiteSpec, pages: string[]) {
+  const pageSet = new Set(pages);
+  const paths = new Set<string>();
+
+  for (const page of siteSpec.pages) {
+    if (!pageSet.has(page.id) && !pageSet.has(page.route) && !pageSet.has(page.title)) {
+      continue;
+    }
+
+    for (const node of flattenSiteNodes(page.nodes)) {
+      if (node.source?.path) {
+        paths.add(normalizeProjectPath(node.source.path));
+      }
+    }
+  }
+
+  return paths;
+}
+
+function flattenSiteNodes(nodes: SiteSpec["pages"][number]["nodes"]): SiteSpec["pages"][number]["nodes"] {
+  return nodes.flatMap((node) => [
+    node,
+    ...flattenSiteNodes(node.children ?? []),
+  ]);
+}
+
+function parseControlledCssTokens(content: string) {
+  const tokens = new Map<string, string>();
+  const blockMatch = content.match(
+    /\/\* nocode-builder-design-tokens:start \*\/([\s\S]*?)\/\* nocode-builder-design-tokens:end \*\//,
+  );
+
+  if (!blockMatch) {
+    return tokens;
+  }
+
+  const declarationPattern = /--ncb-([a-z0-9_-]+-[a-z0-9_-]+)\s*:\s*([^;]+);/gi;
+  let match: RegExpExecArray | null = null;
+
+  while ((match = declarationPattern.exec(blockMatch[1] ?? "")) !== null) {
+    tokens.set(match[1].toLowerCase(), normalizeCssTokenValue(match[2]));
+  }
+
+  return tokens;
+}
+
+function flattenSiteDesignTokens(siteSpec: SiteSpec) {
+  const tokens = new Map<string, string>();
+  const groups = {
+    colors: siteSpec.designSystem.colors,
+    radii: siteSpec.designSystem.radii,
+    spacing: siteSpec.designSystem.spacing,
+    typography: siteSpec.designSystem.typography,
+  };
+
+  for (const [group, values] of Object.entries(groups)) {
+    for (const [key, value] of Object.entries(values)) {
+      tokens.set(
+        `${toCssTokenName(group)}-${toCssTokenName(key)}`,
+        normalizeCssTokenValue(value),
+      );
+    }
+  }
+
+  return tokens;
+}
+
+function normalizeCssTokenValue(value: string) {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+function toCssTokenName(value: string) {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .replace(/[^a-zA-Z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
 }
 
 function summarizeStatus(checks: VerificationCheck[]): VerificationStatus {

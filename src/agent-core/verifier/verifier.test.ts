@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { compileTaskContract } from "../contract/taskContract";
+import type { SiteSpec } from "../types";
 import { RunStateMachine } from "../runtime/runStateMachine";
 import { AgentVerifier, verifyScope } from "./verifier";
 
@@ -491,6 +492,188 @@ describe("AgentVerifier", () => {
       });
   });
 
+  it("requires changed files to match scoped SiteSpec component sources", async () => {
+    const run = createScopedRun({
+      componentIds: ["hero.cta"],
+    });
+    const verifier = new AgentVerifier({
+      httpProbe: async () => ({
+        ok: true,
+        status: 200,
+        summary: "ok",
+      }),
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+      }),
+      readSiteSpec: async () => createSiteSpec(),
+      runCommand: async (command) => ({
+        command,
+        exitCode: 0,
+        output: "ok",
+        success: true,
+      }),
+    });
+
+    const report = await verifier.verify({
+      changedFiles: ["components/Footer.tsx"],
+      packageChanged: false,
+      previewUrl: "http://localhost:3000",
+      run,
+    });
+
+    expect(report.status).toBe("inconclusive");
+    expect(report.checks.find((check) => check.id === "acceptance:request-addressed"))
+      .toMatchObject({
+        required: true,
+        status: "inconclusive",
+      });
+  });
+
+  it("accepts changed files that match scoped SiteSpec component sources", async () => {
+    const run = createScopedRun({
+      componentIds: ["hero.cta"],
+    });
+    const verifier = new AgentVerifier({
+      httpProbe: async () => ({
+        ok: true,
+        status: 200,
+        summary: "ok",
+      }),
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+      }),
+      readSiteSpec: async () => createSiteSpec(),
+      runCommand: async (command) => ({
+        command,
+        exitCode: 0,
+        output: "ok",
+        success: true,
+      }),
+    });
+
+    const report = await verifier.verify({
+      changedFiles: ["components/Hero.tsx"],
+      packageChanged: false,
+      previewUrl: "http://localhost:3000",
+      run,
+    });
+
+    expect(report.status).toBe("passed");
+    expect(report.checks.find((check) => check.id === "acceptance:request-addressed"))
+      .toMatchObject({
+        status: "passed",
+        summary: "Changed components/Hero.tsx for scoped component(s): hero.cta.",
+      });
+  });
+
+  it("fails when controlled CSS tokens differ from SiteSpec designSystem", async () => {
+    const run = createRun("Change the theme color", "full_site");
+    const verifier = new AgentVerifier({
+      httpProbe: async () => ({
+        ok: true,
+        status: 200,
+        summary: "ok",
+      }),
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+        "styles/nocode-tokens.css": [
+          "/* nocode-builder-design-tokens:start */",
+          ":root {",
+          "  --ncb-colors-primary: #dc2626;",
+          "}",
+          "/* nocode-builder-design-tokens:end */",
+        ].join("\n"),
+      }),
+      readSiteSpec: async () => ({
+        ...createSiteSpec(),
+        designSystem: {
+          ...createSiteSpec().designSystem,
+          colors: { primary: "#0f766e" },
+        },
+      }),
+      runCommand: async (command) => ({
+        command,
+        exitCode: 0,
+        output: "ok",
+        success: true,
+      }),
+    });
+
+    const report = await verifier.verify({
+      changedFiles: ["styles/nocode-tokens.css"],
+      packageChanged: false,
+      previewUrl: "http://localhost:3000",
+      run,
+    });
+
+    expect(report.status).toBe("failed");
+    expect(report.checks.find((check) => check.id === "design-tokens"))
+      .toMatchObject({
+        status: "failed",
+        summary: "1 controlled CSS design token(s) differ from SiteSpec designSystem.",
+      });
+  });
+
+  it("passes when controlled CSS tokens match SiteSpec designSystem", async () => {
+    const run = createRun("Change the theme color", "full_site");
+    const verifier = new AgentVerifier({
+      httpProbe: async () => ({
+        ok: true,
+        status: 200,
+        summary: "ok",
+      }),
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+        "styles/nocode-tokens.css": [
+          "/* nocode-builder-design-tokens:start */",
+          ":root {",
+          "  --ncb-colors-primary: #0f766e;",
+          "}",
+          "/* nocode-builder-design-tokens:end */",
+        ].join("\n"),
+      }),
+      readSiteSpec: async () => ({
+        ...createSiteSpec(),
+        designSystem: {
+          ...createSiteSpec().designSystem,
+          colors: { primary: "#0f766e" },
+        },
+      }),
+      runCommand: async (command) => ({
+        command,
+        exitCode: 0,
+        output: "ok",
+        success: true,
+      }),
+    });
+
+    const report = await verifier.verify({
+      changedFiles: ["styles/nocode-tokens.css"],
+      packageChanged: false,
+      previewUrl: "http://localhost:3000",
+      run,
+    });
+
+    expect(report.status).toBe("passed");
+    expect(report.checks.find((check) => check.id === "design-tokens"))
+      .toMatchObject({
+        status: "passed",
+        summary: "1 controlled CSS design token(s) match SiteSpec designSystem.",
+      });
+  });
+
   it("passes approved dependency changes after comparing baseline package.json", async () => {
     const run = createRun("Explain dependency changes", "answer");
     const verifier = new AgentVerifier({
@@ -612,6 +795,72 @@ function createRun(objective: string, taskType: "answer" | "full_site") {
     projectId: "project-1",
     runId: `run-${taskType}`,
   });
+}
+
+function createScopedRun(scope: { componentIds?: string[]; pages?: string[] }) {
+  const contract = compileTaskContract({
+    objective: "Change selected SiteSpec node",
+    taskType: "component_edit",
+  });
+
+  return new RunStateMachine().createRun({
+    contract: {
+      ...contract,
+      scope: {
+        ...contract.scope,
+        ...scope,
+      },
+    },
+    conversationId: "conversation-1",
+    projectId: "project-1",
+    runId: "run-scoped",
+  });
+}
+
+function createSiteSpec(): SiteSpec {
+  return {
+    designSystem: {
+      colors: {},
+      radii: {},
+      spacing: {},
+      typography: {},
+    },
+    pages: [
+      {
+        id: "home",
+        nodes: [
+          {
+            id: "hero",
+            source: { path: "components/Hero.tsx" },
+            type: "section",
+            children: [
+              {
+                id: "hero.cta",
+                source: { path: "components/Hero.tsx" },
+                type: "button",
+              },
+            ],
+          },
+        ],
+        route: "/",
+        title: "Home",
+      },
+    ],
+    product: {
+      description: "",
+      language: "en",
+      name: "Project",
+    },
+    projectId: "project-1",
+    reusableComponents: [
+      {
+        id: "hero.cta",
+        name: "Hero CTA",
+        source: { path: "components/Hero.tsx" },
+      },
+    ],
+    version: 1,
+  };
 }
 
 function createReadFile(files: Record<string, string>) {

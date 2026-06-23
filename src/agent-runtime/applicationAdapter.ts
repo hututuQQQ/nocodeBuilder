@@ -581,6 +581,7 @@ async function verifyRunPort({
       }
     },
     readFile: (path) => projectApi.readFile(project.id, path),
+    readSiteSpec: () => agentRuntimeApi.readSiteSpec(project.id),
     recordArtifact: async ({ content, relativePath, runId }) => {
       const artifact = await agentRuntimeApi.writeArtifact(
         project.id,
