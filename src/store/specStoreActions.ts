@@ -504,6 +504,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
       const resetBase = {
         ...spec,
         currentRevisionId: resetRevision.id,
+        finalVerification: undefined,
         failureMessage: undefined,
         revisions: spec.revisions.map((item) =>
           item.id === resetRevision.id ? resetRevision : item,

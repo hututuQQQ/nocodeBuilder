@@ -799,6 +799,45 @@ describe("spec store actions", () => {
     expect(store.get().runProjectCommand).not.toHaveBeenCalled();
   });
 
+  it("clears stale final verification state when retrying a failed Spec task", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          error: "Verification report for AgentRun run-1 did not pass.",
+          runId: "run-1",
+          status: "failed",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      failureMessage: "Task verification reports are not all passing: task-1.",
+      finalVerification: {
+        checkedAt: "2026-01-01T00:03:00.000Z",
+        command: "task verification reports",
+        output: "Task verification reports are not all passing: task-1.",
+        success: false,
+      },
+      revisions: [revision],
+      status: "blocked",
+    });
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.retrySpecTask("task-1");
+
+    const resetSpec = fake.saveSpec.mock.calls[0][1] as DevelopmentSpec;
+    expect(resetSpec.status).toBe("building");
+    expect(resetSpec.failureMessage).toBeUndefined();
+    expect(resetSpec.finalVerification).toBeUndefined();
+    expect(resetSpec.revisions[0].tasks[0]).toMatchObject({
+      runId: undefined,
+      status: "pending",
+    });
+  });
+
   it("does not retry verification without a failed final verification marker", async () => {
     const revision = createExecutableRevision({
       tasks: [
