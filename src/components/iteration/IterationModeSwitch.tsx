@@ -1,6 +1,7 @@
 import { FormEvent, useState } from "react";
 import { FileText, Loader2, MessageSquare, X } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
+import { getIterationModeSwitchControlState } from "./iterationModeSwitchState";
 
 export function IterationModeSwitch() {
   const [dialog, setDialog] = useState<"to-spec" | "to-chat" | null>(null);
@@ -20,6 +21,7 @@ export function IterationModeSwitch() {
   const switchCurrentIterationToSpec = useAppStore(
     (state) => state.switchCurrentIterationToSpec,
   );
+  const switchingExecutingSpec = isExecutingSpec(currentSpec);
 
   if (!currentConversation) {
     return null;
@@ -34,12 +36,17 @@ export function IterationModeSwitch() {
     );
   }
 
-  const busy =
-    isGeneratingSpec ||
-    isRevisingSpec ||
-    isExecutingSpecAction ||
-    isVerifyingSpec ||
-    isSwitchingIterationMode;
+  const controlState = getIterationModeSwitchControlState({
+    currentMode: currentConversation.mode,
+    flags: {
+      isExecutingSpec: isExecutingSpecAction,
+      isGeneratingSpec,
+      isRevisingSpec,
+      isSwitchingIterationMode,
+      isVerifyingSpec,
+    },
+    specStatus: currentSpec?.status ?? null,
+  });
 
   async function submitSwitchToSpec(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -67,7 +74,7 @@ export function IterationModeSwitch() {
               ? "bg-teal-400/15 text-teal-100"
               : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200"
           }`}
-          disabled={busy || currentConversation.mode === "chat"}
+          disabled={controlState.chatButtonDisabled}
           onClick={() => setDialog("to-chat")}
           type="button"
         >
@@ -80,11 +87,11 @@ export function IterationModeSwitch() {
               ? "bg-blue-400/15 text-blue-100"
               : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200"
           }`}
-          disabled={busy || currentConversation.mode === "spec"}
+          disabled={controlState.specButtonDisabled}
           onClick={() => setDialog("to-spec")}
           type="button"
         >
-          {busy && currentConversation.mode === "chat" ? (
+          {controlState.anyBusy && currentConversation.mode === "chat" ? (
             <Loader2 size={13} className="animate-spin" aria-hidden="true" />
           ) : (
             <FileText size={13} aria-hidden="true" />
@@ -125,10 +132,10 @@ export function IterationModeSwitch() {
               </button>
               <button
                 className="flex h-9 items-center gap-2 rounded-md border border-blue-400/30 bg-blue-400/10 px-3 text-sm font-medium text-blue-100 transition hover:border-blue-300/60 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
-                disabled={!brief.trim() || busy}
+                disabled={!brief.trim() || controlState.generateSpecDisabled}
                 type="submit"
               >
-                {busy ? (
+                {controlState.anyBusy ? (
                   <Loader2 size={15} className="animate-spin" aria-hidden="true" />
                 ) : (
                   <FileText size={15} aria-hidden="true" />
@@ -144,10 +151,10 @@ export function IterationModeSwitch() {
         <div className="fixed inset-0 z-30 grid place-items-center bg-black/60 px-4">
           <div className="w-full max-w-[420px] rounded-md border border-zinc-800 bg-zinc-950 p-4 shadow-2xl">
             <DialogTitle onClose={() => setDialog(null)}>
-              {isExecutingSpec(currentSpec) ? "Cancel Spec and switch to Chat" : "Switch to Chat"}
+              {switchingExecutingSpec ? "Cancel Spec and switch to Chat" : "Switch to Chat"}
             </DialogTitle>
             <p className="mt-2 text-xs leading-5 text-zinc-500">
-              {isExecutingSpec(currentSpec)
+              {switchingExecutingSpec
                 ? "The current AgentRun will be cancelled. Files already written will not be rolled back."
                 : "The current unexecuted Spec will be cancelled and kept in history."}
             </p>
@@ -161,16 +168,16 @@ export function IterationModeSwitch() {
               </button>
               <button
                 className="flex h-9 items-center gap-2 rounded-md border border-teal-400/30 bg-teal-400/10 px-3 text-sm font-medium text-teal-100 transition hover:border-teal-300/60 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
-                disabled={busy}
-                onClick={() => void submitSwitchToChat(isExecutingSpec(currentSpec))}
+                disabled={controlState.switchToChatDisabled}
+                onClick={() => void submitSwitchToChat(switchingExecutingSpec)}
                 type="button"
               >
-                {busy ? (
+                {controlState.switchToChatDisabled ? (
                   <Loader2 size={15} className="animate-spin" aria-hidden="true" />
                 ) : (
                   <MessageSquare size={15} aria-hidden="true" />
                 )}
-                Switch to Chat
+                {switchingExecutingSpec ? "Cancel execution and switch" : "Switch to Chat"}
               </button>
             </div>
           </div>
