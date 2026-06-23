@@ -95,6 +95,10 @@ pub fn read_project_conversation(
     conversation_commands::read_project_conversation(project_id, conversation_id)
 }
 
+pub(crate) fn project_contains_spec_id(project_id: &str, spec_id: &str) -> Result<bool, String> {
+    conversation_commands::project_contains_spec_id(project_id, spec_id)
+}
+
 #[tauri::command]
 pub fn save_project_conversation(
     project_id: String,

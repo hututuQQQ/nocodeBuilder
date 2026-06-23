@@ -12,6 +12,58 @@ mod credentials;
 mod projects;
 mod spec_storage;
 
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::{
+        ffi::OsString,
+        fs,
+        path::PathBuf,
+        sync::{Mutex, MutexGuard, OnceLock},
+    };
+
+    pub(crate) fn with_temp_home(prefix: &str, run: impl FnOnce()) {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock_guard = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_home = std::env::var_os("HOME");
+        let root = std::env::temp_dir().join(format!(
+            "{prefix}-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+
+        fs::create_dir_all(&root).expect("create temp home");
+        std::env::set_var("HOME", &root);
+
+        let _temp_home = TempHomeGuard {
+            old_home,
+            root,
+            _lock_guard: lock_guard,
+        };
+
+        run();
+    }
+
+    struct TempHomeGuard {
+        old_home: Option<OsString>,
+        root: PathBuf,
+        _lock_guard: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for TempHomeGuard {
+        fn drop(&mut self) {
+            if let Some(home) = &self.old_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LlmChatCompletionRequest {

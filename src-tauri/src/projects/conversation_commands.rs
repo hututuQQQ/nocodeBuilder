@@ -114,6 +114,16 @@ pub fn read_project_conversation(
     Ok(conversation)
 }
 
+pub(crate) fn project_contains_spec_id(project_id: &str, spec_id: &str) -> Result<bool, String> {
+    validate_spec_id(spec_id)?;
+    let project_dir = resolve_project_dir(project_id)?;
+    let conversations = read_project_conversation_files(&project_dir, project_id)?;
+
+    Ok(conversations
+        .iter()
+        .any(|conversation| conversation.spec_ids.iter().any(|item| item == spec_id)))
+}
+
 pub fn save_project_conversation(
     project_id: String,
     mut conversation: ProjectConversation,
@@ -709,7 +719,6 @@ fn conversation_file_path(project_dir: &Path, conversation_id: &str) -> PathBuf 
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::sync::{Mutex, OnceLock};
 
     #[test]
     fn initial_build_requires_spec_mode_and_active_spec() {
@@ -1033,25 +1042,6 @@ mod tests {
     }
 
     fn with_temp_home(run: impl FnOnce()) {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let old_home = std::env::var_os("HOME");
-        let root = std::env::temp_dir().join(format!(
-            "conversation-command-test-{}",
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        ));
-
-        std::fs::create_dir_all(&root).expect("create temp home");
-        std::env::set_var("HOME", &root);
-
-        run();
-
-        if let Some(home) = old_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
-
-        let _ = std::fs::remove_dir_all(root);
+        crate::test_support::with_temp_home("conversation-command-test", run);
     }
 }

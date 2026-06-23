@@ -58,14 +58,8 @@ pub fn delete_development_spec(project_id: String, spec_id: String) -> Result<()
     };
 
     validate_spec_identity(&project_id, &spec)?;
-    let conversation_id = read_required_string(&spec, "conversationId")?.to_string();
-
-    if let Ok(conversation) =
-        projects::read_project_conversation(project_id.clone(), conversation_id)
-    {
-        if conversation.spec_ids.iter().any(|item| item == &spec_id) {
-            return Err("spec: attached conversation specs cannot be deleted".to_string());
-        }
+    if projects::project_contains_spec_id(&project_id, &spec_id)? {
+        return Err("spec: attached conversation specs cannot be deleted".to_string());
     }
 
     let path = spec_file_path(&project_dir, &spec_id)?;
@@ -424,7 +418,6 @@ fn normalize_task_plan(task: &Value) -> Result<Value, String> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::sync::{Mutex, OnceLock};
 
     #[test]
     fn read_spec_value_rejects_file_identity_mismatch() {
@@ -518,6 +511,58 @@ mod tests {
                 fs::read_to_string(&path).expect("read preserved file"),
                 "{not valid json"
             );
+        });
+    }
+
+    #[test]
+    fn delete_rejects_spec_referenced_by_any_conversation() {
+        with_temp_home(|| {
+            let project = crate::projects::create_project("Spec Delete Safety Test".to_string())
+                .expect("create project");
+            let spec_id = "spec-1".to_string();
+            let spec = json!({
+                "id": spec_id,
+                "projectId": project.id,
+                "conversationId": "conv-missing",
+                "kind": "feature",
+                "status": "review",
+                "currentRevisionId": "rev-1",
+                "revisions": [],
+                "createdAt": "2026-01-01T00:00:00Z",
+                "updatedAt": "2026-01-01T00:00:00Z"
+            });
+
+            create_development_spec(project.id.clone(), spec).expect("create spec");
+            let project_dir = projects::resolve_project_dir(&project.id).expect("project dir");
+            let conversations_dir = project_dir.join(".aibuilder").join("conversations");
+            fs::create_dir_all(&conversations_dir).expect("create conversations dir");
+            fs::write(
+                conversations_dir.join("conv-attached.json"),
+                serde_json::to_string_pretty(&json!({
+                    "id": "conv-attached",
+                    "projectId": project.id,
+                    "title": "Attached Spec history",
+                    "kind": "iteration",
+                    "mode": "chat",
+                    "activeSpecId": null,
+                    "specIds": [spec_id.clone()],
+                    "modeChangedAt": "2026-01-01T00:00:00Z",
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": "2026-01-01T00:00:00Z",
+                    "lastMessageAt": "2026-01-01T00:00:00Z",
+                    "archivedAt": null,
+                    "messages": []
+                }))
+                .expect("serialize conversation"),
+            )
+            .expect("write conversation");
+
+            let error = delete_development_spec(project.id.clone(), spec_id.clone())
+                .expect_err("attached spec must not be deleted");
+            let path = spec_file_path(&project_dir, &spec_id).expect("spec path");
+
+            assert!(error.contains("attached conversation specs cannot be deleted"));
+            assert!(path.exists());
         });
     }
 
@@ -780,20 +825,6 @@ mod tests {
     }
 
     fn with_temp_home(run: impl FnOnce()) {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let old_home = std::env::var_os("HOME");
-        let root = create_temp_root();
-
-        std::env::set_var("HOME", &root);
-        run();
-
-        if let Some(home) = old_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
-
-        let _ = fs::remove_dir_all(root);
+        crate::test_support::with_temp_home("spec-storage-home-test", run);
     }
 }
