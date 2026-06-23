@@ -51,6 +51,7 @@ export function SpecPanel({
   const currentSpec = useAppStore((state) => state.currentSpec);
   const historicalSpecs = useAppStore((state) => state.historicalSpecs);
   const isLoadingSpec = useAppStore((state) => state.isLoadingSpec);
+  const isGeneratingSpec = useAppStore((state) => state.isGeneratingSpec);
   const isRevisingSpec = useAppStore((state) => state.isRevisingSpec);
   const isExecutingSpec = useAppStore((state) => state.isExecutingSpec);
   const isSwitchingIterationMode = useAppStore(
@@ -74,6 +75,7 @@ export function SpecPanel({
   const revision = currentSpec ? safeCurrentRevision(currentSpec) : null;
   const busy =
     isLoadingSpec ||
+    isGeneratingSpec ||
     isRevisingSpec ||
     isExecutingSpec ||
     isVerifyingSpec ||

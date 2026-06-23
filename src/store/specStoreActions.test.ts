@@ -193,6 +193,27 @@ describe("spec store actions", () => {
     expect(store.get().projectError).toBe("model unavailable");
   });
 
+  it("does not create a Feature Spec iteration while a Spec operation is busy", async () => {
+    const store = createStore({
+      isRevisingSpec: true,
+    });
+    const actions = createSpecActions(store as never);
+
+    const conversation = await actions.createFeatureSpecIteration(
+      "project-1",
+      "Checkout copy",
+      "Improve checkout copy",
+    );
+
+    expect(conversation).toBeNull();
+    expect(fake.requestFeatureSpec).not.toHaveBeenCalled();
+    expect(fake.createSpec).not.toHaveBeenCalled();
+    expect(fake.createProjectConversation).not.toHaveBeenCalled();
+    expect(store.get().projectError).toBe(
+      "Wait for the current Spec operation to finish before creating a new iteration.",
+    );
+  });
+
   it("deletes the unattached spec when conversation creation fails", async () => {
     fake.createProjectConversation.mockRejectedValue(new Error("host gate rejected"));
     const store = createStore();
@@ -1111,6 +1132,33 @@ describe("spec store actions", () => {
 
     expect(fake.saveSpec).not.toHaveBeenCalled();
     expect(fake.runSpecTaskRuntime).not.toHaveBeenCalled();
+    expect(store.get().currentSpec?.status).toBe("review");
+  });
+
+  it("does not request another revision while the revision action is busy", async () => {
+    const revision = createExecutableRevision();
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "review",
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: spec.id,
+        conversationId: spec.conversationId,
+        mode: "spec",
+        specIds: [spec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: spec,
+      isRevisingSpec: true,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.reviseCurrentSpec("Tighten the requirements");
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(fake.requestSpecRevision).not.toHaveBeenCalled();
     expect(store.get().currentSpec?.status).toBe("review");
   });
 

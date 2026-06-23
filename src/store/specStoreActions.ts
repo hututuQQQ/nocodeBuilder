@@ -240,6 +240,14 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         return null;
       }
 
+      if (isSpecWorkflowBusy(get()) || get().isCreatingConversation) {
+        set({
+          projectError:
+            "Wait for the current Spec operation to finish before creating a new iteration.",
+        });
+        return null;
+      }
+
       const config = await keyStore.getAiProviderConfig();
 
       if (!config) {
@@ -355,6 +363,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         conversation.mode !== "spec" ||
         conversation.activeSpecId !== spec.id ||
         spec.status !== "review" ||
+        get().isRevisingSpec ||
         !message
       ) {
         return;
@@ -538,6 +547,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         conversation.mode !== "chat" ||
         !message ||
         get().isSwitchingIterationMode ||
+        isSpecWorkflowBusy(get()) ||
         hasActiveRun(get())
       ) {
         return;
@@ -1490,6 +1500,16 @@ function upsertSpec(specs: DevelopmentSpec[], spec: DevelopmentSpec) {
 function hasActiveRun(state: AppState) {
   const run = state.currentAgentRun;
   return Boolean(run && !isTerminalRunStatus(run.status));
+}
+
+function isSpecWorkflowBusy(state: AppState) {
+  return Boolean(
+    state.isGeneratingSpec ||
+      state.isRevisingSpec ||
+      state.isExecutingSpec ||
+      state.isVerifyingSpec ||
+      state.isSwitchingIterationMode,
+  );
 }
 
 function isRunForSpec(

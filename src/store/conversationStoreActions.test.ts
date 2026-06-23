@@ -75,6 +75,30 @@ describe("conversation store actions", () => {
     expect(store.get().chatMessages).toEqual(conversation.messages);
     expect(store.get().loadCurrentSpec).toHaveBeenCalledTimes(1);
   });
+
+  it("does not create a new iteration while a Spec operation is busy", async () => {
+    const store = createStore({
+      isRevisingSpec: true,
+    });
+    const actions = createConversationActions(store as never);
+
+    const conversation = await actions.createConversation("project-1", {
+      kind: "iteration",
+      mode: "chat",
+      title: "Follow-up",
+    });
+
+    expect(conversation).toBeNull();
+    expect(fake.createProjectConversation).not.toHaveBeenCalled();
+    expect(store.get().projectError).toBe(
+      "Wait for the current Spec operation to finish before creating a new iteration.",
+    );
+    expect(store.get().terminalLogs).toEqual(
+      expect.arrayContaining([
+        "[conversation] New iteration blocked while Spec operation is in progress.",
+      ]),
+    );
+  });
 });
 
 function createStore(patch: Partial<StoreState> = {}) {
@@ -93,6 +117,11 @@ function createStore(patch: Partial<StoreState> = {}) {
     },
     currentSpec: null,
     historicalSpecs: [],
+    isExecutingSpec: false,
+    isGeneratingSpec: false,
+    isRevisingSpec: false,
+    isSwitchingIterationMode: false,
+    isVerifyingSpec: false,
     isLoadingConversations: false,
     loadCurrentSpec: vi.fn(async () => undefined),
     projectError: null,
@@ -181,6 +210,11 @@ type StoreState = {
   } | null;
   currentSpec: unknown | null;
   historicalSpecs: unknown[];
+  isExecutingSpec: boolean;
+  isGeneratingSpec: boolean;
+  isRevisingSpec: boolean;
+  isSwitchingIterationMode: boolean;
+  isVerifyingSpec: boolean;
   isLoadingConversations: boolean;
   loadCurrentSpec: ReturnType<typeof vi.fn>;
   projectError: string | null;

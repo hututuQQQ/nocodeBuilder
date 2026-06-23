@@ -88,6 +88,20 @@ export function createConversationActions({
         return null;
       }
 
+      if (isSpecWorkflowBusy(get())) {
+        const message =
+          "Wait for the current Spec operation to finish before creating a new iteration.";
+
+        set((state) => ({
+          projectError: message,
+          terminalLogs: appendLogs(state.terminalLogs, [
+            "[conversation] New iteration blocked while Spec operation is in progress.",
+          ]),
+        }));
+
+        return null;
+      }
+
       set({ isCreatingConversation: true, projectError: null });
 
       try {
@@ -303,6 +317,16 @@ export function selectConversationList(
 ) {
   return summaries.filter((summary) =>
     showArchived ? Boolean(summary.archivedAt) : !summary.archivedAt,
+  );
+}
+
+function isSpecWorkflowBusy(state: AppState) {
+  return Boolean(
+    state.isGeneratingSpec ||
+      state.isRevisingSpec ||
+      state.isExecutingSpec ||
+      state.isVerifyingSpec ||
+      state.isSwitchingIterationMode,
   );
 }
 
