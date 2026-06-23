@@ -946,6 +946,92 @@ mod tests {
         });
     }
 
+    #[test]
+    fn switch_mode_rejects_mismatched_spec_file_identity() {
+        with_temp_home(|| {
+            let project = crate::projects::project_commands::create_project(
+                "Spec File Identity Test".to_string(),
+            )
+            .expect("create project");
+            let initial_conversation_id = "conv-initial".to_string();
+            let initial_spec_id = "spec-initial".to_string();
+
+            crate::spec_storage::create_development_spec(
+                project.id.clone(),
+                json!({
+                    "id": initial_spec_id,
+                    "projectId": project.id,
+                    "conversationId": initial_conversation_id,
+                    "kind": "initial_build",
+                    "status": "completed",
+                    "currentRevisionId": "rev-1",
+                    "revisions": [],
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": "2026-01-01T00:00:00Z"
+                }),
+            )
+            .expect("create completed initial spec");
+            create_project_conversation(
+                project.id.clone(),
+                CreateProjectConversationInput {
+                    active_spec_id: Some("spec-initial".to_string()),
+                    conversation_id: Some(initial_conversation_id),
+                    kind: "initial_build".to_string(),
+                    mode: "spec".to_string(),
+                    spec_ids: Some(vec!["spec-initial".to_string()]),
+                    title: Some("Initial build".to_string()),
+                },
+            )
+            .expect("create initial conversation");
+
+            let conversation = create_project_conversation(
+                project.id.clone(),
+                CreateProjectConversationInput {
+                    active_spec_id: None,
+                    conversation_id: Some("conv-target".to_string()),
+                    kind: "iteration".to_string(),
+                    mode: "chat".to_string(),
+                    spec_ids: None,
+                    title: Some("Target".to_string()),
+                },
+            )
+            .expect("create target iteration");
+
+            let project_dir = resolve_project_dir(&project.id).expect("resolve project dir");
+            let specs_dir = project_dir.join(METADATA_DIR).join("specs");
+            fs::create_dir_all(&specs_dir).expect("create specs dir");
+            fs::write(
+                specs_dir.join("spec-active.json"),
+                serde_json::to_string_pretty(&json!({
+                    "id": "spec-other",
+                    "projectId": project.id,
+                    "conversationId": conversation.id,
+                    "kind": "feature",
+                    "status": "review",
+                    "currentRevisionId": "rev-1",
+                    "revisions": [],
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": "2026-01-01T00:00:00Z"
+                }))
+                .expect("serialize mismatched spec"),
+            )
+            .expect("write mismatched spec file");
+
+            let error = switch_project_conversation_mode(
+                project.id.clone(),
+                SwitchProjectConversationModeInput {
+                    active_spec_id: Some("spec-active".to_string()),
+                    conversation_id: conversation.id,
+                    spec_ids: vec!["spec-active".to_string()],
+                    target_mode: "spec".to_string(),
+                },
+            )
+            .expect_err("mismatched spec file identity must be rejected");
+
+            assert!(error.contains("spec file id does not match requested spec id"));
+        });
+    }
+
     fn with_temp_home(run: impl FnOnce()) {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let _guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();

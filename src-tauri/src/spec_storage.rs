@@ -110,6 +110,16 @@ fn validate_spec_identity(project_id: &str, spec: &Value) -> Result<(), String> 
     Ok(())
 }
 
+fn validate_spec_file_identity(expected_spec_id: &str, spec: &Value) -> Result<(), String> {
+    let actual_spec_id = read_required_string(spec, "id")?;
+
+    if actual_spec_id != expected_spec_id {
+        return Err("spec: spec file id does not match requested spec id".to_string());
+    }
+
+    Ok(())
+}
+
 pub(crate) fn read_development_spec_status(
     project_id: &str,
     spec_id: &str,
@@ -160,8 +170,11 @@ fn read_spec_value(project_dir: &Path, spec_id: &str) -> Result<Value, String> {
         )
     })?;
 
-    serde_json::from_str::<Value>(&content)
-        .map_err(|error| format!("spec: failed to parse spec JSON: {error}"))
+    let spec = serde_json::from_str::<Value>(&content)
+        .map_err(|error| format!("spec: failed to parse spec JSON: {error}"))?;
+    validate_spec_file_identity(spec_id, &spec)?;
+
+    Ok(spec)
 }
 
 fn write_spec_value(project_dir: &Path, spec_id: &str, spec: &Value) -> Result<(), String> {
@@ -409,6 +422,32 @@ fn normalize_task_plan(task: &Value) -> Result<Value, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn read_spec_value_rejects_file_identity_mismatch() {
+        let root = create_temp_root();
+        let dir = specs_dir(&root);
+        fs::create_dir_all(&dir).expect("create specs dir");
+        fs::write(
+            dir.join("spec-active.json"),
+            serde_json::to_string_pretty(&json!({
+                "id": "spec-other",
+                "projectId": "project-1",
+                "conversationId": "conv-1",
+                "kind": "feature",
+                "status": "review"
+            }))
+            .expect("serialize mismatched spec"),
+        )
+        .expect("write mismatched spec");
+
+        let error =
+            read_spec_value(&root, "spec-active").expect_err("mismatched spec id should fail");
+
+        assert!(error.contains("spec file id does not match requested spec id"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn approved_revision_plan_allows_runtime_task_updates() {
