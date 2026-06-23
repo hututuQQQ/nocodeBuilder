@@ -39,6 +39,23 @@ export function createChatActions({ get, set }: StoreAccess): ChatActions {
         return get().sendMessage(message);
       }
 
+      const activeRun = get().currentAgentRun;
+
+      if (activeRun && !isTerminalRun(activeRun)) {
+        const userMessage = createChatMessage("user", message);
+        const conversation = appendConversationMessage(store, userMessage);
+        void persistConversation(store, conversation);
+        await get().sendAgentSteering(message);
+
+        set((state) => ({
+          terminalLogs: appendLogs(state.terminalLogs, [
+            `[chat] Added message as steering for run ${activeRun.id}.`,
+          ]),
+        }));
+
+        return;
+      }
+
       if (
         get().isModifyingProject ||
         get().isGeneratingProject
@@ -70,4 +87,11 @@ export function createChatActions({ get, set }: StoreAccess): ChatActions {
       await modifyCurrentProject(store, message);
     },
   };
+}
+
+function isTerminalRun(run: AppState["currentAgentRun"]) {
+  return (
+    !run ||
+    ["completed", "failed", "cancelled", "budget_exceeded"].includes(run.status)
+  );
 }

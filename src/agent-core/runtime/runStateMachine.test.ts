@@ -13,7 +13,8 @@ describe("RunStateMachine", () => {
       runId: "run-1",
     });
     const started = machine.transition(run, { type: "start" }).run;
-    const completed = machine.transition(started, {
+    const verifying = machine.transition(started, { type: "enter_verifying" }).run;
+    const completed = machine.transition(verifying, {
       type: "verification_passed",
       report: report("passed"),
     }).run;
@@ -31,9 +32,19 @@ describe("RunStateMachine", () => {
       projectId: "project-1",
       runId: "run-1",
     });
+    const started = machine.transition(run, { type: "start" }).run;
 
     expect(() =>
-      machine.transition(run, {
+      machine.transition(started, {
+        type: "verification_passed",
+        report: report("passed"),
+      }),
+    ).toThrow(/Illegal run transition/);
+
+    const verifying = machine.transition(started, { type: "enter_verifying" }).run;
+
+    expect(() =>
+      machine.transition(verifying, {
         type: "verification_passed",
         report: report("failed"),
       }),
@@ -48,7 +59,9 @@ describe("RunStateMachine", () => {
       projectId: "project-1",
       runId: "run-1",
     });
-    const repairing = machine.transition(run, {
+    const started = machine.transition(run, { type: "start" }).run;
+    const verifying = machine.transition(started, { type: "enter_verifying" }).run;
+    const repairing = machine.transition(verifying, {
       type: "verification_failed",
       report: report("failed"),
     }).run;
@@ -65,7 +78,8 @@ describe("RunStateMachine", () => {
       projectId: "project-1",
       runId: "run-1",
     });
-    const pauseRequested = machine.transition(run, { type: "request_pause" }).run;
+    const started = machine.transition(run, { type: "start" }).run;
+    const pauseRequested = machine.transition(started, { type: "request_pause" }).run;
     const paused = machine.transition(pauseRequested, { type: "pause_at_boundary" }).run;
     const resumed = machine.transition(paused, { type: "resume" }).run;
     const cancelRequested = machine.transition(resumed, { type: "request_cancel" }).run;
@@ -74,6 +88,64 @@ describe("RunStateMachine", () => {
     expect(paused.status).toBe("paused");
     expect(resumed.status).toBe("planning");
     expect(cancelled.status).toBe("cancelled");
+  });
+
+  it("only resolves approval while waiting for approval", () => {
+    const machine = new RunStateMachine();
+    const run = machine.createRun({
+      contract: compileTaskContract({ objective: "Delete a file" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-1",
+    });
+    const started = machine.transition(run, { type: "start" }).run;
+
+    expect(() =>
+      machine.transition(started, {
+        type: "approval_granted",
+        approvalId: "approval-1",
+      }),
+    ).toThrow(/Illegal run transition/);
+
+    const waiting = machine.transition(started, { type: "enter_waiting_approval" }).run;
+    const resumed = machine.transition(waiting, {
+      type: "approval_granted",
+      approvalId: "approval-1",
+    });
+
+    expect(resumed.run.status).toBe("planning");
+    expect(resumed.event.type).toBe("approval.resolved");
+    expect(resumed.event.payload).toEqual({
+      approvalId: "approval-1",
+      decision: "approved",
+    });
+  });
+
+  it("emits budget_exceeded status and event when repair budget is exhausted", () => {
+    const machine = new RunStateMachine();
+    const run = machine.createRun({
+      contract: {
+        ...compileTaskContract({ objective: "Fix build" }),
+        budget: {
+          maxModelTurns: 1,
+          maxToolCalls: 1,
+          maxMutations: 1,
+          maxRepairCycles: 0,
+        },
+      },
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-1",
+    });
+    const started = machine.transition(run, { type: "start" }).run;
+    const verifying = machine.transition(started, { type: "enter_verifying" }).run;
+    const result = machine.transition(verifying, {
+      type: "verification_failed",
+      report: report("failed"),
+    });
+
+    expect(result.run.status).toBe("budget_exceeded");
+    expect(result.event.type).toBe("run.budget_exceeded");
   });
 });
 

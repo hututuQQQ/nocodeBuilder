@@ -6,7 +6,10 @@ import type { AppState } from "./appStore";
 import { appendLogs } from "./commandLogs";
 import type { StoreAccess } from "./storeAccess";
 
-type PreviewActions = Pick<AppState, "openPreviewInBrowser" | "refreshPreview">;
+type PreviewActions = Pick<
+  AppState,
+  "openPreviewInBrowser" | "recordPreviewDiagnostic" | "refreshPreview"
+>;
 
 export function createPreviewActions({ get, set }: StoreAccess): PreviewActions {
   return {
@@ -33,6 +36,28 @@ export function createPreviewActions({ get, set }: StoreAccess): PreviewActions 
 
     refreshPreview: () => {
       set((state) => ({ previewRefreshKey: state.previewRefreshKey + 1 }));
+    },
+
+    recordPreviewDiagnostic: (diagnostic) => {
+      set((state) => {
+        const runId = state.currentAgentRun?.id ?? null;
+        const record = {
+          ...diagnostic,
+          id: `preview-diagnostic-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          runId,
+          timestamp: new Date().toISOString(),
+        };
+
+        return {
+          previewDiagnostics: [...state.previewDiagnostics, record].slice(-100),
+          terminalLogs:
+            diagnostic.level === "error"
+              ? appendLogs(state.terminalLogs, [
+                  `[preview:${diagnostic.kind}] ${diagnostic.message}`,
+                ])
+              : state.terminalLogs,
+        };
+      });
     },
   };
 }

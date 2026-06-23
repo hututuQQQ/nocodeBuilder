@@ -1,8 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AgentApproval,
+  AgentApprovalDecision,
   AgentEvent,
   AgentEventType,
   AgentRun,
+  AgentRunCheckpoint,
   SiteSourceMap,
   SiteSpec,
   VerificationReport,
@@ -31,6 +34,19 @@ type VerificationReportRecord = {
 type AgentTransitionResultRecord = {
   run: AgentRun;
   event: AgentEventRecord;
+};
+
+type AgentArtifactRecord = {
+  id: string;
+  runId: string;
+  path: string;
+  hash: string;
+  sizeBytes: number;
+  createdAt: string;
+};
+
+export type AgentArtifactContent = AgentArtifactRecord & {
+  content: string;
 };
 
 export const agentRuntimeApi = {
@@ -82,6 +98,35 @@ export const agentRuntimeApi = {
         eventTimestamp: result.event.timestamp,
         eventPayload: result.event.payload,
         artifactIds: result.event.artifactIds,
+      },
+    });
+
+    return {
+      run: record.run,
+      event: mapEventRecord(record.event),
+    };
+  },
+
+  async recordProgress(
+    projectId: string,
+    previousRun: AgentRun,
+    nextRun: AgentRun,
+    event: Omit<AgentEvent, "id" | "sequence">,
+  ) {
+    const record = await invoke<AgentTransitionResultRecord>("record_agent_progress", {
+      projectId,
+      update: {
+        runId: nextRun.id,
+        expectedStateVersion: previousRun.stateVersion,
+        modelTurns: nextRun.modelTurns,
+        toolCalls: nextRun.toolCalls,
+        mutationCount: nextRun.mutationCount,
+        repairCycles: nextRun.repairCycles,
+        updatedAt: nextRun.updatedAt,
+        eventType: event.type,
+        eventTimestamp: event.timestamp,
+        eventPayload: event.payload,
+        artifactIds: event.artifactIds,
       },
     });
 
@@ -144,8 +189,68 @@ export const agentRuntimeApi = {
     return record?.report ?? null;
   },
 
+  createApproval(projectId: string, approval: AgentApproval) {
+    return invoke<AgentApproval>("create_agent_approval", {
+      projectId,
+      approval: {
+        id: approval.id,
+        runId: approval.runId,
+        toolCallId: approval.toolCallId,
+        toolName: approval.toolName,
+        normalizedArgsHash: approval.normalizedArgsHash,
+        targetResources: approval.targetResources,
+        exactSideEffect: approval.exactSideEffect,
+        createdAt: approval.createdAt,
+        expiresAt: approval.expiresAt,
+      },
+    });
+  },
+
+  listApprovals(projectId: string, runId: string) {
+    return invoke<AgentApproval[]>("list_agent_approvals", { projectId, runId });
+  },
+
+  getPendingApproval(projectId: string, runId: string) {
+    return invoke<AgentApproval | null>("get_pending_agent_approval", {
+      projectId,
+      runId,
+    });
+  },
+
+  resolveApproval(
+    projectId: string,
+    runId: string,
+    approvalId: string,
+    decision: AgentApprovalDecision,
+    resolvedAt = new Date().toISOString(),
+  ) {
+    return invoke<AgentApproval>("resolve_agent_approval", {
+      projectId,
+      resolution: {
+        runId,
+        approvalId,
+        decision,
+        resolvedAt,
+      },
+    });
+  },
+
+  saveCheckpoint(projectId: string, checkpoint: AgentRunCheckpoint) {
+    return invoke<AgentRunCheckpoint>("save_agent_checkpoint", {
+      projectId,
+      checkpoint,
+    });
+  },
+
+  getLatestCheckpoint(projectId: string, runId: string) {
+    return invoke<AgentRunCheckpoint | null>("get_latest_agent_checkpoint", {
+      projectId,
+      runId,
+    });
+  },
+
   writeArtifact(projectId: string, runId: string, relativePath: string, content: string) {
-    return invoke("write_agent_artifact", {
+    return invoke<AgentArtifactRecord>("write_agent_artifact", {
       projectId,
       artifact: {
         id: createId("artifact"),
@@ -153,6 +258,13 @@ export const agentRuntimeApi = {
         relativePath,
         content,
       },
+    });
+  },
+
+  readArtifact(projectId: string, artifactId: string) {
+    return invoke<AgentArtifactContent | null>("read_agent_artifact", {
+      projectId,
+      artifactId,
     });
   },
 

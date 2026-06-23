@@ -22,21 +22,24 @@ export function createEmptySiteSpec(projectId: string, projectName: string): Sit
 }
 
 export function buildSiteIndexFromFileTree({
+  fileContents = {},
   fileTree,
   projectId,
   projectName,
 }: {
+  fileContents?: Record<string, string>;
   fileTree: FileTree;
   projectId: string;
   projectName: string;
 }): { sourceMap: SiteSourceMap; siteSpec: SiteSpec } {
-  const pages = flattenFileTree(fileTree)
+  const files = flattenFileTree(fileTree);
+  const pages = files
     .filter((file) => isPageFile(file.path))
-    .map((file) => createPageSpec(file.path));
+    .map((file) => createPageSpec(file.path, fileContents[file.path]));
   const siteSpec: SiteSpec = {
     ...createEmptySiteSpec(projectId, projectName),
     pages,
-    reusableComponents: flattenFileTree(fileTree)
+    reusableComponents: files
       .filter((file) => file.path.startsWith("components/") && /\.tsx?$/.test(file.path))
       .map((file) => ({
         id: pathToNodeId(file.path),
@@ -96,14 +99,31 @@ export function validateUniqueSiteNodeIds(siteSpec: SiteSpec) {
   }
 }
 
+export function preserveSiteSpecMetadata(existing: SiteSpec | null, next: SiteSpec): SiteSpec {
+  if (!existing) {
+    return next;
+  }
+
+  return {
+    ...next,
+    designSystem: existing.designSystem,
+    product: existing.product,
+  };
+}
+
 export function flattenNodes(nodes: SiteNode[]): SiteNode[] {
   return nodes.flatMap((node) => [node, ...flattenNodes(node.children ?? [])]);
 }
 
-function createPageSpec(path: string): PageSpec {
+function createPageSpec(path: string, content?: string): PageSpec {
   const route = pagePathToRoute(path);
   const pageId = route === "/" ? "home" : route.replace(/[^\w]+/g, ".").replace(/^\.+/, "");
   const nodeId = `${pageId || "page"}.root`;
+  const childNodes = content === undefined
+    ? []
+    : extractDataNodesFromContent(path, content, nodeId, pageId || "page");
+  const lineCount = content ? content.split(/\r?\n/).length : undefined;
+  const rootLine = content ? findDataNodeLine(content, nodeId) : undefined;
 
   return {
     id: pageId || "page",
@@ -114,10 +134,96 @@ function createPageSpec(path: string): PageSpec {
         id: nodeId,
         type: "page",
         label: route,
-        source: { path },
+        source: { path, startLine: rootLine ?? 1, endLine: rootLine ?? lineCount },
+        children: childNodes,
       },
     ],
   };
+}
+
+function extractDataNodesFromContent(
+  path: string,
+  content: string,
+  parentId: string,
+  pageId: string,
+): SiteNode[] {
+  const nodes: SiteNode[] = [];
+  const dataAttributePattern =
+    /data-ncb-id\s*=\s*(?:"([^"]+)"|'([^']+)'|\{\s*"([^"]+)"\s*\}|\{\s*'([^']+)'\s*\}|\{\s*`([^`]+)`\s*\})/g;
+
+  for (const match of content.matchAll(dataAttributePattern)) {
+    const id = match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5];
+
+    if (!id) {
+      continue;
+    }
+
+    if (id === parentId) {
+      continue;
+    }
+
+    const line = lineNumberAt(content, match.index ?? 0);
+    const tagName = inferJsxTagName(content, match.index ?? 0);
+
+    const labelParts = id.split(".").filter(Boolean);
+
+    nodes.push({
+      id,
+      type: tagName ? tagNameToNodeType(tagName) : "element",
+      label: labelParts[labelParts.length - 1] ?? id,
+      parentId,
+      source: { path, startLine: line, endLine: line },
+      props: { tagName: tagName ?? "unknown" },
+    });
+  }
+
+  if (nodes.length > 0) {
+    return nodes;
+  }
+
+  return [
+    {
+      id: `${pageId}.legacy.custom`,
+      type: "legacy/custom",
+      label: "Legacy/custom content",
+      parentId,
+      source: { path, startLine: 1, endLine: content.split(/\r?\n/).length },
+      props: { reason: "No data-ncb-id attributes found." },
+    },
+  ];
+}
+
+function findDataNodeLine(content: string, nodeId: string) {
+  const dataAttributePattern =
+    /data-ncb-id\s*=\s*(?:"([^"]+)"|'([^']+)'|\{\s*"([^"]+)"\s*\}|\{\s*'([^']+)'\s*\}|\{\s*`([^`]+)`\s*\})/g;
+
+  for (const match of content.matchAll(dataAttributePattern)) {
+    const id = match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5];
+
+    if (id === nodeId) {
+      return lineNumberAt(content, match.index ?? 0);
+    }
+  }
+
+  return undefined;
+}
+
+function inferJsxTagName(content: string, attributeIndex: number) {
+  const prefix = content.slice(Math.max(0, attributeIndex - 240), attributeIndex);
+  const match = prefix.match(/<([A-Za-z][\w.]*)[^<>]*$/);
+  return match?.[1] ?? null;
+}
+
+function tagNameToNodeType(tagName: string) {
+  if (/^[A-Z]/.test(tagName)) {
+    return "component";
+  }
+
+  return tagName.toLowerCase();
+}
+
+function lineNumberAt(content: string, index: number) {
+  return content.slice(0, index).split(/\r?\n/).length;
 }
 
 function pagePathToRoute(path: string) {

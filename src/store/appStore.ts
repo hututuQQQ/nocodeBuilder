@@ -25,7 +25,13 @@ import { createDeploymentActions } from "./deploymentStoreActions";
 import { createPreviewActions } from "./previewStoreActions";
 import { createProjectActions } from "./projectStoreActions";
 import { createReviewActions } from "./reviewStoreActions";
-import type { AgentEvent, AgentRun, VerificationReport } from "../agent-core/types";
+import type {
+  AgentApproval,
+  AgentEvent,
+  AgentRun,
+  PreviewDiagnostic,
+  VerificationReport,
+} from "../agent-core/types";
 
 export type { ChatMessage } from "./chatMessages";
 export type { ChangeRecord, FileChangeSummary } from "./changeHistory";
@@ -38,6 +44,7 @@ export type AppState = {
   agentEvents: AgentEvent[];
   agentRuns: AgentRun[];
   commandRuns: CommandRun[];
+  currentAgentApproval: AgentApproval | null;
   currentAgentRun: AgentRun | null;
   currentProject: ProjectInfo | null;
   currentVerificationReport: VerificationReport | null;
@@ -55,6 +62,7 @@ export type AppState = {
   terminalLogs: string[];
   previewRefreshKey: number;
   previewUrl: string | null;
+  previewDiagnostics: PreviewDiagnostic[];
   lastDeploymentUrl: string | null;
   isInstallingDependencies: boolean;
   isLoadingProjects: boolean;
@@ -73,6 +81,7 @@ export type AppState = {
   showArchivedConversations: boolean;
   archiveConversation: (conversationId: string) => Promise<void>;
   archiveCurrentConversation: () => Promise<void>;
+  approveCurrentAgentApproval: () => Promise<void>;
   bootstrapProject: (projectId: string) => Promise<void>;
   cancelCurrentAgentRun: () => Promise<void>;
   clearSelectedSiteNode: () => void;
@@ -87,6 +96,7 @@ export type AppState = {
   deployCurrentProject: (
     options: VercelDeployOptions,
   ) => Promise<VercelDeploymentInfo | null>;
+  denyCurrentAgentApproval: () => Promise<void>;
   handleCommandOutput: (event: CommandOutputEvent) => void;
   handleCommandStatus: (event: CommandStatusEvent) => void;
   loadProjectConversations: (
@@ -100,6 +110,9 @@ export type AppState = {
   openPreviewInBrowser: (url?: string) => Promise<void>;
   readProjectFile: (path: string) => Promise<void>;
   refreshPreview: () => void;
+  recordPreviewDiagnostic: (
+    diagnostic: Omit<PreviewDiagnostic, "id" | "runId" | "timestamp">,
+  ) => void;
   acceptAllChanges: () => Promise<void>;
   acceptChangedFile: (path: string) => Promise<void>;
   persistProjectChangeHistory: (
@@ -141,6 +154,7 @@ const initialState = {
   agentEvents: [],
   agentRuns: [],
   commandRuns: [],
+  currentAgentApproval: null,
   currentAgentRun: null,
   currentProject: null,
   currentVerificationReport: null,
@@ -158,6 +172,7 @@ const initialState = {
   terminalLogs: [],
   previewRefreshKey: 0,
   previewUrl: null,
+  previewDiagnostics: [],
   lastDeploymentUrl: null,
   isInstallingDependencies: false,
   isLoadingProjects: false,
@@ -178,12 +193,14 @@ const initialState = {
   AppState,
   | "archiveConversation"
   | "archiveCurrentConversation"
+  | "approveCurrentAgentApproval"
   | "bootstrapProject"
   | "cancelCurrentAgentRun"
   | "clearSelectedSiteNode"
   | "createConversation"
   | "createProject"
   | "deployCurrentProject"
+  | "denyCurrentAgentApproval"
   | "handleCommandOutput"
   | "handleCommandStatus"
   | "loadProjectConversations"
@@ -194,6 +211,7 @@ const initialState = {
   | "openPreviewInBrowser"
   | "readProjectFile"
   | "refreshPreview"
+  | "recordPreviewDiagnostic"
   | "acceptAllChanges"
   | "acceptChangedFile"
   | "persistProjectChangeHistory"

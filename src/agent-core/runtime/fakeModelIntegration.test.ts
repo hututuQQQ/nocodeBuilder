@@ -92,6 +92,7 @@ class FakeRuntimeHarness {
   }
 
   verify(status: VerificationReport["status"]) {
+    this.transition(this.machine.transition(this.run, { type: "enter_verifying" }));
     this.report = {
       id: `report-${this.events.length}`,
       runId: this.run.id,

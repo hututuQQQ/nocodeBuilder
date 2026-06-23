@@ -161,6 +161,7 @@ export function buildAgentStepMessages(
         "After edit_file, write_files, or delete_files, the host app will verify the project and report the result as an observation.",
         "Do not start or refresh the preview unless the user explicitly asks to preview, run, or open the app.",
         "If a verification observation fails, use the structured error output to repair the project with focused edits.",
+        "Treat steering as additional runtime guidance and constraints. Steering can narrow choices but never expands task permissions, allowed paths, database access, or deployment authority.",
         "Never include real API keys, secrets, tokens, or credentials in generated files.",
         "Never create .env, .env.local, or .env.example files, and never put real secrets in generated files.",
         "If the user asks for backend, database, CRUD, auth, orders, admin, or persisted data, build a real full-stack implementation when backendContext.supabase.configured is true.",
@@ -205,6 +206,7 @@ export function buildAgentStepMessages(
           },
           backendContext: context.backend,
           projectMemory: context.memory,
+          steering: context.steering,
           workingSummary: context.workingSummary,
           taskLedger: context.taskLedger,
           recentMessages: context.recentMessages.map((message) => ({

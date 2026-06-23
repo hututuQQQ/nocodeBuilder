@@ -15,9 +15,19 @@ import { buildDynamicAgentContext } from "../agent/project/memory";
 import { AgentVerifier } from "../agent-core/verifier/verifier";
 import { compileTaskContract } from "../agent-core/contract/taskContract";
 import { RunStateMachine } from "../agent-core/runtime/runStateMachine";
-import type { AgentEventType, AgentRun, TaskType, VerificationReport } from "../agent-core/types";
+import type {
+  AgentEvent,
+  AgentEventType,
+  AgentRun,
+  AgentRunCheckpoint,
+  TaskType,
+  VerificationReport,
+} from "../agent-core/types";
 import { getCoreToolDefinition } from "../agent-core/tools/toolRegistry";
-import { PolicyEngine } from "../agent-core/policy/policyEngine";
+import {
+  PolicyEngine,
+  type PolicyDecision,
+} from "../agent-core/policy/policyEngine";
 import { keyStore } from "../services/keyStore";
 import {
   getProjectErrorMessage,
@@ -65,6 +75,16 @@ class RunStopped extends Error {
   }
 }
 
+type RuntimeRunState = ReturnType<typeof createAgentRunState>;
+
+type GenerationVerificationResult = {
+  changedFiles: string[];
+  completed: boolean;
+  packageChanged: boolean;
+  report: VerificationReport;
+  run: AgentRun;
+};
+
 export async function generateInitialProjectRuntime(
   store: StoreAccess,
   project: ProjectInfo,
@@ -109,10 +129,17 @@ export async function generateInitialProjectRuntime(
       signal: abortController.signal,
       userPrompt: projectPrompt,
     });
-    await appendRuntimeEvent(store, project.id, run.id, "model.completed", {
-      fileCount: response.files.length,
-      summary: response.summary,
-    });
+    run = await persistRunCounters(
+      store,
+      project.id,
+      run,
+      { modelTurns: run.modelTurns + 1 },
+      "model.completed",
+      {
+        fileCount: response.files.length,
+        summary: response.summary,
+      },
+    );
 
     await checkRunInterruption(store, project.id, run, stream);
     run = getCurrentRun(store, run.id) ?? run;
@@ -138,14 +165,17 @@ export async function generateInitialProjectRuntime(
       status: "succeeded",
     });
     await refreshSiteIndex(project, store.get().fileTree);
+    const changedFiles = new Set(changeRecord.files.map((file) => file.path));
+    const packageChanged = changeRecord.files.some((file) => file.path === "package.json");
     await appendRuntimeEvent(store, project.id, run.id, "tool.completed", {
-      changedFiles: changeRecord.files.map((file) => file.path),
+      changedFiles: Array.from(changedFiles),
       tool: "write_files",
     });
 
     const report = await verifyRun(store, project, run, stream, {
-      changedFiles: changeRecord.files.map((file) => file.path),
-      packageChanged: changeRecord.files.some((file) => file.path === "package.json"),
+      changedFiles: Array.from(changedFiles),
+      deletedFiles: [],
+      packageChanged,
       previewUrl: store.get().previewUrl,
     });
     run = getCurrentRun(store, run.id) ?? run;
@@ -166,18 +196,29 @@ export async function generateInitialProjectRuntime(
       return true;
     }
 
-    await commitTransition(
-      store,
-      project.id,
-      run,
-      stateMachine.transition(run, {
-        type: "fail",
-        reason: formatVerificationFailure(report),
-      }),
+    const observations: AgentObservation[] = [];
+    const repair = await prepareRepairFromVerificationFailure(store, project, run, stream, {
+      changedFiles,
+      deletedFiles: new Set(),
+      observations,
+      packageChanged,
+      reason: "initial-generation-repair-observation-recorded",
+      report,
+      repairFeedback: [...report.repairFeedback],
+      runState: createAgentRunState(),
+    });
+
+    if (!repair.canRepair) {
+      return false;
+    }
+
+    run = repair.run;
+    stream.completeWithTypewriter(
+      "Initial generation produced files, but verifier found issues. Continuing with a repair pass in the same run.",
     );
-    stream.failWithTypewriter(formatVerificationFailure(report));
     void persistCurrentConversation(store);
-    return false;
+    await modifyCurrentProjectRuntime(store, projectPrompt, { existingRun: run });
+    return getCurrentRun(store, run.id)?.status === "completed";
   } catch (error) {
     const message = getProjectErrorMessage(error);
 
@@ -207,7 +248,7 @@ export async function generateInitialProjectRuntime(
 export async function modifyCurrentProjectRuntime(
   store: StoreAccess,
   userRequest: string,
-  options: { existingRun?: AgentRun } = {},
+  options: { existingRun?: AgentRun; resumeObservation?: AgentObservation } = {},
 ) {
   const project = store.get().currentProject;
 
@@ -229,7 +270,10 @@ export async function modifyCurrentProjectRuntime(
   let buildVerified = false;
   let previewNeedsFinalRefresh = false;
   let changedFiles = new Set<string>();
+  let deletedFiles = new Set<string>();
   let packageChanged = false;
+  let latestReportId: string | undefined;
+  let repairFeedback: string[] = [];
 
   store.set((state) => ({
     isModifyingProject: true,
@@ -244,16 +288,50 @@ export async function modifyCurrentProjectRuntime(
       run = await createRuntimeRun(store, project, userRequest);
     } else {
       store.set({ currentAgentRun: run });
-      run = await commitTransition(
-        store,
-        project.id,
-        run,
-        stateMachine.transition(run, { type: "resume" }),
-      );
+      const checkpoint = await restoreRuntimeCheckpoint(store, project, run);
+
+      if (checkpoint) {
+        observations.push(...restoreCheckpointObservations(checkpoint));
+        await restoreCheckpointReadSnapshots(project, checkpoint, runState);
+        changedFiles = new Set(checkpoint.changedFiles);
+        deletedFiles = new Set(checkpoint.deletedFiles);
+        packageChanged = checkpoint.packageChanged;
+        runState.packageBaselineJson = checkpoint.packageBaselineJson ?? null;
+        latestReportId = checkpoint.latestReportId;
+        repairFeedback = [...checkpoint.repairFeedback];
+      }
+
+      if (options.resumeObservation) {
+        observations.push({
+          ...options.resumeObservation,
+          step: observations.length + 1,
+        });
+      }
+
+      if (run.status === "paused") {
+        run = await commitTransition(
+          store,
+          project.id,
+          run,
+          stateMachine.transition(run, { type: "resume" }),
+        );
+      }
     }
 
     abortController = createRunAbortController(run.id);
-    run = await commitTransition(store, project.id, run, stateMachine.transition(run, { type: "start" }));
+    if (run.status === "created") {
+      run = await commitTransition(store, project.id, run, stateMachine.transition(run, { type: "start" }));
+    }
+    await saveRuntimeCheckpoint(store, project, run, {
+      changedFiles,
+      deletedFiles,
+      latestReportId,
+      observations,
+      packageChanged,
+      reason: options.existingRun ? "run-resumed" : "run-started",
+      repairFeedback,
+      runState,
+    });
     const config = await keyStore.getAiProviderConfig();
 
     if (!config) {
@@ -275,7 +353,7 @@ export async function modifyCurrentProjectRuntime(
     const contextFilePaths = getContextFilePaths(fileTree);
 
     if (contextFilePaths.length === 0) {
-      const didGenerate = await generateInsideExistingRun(
+      const generationResult = await generateInsideExistingRun(
         store,
         project,
         userRequest,
@@ -283,17 +361,41 @@ export async function modifyCurrentProjectRuntime(
         stream,
         abortController.signal,
       );
-      return didGenerate;
+
+      run = generationResult.run;
+
+      if (generationResult.completed) {
+        return true;
+      }
+
+      changedFiles = new Set(generationResult.changedFiles);
+      packageChanged = generationResult.packageChanged;
+      latestReportId = generationResult.report.id;
+      repairFeedback = [...generationResult.report.repairFeedback];
+      const repair = await prepareRepairFromVerificationFailure(store, project, run, stream, {
+        changedFiles,
+        deletedFiles: new Set(),
+        observations,
+        packageChanged,
+        reason: "empty-project-generation-repair-observation-recorded",
+        report: generationResult.report,
+        repairFeedback,
+        runState,
+        statusLines,
+      });
+
+      if (!repair.canRepair) {
+        return false;
+      }
+
+      run = repair.run;
     }
 
-    for (
-      let stepIndex = 1;
-      stepIndex <= run.contract.budget.maxModelTurns;
-      stepIndex += 1
-    ) {
+    while (run.modelTurns < run.contract.budget.maxModelTurns) {
       await checkRunInterruption(store, project.id, run, stream);
       run = getCurrentRun(store, run.id) ?? run;
       ensureCurrentProject(store, project.id);
+      const stepIndex = run.modelTurns + 1;
       updateAgentStatus(stream, statusLines, `Planning step ${stepIndex}.`);
       const planningActivityId = stream.addActivity({
         detail: "Asking the model for the next project action.",
@@ -321,9 +423,23 @@ export async function modifyCurrentProjectRuntime(
           signal: abortController.signal,
           userRequest,
         });
-        run = withCounter(run, { modelTurns: run.modelTurns + 1 });
-        await appendRuntimeEvent(store, project.id, run.id, "model.completed", {
-          stepType: step.type,
+        run = await persistRunCounters(
+          store,
+          project.id,
+          run,
+          { modelTurns: run.modelTurns + 1 },
+          "model.completed",
+          { stepType: step.type },
+        );
+        await saveRuntimeCheckpoint(store, project, run, {
+          changedFiles,
+          deletedFiles,
+          latestReportId,
+          observations,
+          packageChanged,
+          reason: "model-completed",
+          repairFeedback,
+          runState,
         });
         stream.updateActivity(planningActivityId, {
           detail: formatAgentStepLabelForStatus(step),
@@ -374,10 +490,24 @@ export async function modifyCurrentProjectRuntime(
 
         const report = await verifyRun(store, project, run, stream, {
           changedFiles: Array.from(changedFiles),
+          deletedFiles: Array.from(deletedFiles),
           packageChanged,
+          packageBaselineJson: runState.packageBaselineJson,
           previewUrl: store.get().previewUrl,
         });
         run = getCurrentRun(store, run.id) ?? run;
+        latestReportId = report.id;
+        repairFeedback = [...report.repairFeedback];
+        await saveRuntimeCheckpoint(store, project, run, {
+          changedFiles,
+          deletedFiles,
+          latestReportId,
+          observations,
+          packageChanged,
+          reason: "verification-completed",
+          repairFeedback,
+          runState,
+        });
 
         if (report.status === "passed") {
           await commitTransition(
@@ -410,37 +540,73 @@ export async function modifyCurrentProjectRuntime(
           stateMachine.transition(run, { type: "verification_failed", report }),
         );
         observations.push(reportToObservation(report, observations.length + 1));
+        await saveRuntimeCheckpoint(store, project, run, {
+          changedFiles,
+          deletedFiles,
+          latestReportId,
+          observations,
+          packageChanged,
+          reason: "repair-observation-recorded",
+          repairFeedback,
+          runState,
+        });
         continue;
       }
 
-      const policyDecision = evaluateStepPolicy(run, step);
+      const approvedHashes = await loadApprovedApprovalHashes(project.id, run.id);
+      const policyDecision = evaluateStepPolicy(run, step, approvedHashes);
 
       if (!policyDecision.allowed) {
         await appendRuntimeEvent(store, project.id, run.id, "policy.denied", {
           reason: policyDecision.reason,
-          tool: step.type === "tool_calls" ? "tool_calls" : step.tool,
+          tool: policyDecision.toolName,
         });
         observations.push({
           content: policyDecision.reason,
           ok: false,
           step: observations.length + 1,
           summary: policyDecision.reason,
-          tool: step.type === "tool_calls" ? "tool_calls" : step.tool,
+          tool: policyDecision.toolName,
         });
         continue;
       }
 
       if (policyDecision.approvalRequired) {
+        const approvalCreatedAt = new Date().toISOString();
+        const approval = await agentRuntimeApi.createApproval(project.id, {
+          id: createRuntimeId("approval"),
+          runId: run.id,
+          toolCallId: createRuntimeId("tool-call"),
+          toolName: policyDecision.toolName,
+          normalizedArgsHash: policyDecision.approvalHash,
+          targetResources: collectTargetResources(policyDecision.args),
+          exactSideEffect: policyDecision.reason,
+          createdAt: approvalCreatedAt,
+          expiresAt: addMinutesIso(approvalCreatedAt, 30),
+        });
         await appendRuntimeEvent(store, project.id, run.id, "approval.requested", {
+          approvalId: approval.id,
           approvalHash: policyDecision.approvalHash,
           reason: policyDecision.reason,
+          tool: policyDecision.toolName,
         });
-        await commitTransition(
+        run = await commitTransition(
           store,
           project.id,
           run,
           stateMachine.transition(run, { type: "enter_waiting_approval" }),
         );
+        await saveRuntimeCheckpoint(store, project, run, {
+          changedFiles,
+          deletedFiles,
+          latestReportId,
+          observations,
+          packageChanged,
+          reason: "approval-requested",
+          repairFeedback,
+          runState,
+        });
+        store.set({ currentAgentApproval: approval });
         stream.failWithTypewriter(`Approval required before continuing: ${policyDecision.reason}`);
         void persistCurrentConversation(store);
         return;
@@ -475,7 +641,20 @@ export async function modifyCurrentProjectRuntime(
                   : undefined,
               ),
             ];
-      run = withCounter(run, { toolCalls: run.toolCalls + results.length });
+      run = await persistRunCounters(
+        store,
+        project.id,
+        run,
+        { toolCalls: run.toolCalls + results.length },
+        "checkpoint.created",
+        {
+          counters: {
+            toolCalls: run.toolCalls + results.length,
+          },
+          reason: "tool batch completed",
+          toolCallsDelta: results.length,
+        },
+      );
 
       for (const [resultIndex, result] of results.entries()) {
         observations.push(result.observation);
@@ -505,6 +684,7 @@ export async function modifyCurrentProjectRuntime(
           result.observation.ok ? "tool.completed" : "tool.failed",
           {
             changedFiles: result.changedFiles ?? [],
+            deletedFiles: result.deletedFiles ?? [],
             summary: result.observation.summary,
             tool: result.observation.tool,
           },
@@ -518,21 +698,48 @@ export async function modifyCurrentProjectRuntime(
         for (const path of result.changedFiles ?? []) {
           changedFiles.add(path);
         }
+        for (const path of result.deletedFiles ?? []) {
+          deletedFiles.add(path);
+        }
       }
+      packageChanged ||= stepChangedPackage;
+      await saveRuntimeCheckpoint(store, project, run, {
+        changedFiles,
+        deletedFiles,
+        latestReportId,
+        observations,
+        packageChanged,
+        reason: "tool-batch-completed",
+        repairFeedback,
+        runState,
+      });
 
       if (stepChangedFiles) {
         didChangeFiles = true;
-        packageChanged ||= stepChangedPackage;
         buildVerified = false;
         previewNeedsFinalRefresh = true;
         await refreshSiteIndex(project, store.get().fileTree);
 
         const report = await verifyRun(store, project, run, stream, {
           changedFiles: Array.from(changedFiles),
+          deletedFiles: Array.from(deletedFiles),
           packageChanged,
+          packageBaselineJson: runState.packageBaselineJson,
           previewUrl: store.get().previewUrl,
         });
         run = getCurrentRun(store, run.id) ?? run;
+        latestReportId = report.id;
+        repairFeedback = [...report.repairFeedback];
+        await saveRuntimeCheckpoint(store, project, run, {
+          changedFiles,
+          deletedFiles,
+          latestReportId,
+          observations,
+          packageChanged,
+          reason: "verification-completed",
+          repairFeedback,
+          runState,
+        });
 
         if (report.status === "passed") {
           buildVerified = true;
@@ -545,6 +752,16 @@ export async function modifyCurrentProjectRuntime(
             stateMachine.transition(run, { type: "verification_failed", report }),
           );
           observations.push(reportToObservation(report, observations.length + 1));
+          await saveRuntimeCheckpoint(store, project, run, {
+            changedFiles,
+            deletedFiles,
+            latestReportId,
+            observations,
+            packageChanged,
+            reason: "repair-observation-recorded",
+            repairFeedback,
+            runState,
+          });
           updateAgentStatus(
             stream,
             statusLines,
@@ -573,7 +790,17 @@ export async function modifyCurrentProjectRuntime(
       "",
       didChangeFiles ? "Some project files were changed." : "No project files were changed.",
     ].join("\n");
-    await failRunBestEffort(store, project.id, run, message);
+    run = getCurrentRun(store, run.id) ?? run;
+    await commitTransition(
+      store,
+      project.id,
+      run,
+      stateMachine.transition(run, {
+        type: "budget_exceeded",
+        budget: "maxModelTurns",
+        reason: message,
+      }),
+    );
     stream.failWithTypewriter(message);
     void persistCurrentConversation(store);
   } catch (error) {
@@ -607,13 +834,16 @@ async function generateInsideExistingRun(
   run: AgentRun,
   stream: AgentStreamController,
   signal: AbortSignal,
-) {
+): Promise<GenerationVerificationResult> {
   const config = await keyStore.getAiProviderConfig();
 
   if (!config) {
     throw new Error("Configure your AI provider first.");
   }
 
+  await appendRuntimeEvent(store, project.id, run.id, "model.started", {
+    taskType: run.contract.taskType,
+  });
   const backendContext = await buildProjectBackendContext(project.id, {
     includeSchema: hasBackendIntent(userRequest),
   });
@@ -625,29 +855,51 @@ async function generateInsideExistingRun(
     signal,
     userPrompt: userRequest,
   });
+  run = await persistRunCounters(
+    store,
+    project.id,
+    run,
+    { modelTurns: run.modelTurns + 1 },
+    "model.completed",
+    {
+      fileCount: response.files.length,
+      summary: response.summary,
+    },
+  );
+  run = await commitTransition(
+    store,
+    project.id,
+    run,
+    stateMachine.transition(run, { type: "enter_mutating", mutationDelta: 1 }),
+  );
   const files = addStableNodeIdsToGeneratedFiles(response.files);
   const changeRecord = await writeAgentFiles(store, project, files, response.summary);
   await refreshSiteIndex(project, store.get().fileTree);
+  const changedFiles = changeRecord.files.map((file) => file.path);
+  const packageChanged = changeRecord.files.some((file) => file.path === "package.json");
+  await appendRuntimeEvent(store, project.id, run.id, "tool.completed", {
+    changedFiles,
+    tool: "write_files",
+  });
   const report = await verifyRun(store, project, run, stream, {
-    changedFiles: changeRecord.files.map((file) => file.path),
-    packageChanged: changeRecord.files.some((file) => file.path === "package.json"),
+    changedFiles,
+    deletedFiles: [],
+    packageChanged,
     previewUrl: store.get().previewUrl,
   });
   run = getCurrentRun(store, run.id) ?? run;
 
   if (report.status !== "passed") {
-    await commitTransition(
-      store,
-      project.id,
+    return {
+      changedFiles,
+      completed: false,
+      packageChanged,
+      report,
       run,
-      stateMachine.transition(run, { type: "fail", reason: formatVerificationFailure(report) }),
-    );
-    stream.failWithTypewriter(formatVerificationFailure(report));
-    void persistCurrentConversation(store);
-    return false;
+    };
   }
 
-  await commitTransition(
+  run = await commitTransition(
     store,
     project.id,
     run,
@@ -655,7 +907,90 @@ async function generateInsideExistingRun(
   );
   stream.completeWithTypewriter(formatChangeRecordMessage(response.summary, changeRecord));
   void persistCurrentConversation(store);
-  return true;
+  return {
+    changedFiles,
+    completed: true,
+    packageChanged,
+    report,
+    run,
+  };
+}
+
+async function prepareRepairFromVerificationFailure(
+  store: StoreAccess,
+  project: ProjectInfo,
+  run: AgentRun,
+  stream: AgentStreamController,
+  input: {
+    changedFiles: Set<string>;
+    deletedFiles: Set<string>;
+    observations: AgentObservation[];
+    packageChanged: boolean;
+    reason: string;
+    report: VerificationReport;
+    repairFeedback: string[];
+    runState: RuntimeRunState;
+    statusLines?: string[];
+  },
+): Promise<{ canRepair: boolean; run: AgentRun }> {
+  run = getCurrentRun(store, run.id) ?? run;
+
+  if (run.repairCycles >= run.contract.budget.maxRepairCycles) {
+    const exceededRun = await commitTransition(
+      store,
+      project.id,
+      run,
+      stateMachine.transition(run, {
+        type: "repair_budget_exceeded",
+        report: input.report,
+      }),
+    );
+    stream.failWithTypewriter(formatVerificationFailure(input.report));
+    void persistCurrentConversation(store);
+    return { canRepair: false, run: exceededRun };
+  }
+
+  const hasReportObservation = input.observations.some(
+    (observation) =>
+      observation.tool === "verifier" &&
+      typeof observation.content === "string" &&
+      observation.content.includes(`"id": "${input.report.id}"`),
+  );
+
+  if (!hasReportObservation) {
+    input.observations.push(reportToObservation(input.report, input.observations.length + 1));
+  }
+
+  run = await commitTransition(
+    store,
+    project.id,
+    run,
+    stateMachine.transition(run, {
+      type: "verification_failed",
+      report: input.report,
+    }),
+  );
+
+  await saveRuntimeCheckpoint(store, project, run, {
+    changedFiles: input.changedFiles,
+    deletedFiles: input.deletedFiles,
+    latestReportId: input.report.id,
+    observations: input.observations,
+    packageChanged: input.packageChanged,
+    reason: input.reason,
+    repairFeedback: input.repairFeedback,
+    runState: input.runState,
+  });
+
+  if (input.statusLines) {
+    updateAgentStatus(
+      stream,
+      input.statusLines,
+      `Verification failed. Asking for repair ${run.repairCycles}/${run.contract.budget.maxRepairCycles}.`,
+    );
+  }
+
+  return { canRepair: true, run };
 }
 
 async function createRuntimeRun(
@@ -724,6 +1059,179 @@ async function appendRuntimeEvent(
   }));
 }
 
+async function saveRuntimeCheckpoint(
+  store: StoreAccess,
+  project: ProjectInfo,
+  run: AgentRun,
+  input: {
+    changedFiles: Set<string>;
+    deletedFiles: Set<string>;
+    latestReportId?: string;
+    observations: AgentObservation[];
+    packageChanged: boolean;
+    reason: string;
+    repairFeedback: string[];
+    runState: ReturnType<typeof createAgentRunState>;
+  },
+) {
+  const events = await agentRuntimeApi.listEvents(project.id, run.id);
+  const workspaceFingerprint = await computeWorkspaceFingerprint(project);
+  const checkpoint = await agentRuntimeApi.saveCheckpoint(project.id, {
+    id: createRuntimeId("checkpoint"),
+    runId: run.id,
+    createdAt: new Date().toISOString(),
+    workspaceFingerprint,
+    plan: null,
+    observations: input.observations,
+    changedFiles: Array.from(input.changedFiles),
+    deletedFiles: Array.from(input.deletedFiles),
+    packageChanged: input.packageChanged,
+    packageBaselineJson: input.runState.packageBaselineJson,
+    readSnapshots: Array.from(input.runState.readFiles.values()).map(
+      ({ contentHash, path, readAt }) => ({
+        contentHash,
+        path,
+        readAt,
+      }),
+    ),
+    latestReportId: input.latestReportId,
+    repairFeedback: input.repairFeedback,
+    steeringWatermark: getSteeringWatermark(events),
+  });
+  const event = await agentRuntimeApi.appendEvent(project.id, {
+    runId: run.id,
+    type: "checkpoint.created",
+    timestamp: checkpoint.createdAt,
+    payload: {
+      checkpointId: checkpoint.id,
+      kind: "runtime-checkpoint",
+      reason: input.reason,
+      steeringWatermark: checkpoint.steeringWatermark,
+      workspaceFingerprint,
+    },
+  });
+
+  store.set((state) => ({
+    agentEvents: [...state.agentEvents, event],
+  }));
+
+  return checkpoint;
+}
+
+async function restoreRuntimeCheckpoint(
+  store: StoreAccess,
+  project: ProjectInfo,
+  run: AgentRun,
+) {
+  const checkpoint = await agentRuntimeApi.getLatestCheckpoint(project.id, run.id);
+
+  if (!checkpoint) {
+    return null;
+  }
+
+  const currentFingerprint = await computeWorkspaceFingerprint(project);
+
+  if (checkpoint.workspaceFingerprint !== currentFingerprint) {
+    await commitTransition(
+      store,
+      project.id,
+      run,
+      stateMachine.transition(run, {
+        type: "fail",
+        reason:
+          "Workspace changed since the latest checkpoint; resume requires reconciliation before continuing.",
+      }),
+    );
+    throw new RunStopped("Workspace changed since the latest checkpoint.");
+  }
+
+  return checkpoint;
+}
+
+async function restoreCheckpointReadSnapshots(
+  project: ProjectInfo,
+  checkpoint: AgentRunCheckpoint,
+  runState: ReturnType<typeof createAgentRunState>,
+) {
+  for (const snapshot of checkpoint.readSnapshots) {
+    const content = await projectApi.readFile(project.id, snapshot.path);
+    const currentHash = hashText(content);
+
+    if (currentHash !== snapshot.contentHash) {
+      throw new Error(
+        `${snapshot.path} changed after the checkpoint. Read the file again before resuming edits.`,
+      );
+    }
+
+    runState.readFiles.set(snapshot.path, {
+      content,
+      contentHash: snapshot.contentHash,
+      path: snapshot.path,
+      readAt: snapshot.readAt,
+    });
+  }
+}
+
+function restoreCheckpointObservations(checkpoint: AgentRunCheckpoint): AgentObservation[] {
+  return checkpoint.observations
+    .map((observation, index) => toAgentObservation(observation, index + 1))
+    .filter((observation): observation is AgentObservation => Boolean(observation));
+}
+
+function toAgentObservation(
+  value: unknown,
+  fallbackStep: number,
+): AgentObservation | null {
+  if (typeof value === "string") {
+    return {
+      content: value,
+      ok: true,
+      step: fallbackStep,
+      summary: value.slice(0, 160) || "Restored checkpoint observation.",
+      tool: "checkpoint",
+    };
+  }
+
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+
+  const candidate = value as Partial<AgentObservation>;
+
+  if (
+    typeof candidate.ok === "boolean" &&
+    typeof candidate.summary === "string" &&
+    typeof candidate.tool === "string"
+  ) {
+    return {
+      content: typeof candidate.content === "string" ? candidate.content : undefined,
+      ok: candidate.ok,
+      step: typeof candidate.step === "number" ? candidate.step : fallbackStep,
+      summary: candidate.summary,
+      tool: candidate.tool,
+    };
+  }
+
+  return null;
+}
+
+async function computeWorkspaceFingerprint(project: ProjectInfo) {
+  const fileTree = await projectApi.listFiles(project.id);
+  const paths = getContextFilePaths(fileTree);
+  const entries = await Promise.all(
+    paths.map(async (path) => {
+      try {
+        const content = await projectApi.readFile(project.id, path);
+        return `${path}:${hashText(content)}`;
+      } catch (error) {
+        return `${path}:missing:${getProjectErrorMessage(error)}`;
+      }
+    }),
+  );
+
+  return hashText(entries.sort().join("\n"));
+}
+
 async function verifyRun(
   store: StoreAccess,
   project: ProjectInfo,
@@ -731,7 +1239,9 @@ async function verifyRun(
   stream: AgentStreamController,
   input: {
     changedFiles: string[];
+    deletedFiles: string[];
     packageChanged: boolean;
+    packageBaselineJson?: string | null;
     previewUrl: string | null;
   },
 ): Promise<VerificationReport> {
@@ -748,6 +1258,16 @@ async function verifyRun(
   });
   const verifier = new AgentVerifier({
     readFile: (path) => projectApi.readFile(project.id, path),
+    recordArtifact: async ({ content, relativePath, runId }) => {
+      const artifact = await agentRuntimeApi.writeArtifact(
+        project.id,
+        runId,
+        relativePath,
+        content,
+      );
+
+      return artifact.id;
+    },
     runCommand: async (command) => {
       const result = await store.get().runProjectCommand(project.id, command);
 
@@ -780,10 +1300,19 @@ async function verifyRun(
         };
       }
     },
+    waitForPreviewDiagnostics: async ({ runId, windowMs }) => {
+      await delay(windowMs);
+      return getPreviewDiagnosticsForRun(store, runId);
+    },
   });
   const report = await verifier.verify({
+    approvedPackageChangeKeys: await loadApprovedPackageChangeKeys(project.id, run.id),
+    approvedDeletionPaths: await loadApprovedDeletionPaths(project.id, run.id),
+    baselinePackageJson: input.packageBaselineJson,
     changedFiles: input.changedFiles,
+    deletedFiles: input.deletedFiles,
     packageChanged: input.packageChanged,
+    previewDiagnostics: getPreviewDiagnosticsForRun(store, run.id),
     previewUrl: input.previewUrl,
     run,
   });
@@ -879,6 +1408,7 @@ async function buildAgentStepContext(
     userRequest,
   });
   const siteSpec = await agentRuntimeApi.readSiteSpec(project.id);
+  const steering = await consumeSteeringForNextContext(store, project.id, run.id);
 
   return {
     backend: backendContext,
@@ -898,12 +1428,90 @@ async function buildAgentStepContext(
     previewUrl: state.previewUrl,
     projectName: project.name,
     recentMessages,
+    steering,
     taskLedger: {
       ...dynamicContext.taskLedger,
       objective: run.contract.objective,
     },
     workingSummary: dynamicContext.workingSummary,
   };
+}
+
+async function consumeSteeringForNextContext(
+  store: StoreAccess,
+  projectId: string,
+  runId: string,
+) {
+  const events = await agentRuntimeApi.listEvents(projectId, runId);
+  const watermark = getSteeringWatermark(events);
+  const steeringEvents = events.filter(
+    (event) => event.type === "steering.received" && event.sequence > watermark,
+  );
+
+  if (steeringEvents.length === 0) {
+    return [];
+  }
+
+  const steering = steeringEvents
+    .map((event) => extractSteeringContent(event.payload))
+    .filter((content): content is string => Boolean(content));
+  const nextWatermark = Math.max(...steeringEvents.map((event) => event.sequence));
+  const checkpoint = await agentRuntimeApi.appendEvent(projectId, {
+    runId,
+    type: "checkpoint.created",
+    timestamp: new Date().toISOString(),
+    payload: {
+      kind: "steering-consumed",
+      steeringWatermark: nextWatermark,
+    },
+  });
+
+  store.set((state) => ({
+    agentEvents: [...state.agentEvents, checkpoint],
+  }));
+
+  return steering;
+}
+
+function getSteeringWatermark(events: AgentEvent[]) {
+  return events.reduce((watermark, event) => {
+    if (event.type !== "checkpoint.created") {
+      return watermark;
+    }
+
+    const payload = event.payload;
+
+    if (
+      typeof payload === "object" &&
+      payload !== null &&
+      "steeringWatermark" in payload &&
+      typeof (payload as { steeringWatermark?: unknown }).steeringWatermark === "number"
+    ) {
+      return Math.max(
+        watermark,
+        (payload as { steeringWatermark: number }).steeringWatermark,
+      );
+    }
+
+    return watermark;
+  }, 0);
+}
+
+function extractSteeringContent(payload: unknown) {
+  if (typeof payload === "string") {
+    return payload.trim();
+  }
+
+  if (
+    typeof payload === "object" &&
+    payload !== null &&
+    "content" in payload &&
+    typeof (payload as { content?: unknown }).content === "string"
+  ) {
+    return (payload as { content: string }).content.trim();
+  }
+
+  return null;
 }
 
 async function checkRunInterruption(
@@ -943,23 +1551,47 @@ async function checkRunInterruption(
   }
 }
 
-function evaluateStepPolicy(run: AgentRun, step: Exclude<AgentStepResponse, { type: "answer" | "finish_candidate" }>) {
+type RuntimePolicyDecision =
+  | (Extract<PolicyDecision, { allowed: false }> & {
+      args: unknown;
+      toolName: string;
+    })
+  | (Extract<PolicyDecision, { allowed: true; approvalRequired: true }> & {
+      args: unknown;
+      toolName: string;
+    })
+  | Extract<PolicyDecision, { allowed: true; approvalRequired: false }>;
+
+function evaluateStepPolicy(
+  run: AgentRun,
+  step: Exclude<AgentStepResponse, { type: "answer" | "finish_candidate" }>,
+  approvedHashes: Set<string>,
+): RuntimePolicyDecision {
   const toolNames = step.type === "tool_calls" ? step.calls.map((call) => call.tool) : [step.tool];
 
   for (const toolName of toolNames) {
     const tool = getCoreToolDefinition(toolName);
 
     if (!tool) {
-      return { allowed: false as const, reason: `Unknown tool: ${toolName}` };
+      return {
+        allowed: false as const,
+        args: null,
+        reason: `Unknown tool: ${toolName}`,
+        toolName,
+      };
     }
 
     const args = step.type === "tool_calls"
       ? step.calls.find((call) => call.tool === toolName)?.args
       : step.args;
-    const decision = policyEngine.evaluate({ args, run, tool });
+    const decision = policyEngine.evaluate({ approvedHashes, args, run, tool });
 
     if (!decision.allowed || decision.approvalRequired) {
-      return decision;
+      return {
+        ...decision,
+        args,
+        toolName,
+      };
     }
   }
 
@@ -1007,14 +1639,119 @@ function withRunPatch(
   };
 }
 
-function withCounter(run: AgentRun, patch: Partial<AgentRun>) {
-  const nextRun = { ...run, ...patch };
-  storeCurrentRunCounters(nextRun);
-  return nextRun;
+function createRuntimeId(prefix: string) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function storeCurrentRunCounters(_run: AgentRun) {
-  return;
+async function loadApprovedApprovalHashes(projectId: string, runId: string) {
+  const approvals = await agentRuntimeApi.listApprovals(projectId, runId);
+
+  return new Set(
+    approvals
+      .filter((approval) => approval.decision === "approved")
+      .map((approval) => approval.normalizedArgsHash),
+  );
+}
+
+async function loadApprovedPackageChangeKeys(projectId: string, runId: string) {
+  const approvals = await agentRuntimeApi.listApprovals(projectId, runId);
+  const hasApprovedPackageChange = approvals.some(
+    (approval) =>
+      approval.decision === "approved" &&
+      approval.targetResources.some(
+        (resource) => resource.replace(/\\/g, "/") === "package.json",
+      ),
+  );
+
+  return hasApprovedPackageChange ? ["*"] : [];
+}
+
+async function loadApprovedDeletionPaths(projectId: string, runId: string) {
+  const approvals = await agentRuntimeApi.listApprovals(projectId, runId);
+
+  return approvals
+    .filter(
+      (approval) =>
+        approval.decision === "approved" && approval.toolName === "delete_files",
+    )
+    .flatMap((approval) => approval.targetResources)
+    .map((resource) => resource.replace(/\\/g, "/"));
+}
+
+function collectTargetResources(args: unknown): string[] {
+  if (typeof args !== "object" || args === null) {
+    return [];
+  }
+
+  if (Array.isArray(args)) {
+    return args.flatMap((item) =>
+      typeof item === "object" && item !== null ? collectTargetResources(item) : [],
+    );
+  }
+
+  const record = args as Record<string, unknown>;
+  const resources: string[] = [];
+
+  for (const [key, value] of Object.entries(record)) {
+    const normalizedKey = key.toLowerCase();
+
+    if (normalizedKey.includes("path")) {
+      if (typeof value === "string") {
+        resources.push(value);
+      } else if (Array.isArray(value)) {
+        resources.push(...value.filter((item): item is string => typeof item === "string"));
+      }
+    } else if (typeof value === "object" && value !== null) {
+      resources.push(...collectTargetResources(value));
+    }
+  }
+
+  return resources;
+}
+
+function addMinutesIso(now: string, minutes: number) {
+  return new Date(new Date(now).getTime() + minutes * 60_000).toISOString();
+}
+
+function hashText(content: string) {
+  let hash = 2166136261;
+
+  for (let index = 0; index < content.length; index += 1) {
+    hash ^= content.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return `${content.length}:${(hash >>> 0).toString(16)}`;
+}
+
+async function persistRunCounters(
+  store: StoreAccess,
+  projectId: string,
+  previousRun: AgentRun,
+  patch: Partial<Pick<AgentRun, "modelTurns" | "toolCalls" | "mutationCount" | "repairCycles">>,
+  eventType: AgentEventType,
+  payload: unknown,
+) {
+  const timestamp = new Date().toISOString();
+  const nextRun: AgentRun = {
+    ...previousRun,
+    ...patch,
+    updatedAt: timestamp,
+  };
+  const { run, event } = await agentRuntimeApi.recordProgress(projectId, previousRun, nextRun, {
+    runId: previousRun.id,
+    type: eventType,
+    timestamp,
+    payload,
+  });
+
+  store.set((state) => ({
+    agentEvents: [...state.agentEvents, event],
+    agentRuns: [run, ...state.agentRuns.filter((item) => item.id !== run.id)],
+    currentAgentRun: run,
+  }));
+
+  return run;
 }
 
 function getCurrentRun(store: StoreAccess, runId: string) {
@@ -1037,6 +1774,18 @@ function buildAgentDiagnostics(projectError: string | null, terminalLogs: string
   return diagnostics.length <= MAX_AGENT_DIAGNOSTIC_CHARS
     ? diagnostics
     : diagnostics.slice(-MAX_AGENT_DIAGNOSTIC_CHARS);
+}
+
+function getPreviewDiagnosticsForRun(store: StoreAccess, runId: string) {
+  return store
+    .get()
+    .previewDiagnostics.filter((diagnostic) => diagnostic.runId === runId || !diagnostic.runId);
+}
+
+function delay(milliseconds: number) {
+  return new Promise<void>((resolve) => {
+    globalThis.setTimeout(resolve, milliseconds);
+  });
 }
 
 function shouldRequireProjectActionBeforeAnswer(
@@ -1156,6 +1905,18 @@ function describeToolActivity(step: AgentToolCallStep): AgentActivityInput {
       return { detail: step.rationale, kind: "preview", title: "Stopping preview" };
     case "refresh_preview":
       return { detail: step.rationale, kind: "preview", title: "Refreshing preview" };
+    case "get_site_spec":
+      return { detail: step.rationale, kind: "tool", title: "Reading SiteSpec" };
+    case "get_page_spec":
+      return { detail: step.args.route ?? step.args.pageId ?? step.rationale, kind: "tool", title: "Reading page spec" };
+    case "find_site_node":
+      return { detail: step.rationale, kind: "tool", title: "Finding SiteSpec nodes" };
+    case "update_design_tokens":
+      return { detail: step.args.summary ?? step.rationale, kind: "file", title: "Updating design tokens" };
+    case "resolve_node_source":
+      return { detail: step.args.nodeId, kind: "tool", title: "Resolving node source" };
+    case "refresh_site_index":
+      return { detail: step.args.reason ?? step.rationale, kind: "tool", title: "Refreshing SiteSpec" };
   }
 }
 

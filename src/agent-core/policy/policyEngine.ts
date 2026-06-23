@@ -108,6 +108,17 @@ export class PolicyEngine {
       };
     }
 
+    if (
+      tool.sideEffect === "workspace_write" &&
+      paths.includes("package.json") &&
+      contract.permissions.dependencyChange === "deny"
+    ) {
+      return {
+        allowed: false,
+        reason: "This task contract denies dependency changes.",
+      };
+    }
+
     return null;
   }
 
@@ -118,6 +129,13 @@ export class PolicyEngine {
   ) {
     if (tool.name === "update_design_tokens") {
       return false;
+    }
+
+    if (
+      tool.sideEffect === "workspace_write" &&
+      collectPaths(args).includes("package.json")
+    ) {
+      return contract.permissions.dependencyChange === "ask";
     }
 
     if (tool.name === "run_command") {

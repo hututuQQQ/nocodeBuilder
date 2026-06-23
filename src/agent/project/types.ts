@@ -103,6 +103,55 @@ export type AgentToolCallStep =
       tool: "apply_supabase_schema";
       rationale: string;
       args: AgentSupabaseSchemaInput;
+    }
+  | {
+      type: "tool_call";
+      tool: "get_site_spec";
+      rationale: string;
+      args: Record<string, never>;
+    }
+  | {
+      type: "tool_call";
+      tool: "get_page_spec";
+      rationale: string;
+      args: { pageId?: string; route?: string };
+    }
+  | {
+      type: "tool_call";
+      tool: "find_site_node";
+      rationale: string;
+      args: {
+        label?: string;
+        nodeId?: string;
+        route?: string;
+        textHint?: string;
+      };
+    }
+  | {
+      type: "tool_call";
+      tool: "update_design_tokens";
+      rationale: string;
+      args: {
+        summary?: string;
+        tokens: {
+          colors?: Record<string, string>;
+          typography?: Record<string, string>;
+          spacing?: Record<string, string>;
+          radii?: Record<string, string>;
+        };
+      };
+    }
+  | {
+      type: "tool_call";
+      tool: "resolve_node_source";
+      rationale: string;
+      args: { nodeId: string };
+    }
+  | {
+      type: "tool_call";
+      tool: "refresh_site_index";
+      rationale: string;
+      args: { reason?: string };
     };
 
 export type AgentToolBatchStep = {
@@ -159,6 +208,7 @@ export type AgentStepContext = {
   previewUrl: string | null;
   projectName: string;
   recentMessages: ProjectChatMessage[];
+  steering: string[];
   taskLedger: TaskLedger | null;
   workingSummary: WorkingSummary | null;
 };

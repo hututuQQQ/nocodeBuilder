@@ -14,9 +14,16 @@ export type RunTransition =
   | { type: "enter_exploring" }
   | { type: "enter_mutating"; mutationDelta?: number }
   | { type: "enter_waiting_approval" }
+  | { type: "approval_granted"; approvalId: string }
+  | { type: "approval_denied"; approvalId: string; reason?: string }
   | { type: "enter_verifying" }
   | { type: "verification_passed"; report: VerificationReport }
   | { type: "verification_failed"; report: VerificationReport }
+  | {
+      type: "budget_exceeded";
+      budget: keyof TaskContract["budget"];
+      reason: string;
+    }
   | { type: "repair_budget_exceeded"; report?: VerificationReport }
   | { type: "request_pause" }
   | { type: "pause_at_boundary" }
@@ -36,6 +43,85 @@ const TERMINAL_STATUSES = new Set<AgentRunStatus>([
   "cancelled",
   "budget_exceeded",
 ]);
+
+type RunTransitionType = RunTransition["type"];
+
+const LEGAL_TRANSITIONS: Record<AgentRunStatus, ReadonlySet<RunTransitionType>> = {
+  created: new Set(["start", "request_cancel", "cancel", "fail"]),
+  planning: new Set([
+    "enter_planning",
+    "enter_exploring",
+    "enter_mutating",
+    "enter_waiting_approval",
+    "enter_verifying",
+    "request_pause",
+    "pause_at_boundary",
+    "request_cancel",
+    "budget_exceeded",
+    "cancel",
+    "fail",
+  ]),
+  exploring: new Set([
+    "enter_planning",
+    "enter_exploring",
+    "enter_mutating",
+    "enter_verifying",
+    "request_pause",
+    "pause_at_boundary",
+    "request_cancel",
+    "budget_exceeded",
+    "cancel",
+    "fail",
+  ]),
+  mutating: new Set([
+    "enter_planning",
+    "enter_mutating",
+    "enter_verifying",
+    "request_pause",
+    "pause_at_boundary",
+    "request_cancel",
+    "budget_exceeded",
+    "cancel",
+    "fail",
+  ]),
+  waiting_approval: new Set([
+    "approval_granted",
+    "approval_denied",
+    "request_cancel",
+    "budget_exceeded",
+    "cancel",
+    "fail",
+  ]),
+  verifying: new Set([
+    "verification_passed",
+    "verification_failed",
+    "repair_budget_exceeded",
+    "request_pause",
+    "pause_at_boundary",
+    "request_cancel",
+    "budget_exceeded",
+    "cancel",
+    "fail",
+  ]),
+  repairing: new Set([
+    "enter_planning",
+    "enter_exploring",
+    "enter_mutating",
+    "enter_verifying",
+    "repair_budget_exceeded",
+    "request_pause",
+    "pause_at_boundary",
+    "request_cancel",
+    "budget_exceeded",
+    "cancel",
+    "fail",
+  ]),
+  paused: new Set(["resume", "request_cancel", "cancel", "fail"]),
+  completed: new Set(),
+  failed: new Set(),
+  cancelled: new Set(),
+  budget_exceeded: new Set(),
+};
 
 export class RunStateMachine {
   createRun({
@@ -75,11 +161,7 @@ export class RunStateMachine {
     transition: RunTransition,
     now = new Date().toISOString(),
   ): RunTransitionResult {
-    if (TERMINAL_STATUSES.has(currentRun.status)) {
-      throw new Error(
-        `Cannot transition terminal run ${currentRun.id} from ${currentRun.status}.`,
-      );
-    }
+    assertLegalTransition(currentRun, transition.type);
 
     switch (transition.type) {
       case "start":
@@ -107,6 +189,28 @@ export class RunStateMachine {
           {},
           now,
         );
+      case "approval_granted":
+        return this.move(
+          currentRun,
+          "planning",
+          "planning",
+          "approval.resolved",
+          { approvalId: transition.approvalId, decision: "approved" },
+          now,
+        );
+      case "approval_denied":
+        return this.move(
+          currentRun,
+          "planning",
+          "planning",
+          "approval.resolved",
+          {
+            approvalId: transition.approvalId,
+            decision: "denied",
+            reason: transition.reason,
+          },
+          now,
+        );
       case "enter_verifying":
         return this.move(
           currentRun,
@@ -130,13 +234,13 @@ export class RunStateMachine {
       case "verification_failed": {
         if (currentRun.repairCycles >= currentRun.contract.budget.maxRepairCycles) {
           return this.move(
-            currentRun,
-            "budget_exceeded",
-            "budget_exceeded",
-            "run.failed",
-            {
-              reason: "Repair budget exceeded after verification failed.",
-              reportId: transition.report.id,
+          currentRun,
+          "budget_exceeded",
+          "budget_exceeded",
+          "run.budget_exceeded",
+          {
+            reason: "Repair budget exceeded after verification failed.",
+            reportId: transition.report.id,
             },
             now,
             { completedAt: now },
@@ -153,12 +257,25 @@ export class RunStateMachine {
           { repairCycles: currentRun.repairCycles + 1 },
         );
       }
+      case "budget_exceeded":
+        return this.move(
+          currentRun,
+          "budget_exceeded",
+          "budget_exceeded",
+          "run.budget_exceeded",
+          {
+            budget: transition.budget,
+            reason: transition.reason,
+          },
+          now,
+          { completedAt: now },
+        );
       case "repair_budget_exceeded":
         return this.move(
           currentRun,
           "budget_exceeded",
           "budget_exceeded",
-          "run.failed",
+          "run.budget_exceeded",
           {
             reason: "Repair budget exceeded.",
             reportId: transition.report?.id,
@@ -183,10 +300,6 @@ export class RunStateMachine {
 
         return this.move(currentRun, "paused", "paused", "run.paused", {}, now);
       case "resume":
-        if (currentRun.status !== "paused") {
-          throw new Error(`Cannot resume a run in ${currentRun.status}.`);
-        }
-
         return this.move(currentRun, "planning", "planning", "run.resumed", {}, now, {
           pauseRequested: false,
         });
@@ -257,6 +370,10 @@ export function isTerminalAgentRunStatus(status: AgentRunStatus) {
   return TERMINAL_STATUSES.has(status);
 }
 
+export function getLegalRunTransitions(status: AgentRunStatus): RunTransitionType[] {
+  return [...LEGAL_TRANSITIONS[status]];
+}
+
 export function createAgentEventId(type: string) {
   return createId(type.replace(/\W+/g, "-"));
 }
@@ -265,6 +382,17 @@ function assertReportStatus(report: VerificationReport, status: VerificationRepo
   if (report.status !== status) {
     throw new Error(
       `Cannot complete run with ${report.status} verification report ${report.id}.`,
+    );
+  }
+}
+
+function assertLegalTransition(currentRun: AgentRun, transitionType: RunTransitionType) {
+  const legalTransitions = LEGAL_TRANSITIONS[currentRun.status];
+
+  if (!legalTransitions.has(transitionType)) {
+    const legalList = [...legalTransitions].sort().join(", ") || "none";
+    throw new Error(
+      `Illegal run transition ${transitionType} from ${currentRun.status} for ${currentRun.id}. Legal transitions: ${legalList}.`,
     );
   }
 }

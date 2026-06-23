@@ -1,4 +1,4 @@
-import type { AgentRun, VerificationReport } from "../agent-core/types";
+import type { AgentApprovalDecision, AgentRun, VerificationReport } from "../agent-core/types";
 import { RunStateMachine } from "../agent-core/runtime/runStateMachine";
 import { agentRuntimeApi } from "../services/agentRuntime";
 import { getProjectErrorMessage } from "../services/projects";
@@ -11,7 +11,9 @@ import type { StoreAccess } from "./storeAccess";
 type AgentRunActions = Pick<
   AppState,
   | "cancelCurrentAgentRun"
+  | "approveCurrentAgentApproval"
   | "clearSelectedSiteNode"
+  | "denyCurrentAgentApproval"
   | "loadAgentRuns"
   | "pauseCurrentAgentRun"
   | "resumeCurrentAgentRun"
@@ -25,6 +27,8 @@ export function createAgentRunActions({ get, set }: StoreAccess): AgentRunAction
   const store = { get, set };
 
   return {
+    approveCurrentAgentApproval: () => resolveCurrentAgentApproval(store, "approved"),
+
     cancelCurrentAgentRun: async () => {
       const project = get().currentProject;
       const run = get().currentAgentRun;
@@ -65,16 +69,18 @@ export function createAgentRunActions({ get, set }: StoreAccess): AgentRunAction
       try {
         const runs = await agentRuntimeApi.listRuns(projectId);
         const currentRun = runs.find((run) => !isTerminalRun(run)) ?? runs[0] ?? null;
-        const [events, report] = currentRun
+        const [events, report, approval] = currentRun
           ? await Promise.all([
               agentRuntimeApi.listEvents(projectId, currentRun.id),
               agentRuntimeApi.getLatestVerificationReport(projectId, currentRun.id),
+              agentRuntimeApi.getPendingApproval(projectId, currentRun.id),
             ])
-          : [[], null as VerificationReport | null];
+          : [[], null as VerificationReport | null, null];
 
         set({
           agentEvents: events,
           agentRuns: runs,
+          currentAgentApproval: approval,
           currentAgentRun: currentRun,
           currentVerificationReport: report,
         });
@@ -82,6 +88,8 @@ export function createAgentRunActions({ get, set }: StoreAccess): AgentRunAction
         recordAgentActionError(set, error);
       }
     },
+
+    denyCurrentAgentApproval: () => resolveCurrentAgentApproval(store, "denied"),
 
     pauseCurrentAgentRun: async () => {
       const project = get().currentProject;
@@ -157,6 +165,75 @@ export function createAgentRunActions({ get, set }: StoreAccess): AgentRunAction
       set({ selectedSiteNodeId: nodeId });
     },
   };
+}
+
+async function resolveCurrentAgentApproval(
+  store: StoreAccess,
+  decision: AgentApprovalDecision,
+) {
+  const { get, set } = store;
+  const project = get().currentProject;
+  const run = get().currentAgentRun;
+  const approval = get().currentAgentApproval;
+
+  if (!project || !run || !approval || run.status !== "waiting_approval") {
+    return;
+  }
+
+  try {
+    const resolved = await agentRuntimeApi.resolveApproval(
+      project.id,
+      run.id,
+      approval.id,
+      decision,
+    );
+    const transition =
+      decision === "approved"
+        ? stateMachine.transition(run, {
+            type: "approval_granted",
+            approvalId: resolved.id,
+          })
+        : stateMachine.transition(run, {
+            type: "approval_denied",
+            approvalId: resolved.id,
+            reason: "Approval denied by user.",
+          });
+    const { run: nextRun, event } = await agentRuntimeApi.transitionRun(
+      project.id,
+      run,
+      transition,
+    );
+
+    set((state) => ({
+      agentEvents: [...state.agentEvents, event],
+      agentRuns: [nextRun, ...state.agentRuns.filter((item) => item.id !== nextRun.id)],
+      currentAgentApproval: null,
+      currentAgentRun: nextRun,
+      terminalLogs: appendLogs(state.terminalLogs, [
+        `[agent] Approval ${decision} for ${approval.toolName}`,
+      ]),
+    }));
+
+    await modifyCurrentProjectRuntime(store, run.contract.objective, {
+      existingRun: nextRun,
+      resumeObservation:
+        decision === "denied"
+          ? {
+              content: [
+                `Approval denied for ${approval.toolName}.`,
+                `Reason: ${approval.exactSideEffect}`,
+                "Choose a non-destructive alternative, request a different approval, or explain why the task cannot continue.",
+              ].join("\n"),
+              ok: false,
+              step: 1,
+              summary: `Approval denied for ${approval.toolName}.`,
+              tool: approval.toolName,
+            }
+          : undefined,
+    });
+  } catch (error) {
+    recordAgentActionError(set, error);
+  }
 }
 
 function isTerminalRun(run: AgentRun) {

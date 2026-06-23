@@ -110,6 +110,7 @@ export type AgentEventType =
   | "verification.completed"
   | "checkpoint.created"
   | "run.completed"
+  | "run.budget_exceeded"
   | "run.failed";
 
 export type AgentEvent = {
@@ -120,6 +121,45 @@ export type AgentEvent = {
   timestamp: string;
   payload: unknown;
   artifactIds?: string[];
+};
+
+export type AgentApprovalDecision = "approved" | "denied";
+
+export type AgentApproval = {
+  id: string;
+  runId: string;
+  toolCallId: string;
+  toolName: string;
+  normalizedArgsHash: string;
+  targetResources: string[];
+  exactSideEffect: string;
+  createdAt: string;
+  expiresAt: string;
+  resolvedAt?: string;
+  decision?: AgentApprovalDecision;
+};
+
+export type AgentReadSnapshot = {
+  contentHash: string;
+  path: string;
+  readAt: string;
+};
+
+export type AgentRunCheckpoint = {
+  id: string;
+  runId: string;
+  createdAt: string;
+  workspaceFingerprint: string;
+  plan: unknown;
+  observations: unknown[];
+  changedFiles: string[];
+  deletedFiles: string[];
+  packageChanged: boolean;
+  packageBaselineJson?: string | null;
+  readSnapshots: AgentReadSnapshot[];
+  latestReportId?: string;
+  repairFeedback: string[];
+  steeringWatermark: number;
 };
 
 export type ToolSideEffect =
@@ -164,6 +204,7 @@ export type ToolResult = {
   artifactIds: string[];
   workspaceEffects?: {
     changedFiles: string[];
+    deletedFiles?: string[];
     packageChanged: boolean;
   };
 };
@@ -181,6 +222,7 @@ export type VerificationCheck = {
   title: string;
   status: VerificationCheckStatus;
   summary: string;
+  required?: boolean;
   artifactIds?: string[];
   details?: unknown;
 };
@@ -195,6 +237,27 @@ export type VerificationReport = {
   artifactIds: string[];
   repairFeedback: string[];
   createdAt: string;
+};
+
+export type PreviewDiagnosticLevel = "error" | "warning" | "info";
+
+export type PreviewDiagnostic = {
+  id: string;
+  runId?: string | null;
+  sessionId?: string | null;
+  level: PreviewDiagnosticLevel;
+  kind:
+    | "window-error"
+    | "unhandled-rejection"
+    | "console-error"
+    | "failed-image"
+    | "failed-resource"
+    | "horizontal-overflow"
+    | "node-selected";
+  message: string;
+  nodeId?: string;
+  url?: string;
+  timestamp: string;
 };
 
 export type SiteSpec = {
