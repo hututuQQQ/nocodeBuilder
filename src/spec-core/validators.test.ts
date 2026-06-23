@@ -71,6 +71,36 @@ describe("Spec validators", () => {
     expect(() => validateDevelopmentSpec(cyclic)).toThrow(/cycle/i);
   });
 
+  it("rejects invalid blocked task references", () => {
+    const unknownBlocker = createSpec({
+      tasks: [
+        {
+          ...createGeneratedPayload().tasks[0],
+          blockedByTaskId: "task-missing",
+          status: "blocked",
+        },
+      ],
+    });
+
+    expect(() => validateDevelopmentSpec(unknownBlocker)).toThrow(
+      /unknown blockedByTaskId/i,
+    );
+
+    const selfBlocked = createSpec({
+      tasks: [
+        {
+          ...createGeneratedPayload().tasks[0],
+          blockedByTaskId: "task-1",
+          status: "blocked",
+        },
+      ],
+    });
+
+    expect(() => validateDevelopmentSpec(selfBlocked)).toThrow(
+      /cannot be blocked by itself/i,
+    );
+  });
+
   it("rejects uncovered required criteria before approval", () => {
     const spec = createSpec({
       requirements: {

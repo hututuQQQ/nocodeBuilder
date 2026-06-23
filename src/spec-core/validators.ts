@@ -615,6 +615,7 @@ function validateRevisionParts(
       | "dependencyIds"
       | "allowedPaths"
     >
+    & Pick<Partial<SpecTask>, "blockedByTaskId">
   >,
 ) {
   if (!requirements.goal.trim()) {
@@ -665,6 +666,18 @@ function validateRevisionParts(
 
       if (!taskIds.has(dependencyId)) {
         throw new Error(`Task ${task.id} references unknown dependency ${dependencyId}.`);
+      }
+    }
+
+    if (task.blockedByTaskId !== undefined) {
+      if (task.blockedByTaskId === task.id) {
+        throw new Error(`Task ${task.id} cannot be blocked by itself.`);
+      }
+
+      if (!taskIds.has(task.blockedByTaskId)) {
+        throw new Error(
+          `Task ${task.id} references unknown blockedByTaskId ${task.blockedByTaskId}.`,
+        );
       }
     }
   }
