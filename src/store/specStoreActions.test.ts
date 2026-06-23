@@ -632,6 +632,61 @@ describe("spec store actions", () => {
     );
   });
 
+  it("does not switch to Chat while a Spec revision is in progress", async () => {
+    const spec = createSpec({
+      status: "revising",
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: spec.id,
+        conversationId: spec.conversationId,
+        mode: "spec",
+        specIds: [spec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.switchCurrentIterationToChat({ cancelActiveSpec: true });
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(fake.switchProjectConversationMode).not.toHaveBeenCalled();
+    expect(store.get().currentConversation?.mode).toBe("spec");
+    expect(store.get().currentSpec?.status).toBe("revising");
+    expect(store.get().projectError).toBe(
+      "Wait for the Spec revision to finish before switching modes.",
+    );
+  });
+
+  it("does not switch to Chat while the revision action is busy", async () => {
+    const spec = createSpec({
+      status: "review",
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: spec.id,
+        conversationId: spec.conversationId,
+        mode: "spec",
+        specIds: [spec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: spec,
+      isRevisingSpec: true,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.switchCurrentIterationToChat();
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(fake.switchProjectConversationMode).not.toHaveBeenCalled();
+    expect(store.get().currentConversation?.mode).toBe("spec");
+    expect(store.get().currentSpec?.status).toBe("review");
+    expect(store.get().projectError).toBe(
+      "Wait for the Spec revision to finish before switching modes.",
+    );
+  });
+
   it("restores review state when a revision request fails", async () => {
     fake.requestSpecRevision.mockRejectedValue(new Error("revision failed"));
     const revision = createExecutableRevision();

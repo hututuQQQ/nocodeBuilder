@@ -590,6 +590,13 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         return;
       }
 
+      if (spec.status === "revising" || get().isRevisingSpec) {
+        set({
+          projectError: "Wait for the Spec revision to finish before switching modes.",
+        });
+        return;
+      }
+
       const activeRun = get().currentAgentRun;
       const executionLocked =
         ["approved", "building", "verifying"].includes(spec.status) ||
@@ -1446,7 +1453,7 @@ function createId(prefix: string) {
 }
 
 export function canSwitchSpecStatusToChat(spec: DevelopmentSpec | null) {
-  return !spec || isTerminalSpecStatus(spec.status) || ["drafting", "review", "revising"].includes(spec.status);
+  return !spec || isTerminalSpecStatus(spec.status) || ["drafting", "review"].includes(spec.status);
 }
 
 export const __specStoreActionsTestUtils = {
