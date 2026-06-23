@@ -74,7 +74,6 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
         }));
 
         await get().selectProject(project.id, {
-          ensureConversation: false,
           startDevServer: false,
         });
 
@@ -227,7 +226,6 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
       const project = get().projects.find((item) => item.id === projectId);
       const previousProject = get().currentProject;
       const shouldStartDevServer = options.startDevServer ?? false;
-      const shouldEnsureConversation = options.ensureConversation ?? true;
       let didLoadFiles = false;
 
       if (!project) {
@@ -266,10 +264,7 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
       });
 
       try {
-        await get().loadProjectConversations(project.id, {
-          ensureConversation: shouldEnsureConversation,
-          initialTitle: options.conversationTitle,
-        });
+        await get().loadProjectConversations(project.id);
 
         const fileTree = await projectApi.listFiles(project.id);
 

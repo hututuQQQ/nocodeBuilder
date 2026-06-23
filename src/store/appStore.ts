@@ -116,7 +116,6 @@ export type AppState = {
   handleCommandStatus: (event: CommandStatusEvent) => void;
   loadProjectConversations: (
     projectId: string,
-    options?: { ensureConversation?: boolean; initialTitle?: string },
   ) => Promise<void>;
   loadProjectChangeHistory: (projectId: string) => Promise<void>;
   loadAgentRuns: (projectId: string) => Promise<void>;
@@ -152,9 +151,7 @@ export type AppState = {
   selectProject: (
     projectId: string,
     options?: {
-      ensureConversation?: boolean;
       startDevServer?: boolean;
-      conversationTitle?: string;
     },
   ) => Promise<void>;
   sendMessage: (content: string) => Promise<void>;

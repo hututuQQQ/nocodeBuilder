@@ -123,7 +123,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
     }
 
     if (currentProject?.id !== projectId) {
-      await selectProject(projectId, { ensureConversation: false });
+      await selectProject(projectId);
     }
 
     const title = newIterationTitle.trim();
@@ -154,7 +154,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
       currentProject?.id === projectId ? !showArchivedConversations : true;
 
     if (currentProject?.id !== projectId) {
-      await selectProject(projectId, { ensureConversation: false });
+      await selectProject(projectId);
     }
 
     await setShowArchivedConversations(nextShowArchived);

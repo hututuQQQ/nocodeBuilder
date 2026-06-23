@@ -101,7 +101,6 @@ describe("project store actions", () => {
 
     expect(fake.deleteUninitializedProject).not.toHaveBeenCalled();
     expect(store.get().selectProject).toHaveBeenCalledWith(project.id, {
-      ensureConversation: false,
       startDevServer: false,
     });
     expect(store.get().createInitialSpec).toHaveBeenCalledWith(

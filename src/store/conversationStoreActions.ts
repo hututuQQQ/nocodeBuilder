@@ -24,11 +24,6 @@ type ConversationActions = Pick<
   | "unarchiveConversation"
 >;
 
-type LoadConversationOptions = {
-  ensureConversation?: boolean;
-  initialTitle?: string;
-};
-
 export function createConversationActions({
   get,
   set,
@@ -297,9 +292,7 @@ export function createConversationActions({
         return;
       }
 
-      await get().loadProjectConversations(project.id, {
-        ensureConversation: !showArchived,
-      });
+      await get().loadProjectConversations(project.id);
     },
   };
 }
@@ -313,4 +306,4 @@ export function selectConversationList(
   );
 }
 
-export type { LoadConversationOptions, ProjectConversation };
+export type { ProjectConversation };
