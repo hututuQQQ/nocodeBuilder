@@ -90,6 +90,8 @@ export type AgentRun = {
 export type AgentEventType =
   | "run.created"
   | "run.started"
+  | "run.recovery_requested"
+  | "run.recovered"
   | "run.pause_requested"
   | "run.paused"
   | "run.resumed"
@@ -108,6 +110,8 @@ export type AgentEventType =
   | "approval.requested"
   | "approval.resolved"
   | "approval.expired"
+  | "approval.consumed"
+  | "approval.consume_failed"
   | "verification.started"
   | "verification.completed"
   | "checkpoint.created"
@@ -139,6 +143,8 @@ export type AgentApproval = {
   expiresAt: string;
   resolvedAt?: string;
   decision?: AgentApprovalDecision;
+  consumedAt?: string;
+  consumedToolCallId?: string;
 };
 
 export type AgentReadSnapshot = {

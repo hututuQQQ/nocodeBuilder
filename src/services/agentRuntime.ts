@@ -235,6 +235,28 @@ export const agentRuntimeApi = {
     });
   },
 
+  claimApproval(
+    projectId: string,
+    input: {
+      approvalId: string;
+      consumedAt?: string;
+      normalizedArgsHash: string;
+      runId: string;
+      toolCallId: string;
+    },
+  ) {
+    return invoke<AgentApproval>("claim_agent_approval", {
+      projectId,
+      claim: {
+        approvalId: input.approvalId,
+        consumedAt: input.consumedAt ?? new Date().toISOString(),
+        normalizedArgsHash: input.normalizedArgsHash,
+        runId: input.runId,
+        toolCallId: input.toolCallId,
+      },
+    });
+  },
+
   saveCheckpoint(projectId: string, checkpoint: AgentRunCheckpoint) {
     return invoke<AgentRunCheckpoint>("save_agent_checkpoint", {
       projectId,

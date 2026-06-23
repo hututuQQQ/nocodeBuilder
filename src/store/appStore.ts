@@ -126,6 +126,7 @@ export type AppState = {
   recordProjectChange: (record: ChangeRecord) => Promise<void>;
   revertAllChanges: () => Promise<void>;
   revertChangedFile: (path: string) => Promise<void>;
+  recoverCurrentAgentRun: () => Promise<void>;
   resumeCurrentAgentRun: () => Promise<void>;
   runProjectCommand: (
     projectId: string,
@@ -224,6 +225,7 @@ const initialState = {
   | "recordProjectChange"
   | "revertAllChanges"
   | "revertChangedFile"
+  | "recoverCurrentAgentRun"
   | "resumeCurrentAgentRun"
   | "runProjectCommand"
   | "selectReviewFile"

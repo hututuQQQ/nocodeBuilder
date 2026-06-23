@@ -572,15 +572,6 @@ export class AgentVerifier {
     }
 
     const cssTokens = parseControlledCssTokens(tokenFile.content);
-
-    if (cssTokens.size === 0) {
-      return skippedCheck(
-        "design-tokens",
-        "DesignTokenVerifier",
-        "Controlled design token CSS block contains no token declarations.",
-      );
-    }
-
     const siteTokens = flattenSiteDesignTokens(siteSpec);
     const valueMismatches = [...cssTokens.entries()]
       .filter(([cssName]) => siteTokens.has(cssName))

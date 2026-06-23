@@ -160,6 +160,24 @@ vi.mock("../services/agentRuntime", () => ({
       fake.approvals.push(approval);
       return approval;
     }),
+    claimApproval: vi.fn(async (_projectId, claim) => {
+      const approval = fake.approvals.find(
+        (item) =>
+          item.id === claim.approvalId &&
+          item.runId === claim.runId &&
+          item.decision === "approved" &&
+          item.normalizedArgsHash === claim.normalizedArgsHash &&
+          !item.consumedAt,
+      );
+
+      if (!approval) {
+        throw new Error("agent-storage: approval consumption claim failed");
+      }
+
+      approval.consumedAt = claim.consumedAt;
+      approval.consumedToolCallId = claim.toolCallId;
+      return approval;
+    }),
     createRun: vi.fn(async (_projectId, run: AgentRun) => {
       if (fake.rejectNextCreateRun) {
         fake.rejectNextCreateRun = false;
@@ -759,6 +777,110 @@ describe("Application runtime adapter", () => {
     expect(run).toMatchObject({
       status: "completed",
       toolCalls: 1,
+    });
+  });
+
+  it("recovers an inactive exploring run by normalizing to planning", async () => {
+    const run = createExistingRun("run-exploring-recover", {
+      phase: "exploring",
+      status: "exploring",
+    });
+    fake.runs.set(run.id, run);
+    fake.checkpoints.push(createCheckpoint(run, {
+      observations: ["Read-only tool was interrupted."],
+    }));
+    fake.actions = [{ type: "finish_candidate", summary: "Recovered from exploring" }];
+    fake.verificationStatuses = ["passed"];
+
+    const result = await modifyCurrentProjectRuntime(createFakeStore(), "Recover exploring", {
+      existingRun: run,
+    });
+
+    expect(result).toBe(true);
+    expect(fake.runs.get(run.id)?.status).toBe("completed");
+    expect(fake.events.map((event) => event.type)).toContain("run.recovered");
+  });
+
+  it("recovers an inactive mutating run without replaying the interrupted write", async () => {
+    const run = createExistingRun("run-mutating-recover", {
+      phase: "mutating",
+      status: "mutating",
+    });
+    fake.runs.set(run.id, run);
+    fake.checkpoints.push(createCheckpoint(run));
+    fake.actions = [{ type: "finish_candidate", summary: "Recovered from mutation" }];
+    fake.verificationStatuses = ["passed"];
+
+    const result = await modifyCurrentProjectRuntime(createFakeStore(), "Recover mutation", {
+      existingRun: run,
+    });
+
+    expect(result).toBe(true);
+    expect(fake.toolNames).toEqual([]);
+    expect(fake.modelContexts[0]).toMatchObject({
+      observations: expect.arrayContaining([
+        expect.objectContaining({
+          content:
+            "The previous write step was interrupted. Reinspect the workspace before applying another mutation.",
+        }),
+      ]),
+    });
+    expect(fake.events.find((event) => event.type === "run.recovered")?.payload)
+      .toMatchObject({
+        nextStatus: "planning",
+        previousStatus: "mutating",
+      });
+  });
+
+  it("recovers an inactive verifying run and re-verifies before completing", async () => {
+    const run = createExistingRun("run-verifying-recover", {
+      phase: "verifying",
+      status: "verifying",
+    });
+    fake.runs.set(run.id, run);
+    fake.checkpoints.push(createCheckpoint(run, {
+      changedFiles: ["app/page.tsx"],
+    }));
+    fake.actions = [{ type: "finish_candidate", summary: "Recovered from verifier" }];
+    fake.verificationStatuses = ["passed"];
+
+    const result = await modifyCurrentProjectRuntime(createFakeStore(), "Recover verifier", {
+      existingRun: run,
+    });
+
+    expect(result).toBe(true);
+    expect(fake.verifierInputs).toHaveLength(1);
+    expect(fake.runs.get(run.id)?.status).toBe("completed");
+    expect(fake.events.map((event) => event.type)).toContain("run.recovered");
+  });
+
+  it("recovers an inactive repairing run within the existing repair budget", async () => {
+    const run = createExistingRun("run-repairing-recover", {
+      phase: "repairing",
+      repairCycles: 1,
+      status: "repairing",
+    });
+    fake.runs.set(run.id, run);
+    fake.checkpoints.push(createCheckpoint(run, {
+      observations: ["Repair the failed build."],
+      repairFeedback: ["Repair the failed build."],
+    }));
+    fake.actions = [{ type: "finish_candidate", summary: "Recovered repair" }];
+    fake.verificationStatuses = ["passed"];
+
+    const result = await modifyCurrentProjectRuntime(createFakeStore(), "Recover repair", {
+      existingRun: run,
+    });
+
+    expect(result).toBe(true);
+    expect(fake.modelContexts[0]).toMatchObject({
+      observations: expect.arrayContaining([
+        expect.objectContaining({ content: "Repair the failed build." }),
+      ]),
+    });
+    expect(fake.runs.get(run.id)).toMatchObject({
+      repairCycles: 1,
+      status: "completed",
     });
   });
 

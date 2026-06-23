@@ -35,6 +35,15 @@ export type RunTransition =
   | { type: "request_pause" }
   | { type: "pause_at_boundary" }
   | { type: "resume" }
+  | {
+      type: "recover_interrupted";
+      checkpointId?: string;
+      nextStatus?: Exclude<
+        AgentRunStatus,
+        "completed" | "failed" | "cancelled" | "budget_exceeded"
+      >;
+      reason: string;
+    }
   | { type: "request_cancel" }
   | { type: "cancel" }
   | { type: "fail"; reason: string };
@@ -54,7 +63,7 @@ const TERMINAL_STATUSES = new Set<AgentRunStatus>([
 type RunTransitionType = RunTransition["type"];
 
 const LEGAL_TRANSITIONS: Record<AgentRunStatus, ReadonlySet<RunTransitionType>> = {
-  created: new Set(["start", "request_cancel", "cancel", "fail"]),
+  created: new Set(["start", "recover_interrupted", "request_cancel", "cancel", "fail"]),
   planning: new Set([
     "enter_planning",
     "enter_exploring",
@@ -63,6 +72,7 @@ const LEGAL_TRANSITIONS: Record<AgentRunStatus, ReadonlySet<RunTransitionType>> 
     "enter_verifying",
     "request_pause",
     "pause_at_boundary",
+    "recover_interrupted",
     "request_cancel",
     "budget_exceeded",
     "cancel",
@@ -75,6 +85,7 @@ const LEGAL_TRANSITIONS: Record<AgentRunStatus, ReadonlySet<RunTransitionType>> 
     "enter_verifying",
     "request_pause",
     "pause_at_boundary",
+    "recover_interrupted",
     "request_cancel",
     "budget_exceeded",
     "cancel",
@@ -86,6 +97,7 @@ const LEGAL_TRANSITIONS: Record<AgentRunStatus, ReadonlySet<RunTransitionType>> 
     "enter_verifying",
     "request_pause",
     "pause_at_boundary",
+    "recover_interrupted",
     "request_cancel",
     "budget_exceeded",
     "cancel",
@@ -95,6 +107,7 @@ const LEGAL_TRANSITIONS: Record<AgentRunStatus, ReadonlySet<RunTransitionType>> 
     "approval_granted",
     "approval_denied",
     "approval_expired",
+    "recover_interrupted",
     "request_cancel",
     "budget_exceeded",
     "cancel",
@@ -107,6 +120,7 @@ const LEGAL_TRANSITIONS: Record<AgentRunStatus, ReadonlySet<RunTransitionType>> 
     "repair_budget_exceeded",
     "request_pause",
     "pause_at_boundary",
+    "recover_interrupted",
     "request_cancel",
     "budget_exceeded",
     "cancel",
@@ -120,12 +134,13 @@ const LEGAL_TRANSITIONS: Record<AgentRunStatus, ReadonlySet<RunTransitionType>> 
     "repair_budget_exceeded",
     "request_pause",
     "pause_at_boundary",
+    "recover_interrupted",
     "request_cancel",
     "budget_exceeded",
     "cancel",
     "fail",
   ]),
-  paused: new Set(["resume", "request_cancel", "cancel", "fail"]),
+  paused: new Set(["resume", "recover_interrupted", "request_cancel", "cancel", "fail"]),
   completed: new Set(),
   failed: new Set(),
   cancelled: new Set(),
@@ -335,6 +350,25 @@ export class RunStateMachine {
         return this.move(currentRun, "planning", "planning", "run.resumed", {}, now, {
           pauseRequested: false,
         });
+      case "recover_interrupted": {
+        const nextStatus = transition.nextStatus ?? currentRun.status;
+        return this.move(
+          currentRun,
+          nextStatus,
+          nextStatus,
+          "run.recovered",
+          {
+            checkpointId: transition.checkpointId,
+            nextStatus,
+            previousStatus: currentRun.status,
+            reason: transition.reason,
+          },
+          now,
+          {
+            pauseRequested: false,
+          },
+        );
+      }
       case "request_cancel":
         return this.move(
           currentRun,

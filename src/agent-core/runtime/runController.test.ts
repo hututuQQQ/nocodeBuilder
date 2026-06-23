@@ -164,6 +164,119 @@ describe("Headless RunController", () => {
     expect(ports.approvalRecords).toHaveLength(2);
   });
 
+  it("executes identical approved actions through independent approval ids", async () => {
+    const deleteArgs = { paths: ["components/Old.tsx"], summary: "Remove obsolete component" };
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "tool_call", tool: "delete_files", args: deleteArgs },
+        { type: "tool_call", tool: "delete_files", args: deleteArgs },
+        { type: "finish_candidate", summary: "Removed component twice" },
+      ],
+      verificationStatuses: ["passed", "passed", "passed"],
+    });
+    const controller = new RunController(ports);
+
+    const waitingA = await controller.start({
+      contract: compileTaskContract({ objective: "Remove obsolete component twice" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-approval-repeat",
+    });
+
+    expect(waitingA.status).toBe("waiting_approval");
+    const approvalA = ports.approvalRecords[0]!;
+    ports.resolveLatestApproval("approved");
+
+    const waitingB = await controller.resume("run-approval-repeat");
+
+    expect(waitingB.status).toBe("waiting_approval");
+    expect(waitingB.toolCalls).toBe(1);
+    expect(approvalA.consumedAt).toBeDefined();
+    expect(ports.approvalRecords).toHaveLength(2);
+    const approvalB = ports.approvalRecords[1]!;
+    expect(approvalB.id).not.toBe(approvalA.id);
+    expect(approvalB.normalizedArgsHash).toBe(approvalA.normalizedArgsHash);
+
+    ports.resolveLatestApproval("approved");
+    const completed = await controller.resume("run-approval-repeat");
+
+    expect(completed.status).toBe("completed");
+    expect(completed.toolCalls).toBe(2);
+    expect(approvalB.consumedAt).toBeDefined();
+    expect(ports.events.filter((event) => event.type === "approval.consumed"))
+      .toHaveLength(2);
+    expect(ports.events.filter((event) => event.type === "tool.completed"))
+      .toHaveLength(2);
+  });
+
+  it("does not replay an approval that was already claimed before resume", async () => {
+    const deleteArgs = { paths: ["components/Old.tsx"], summary: "Remove obsolete component" };
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "tool_call", tool: "delete_files", args: deleteArgs },
+        { type: "finish_candidate", summary: "Should not execute" },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    const controller = new RunController(ports);
+
+    const waiting = await controller.start({
+      contract: compileTaskContract({ objective: "Remove obsolete component" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-approval-crash-resume",
+    });
+
+    expect(waiting.status).toBe("waiting_approval");
+    const approvalA = ports.approvalRecords[0]!;
+    approvalA.decision = "approved";
+    approvalA.resolvedAt = "2026-01-01T00:01:00.000Z";
+    approvalA.consumedAt = "2026-01-01T00:01:30.000Z";
+    approvalA.consumedToolCallId = "tool-call-before-crash";
+
+    const recovered = await controller.resume("run-approval-crash-resume");
+
+    expect(recovered.status).toBe("waiting_approval");
+    expect(recovered.toolCalls).toBe(0);
+    expect(ports.approvalRecords).toHaveLength(2);
+    expect(ports.events.filter((event) => event.type === "tool.completed"))
+      .toHaveLength(0);
+  });
+
+  it("does not execute the tool when an approval claim fails", async () => {
+    const deleteArgs = { paths: ["components/Old.tsx"], summary: "Remove obsolete component" };
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "tool_call", tool: "delete_files", args: deleteArgs },
+        { type: "finish_candidate", summary: "Claim failed safely" },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    const controller = new RunController(ports);
+
+    const waiting = await controller.start({
+      contract: compileTaskContract({ objective: "Remove obsolete component" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-approval-claim-race",
+    });
+
+    expect(waiting.status).toBe("waiting_approval");
+    ports.resolveLatestApproval("approved");
+    ports.approvals.claimApprovedAuthorization = async () => {
+      throw new Error("approval was claimed elsewhere");
+    };
+
+    const completed = await controller.resume("run-approval-claim-race");
+
+    expect(completed.status).toBe("completed");
+    expect(completed.toolCalls).toBe(0);
+    expect(ports.events.filter((event) => event.type === "approval.consume_failed"))
+      .toHaveLength(1);
+    expect(ports.events.filter((event) => event.type === "tool.completed"))
+      .toHaveLength(0);
+  });
+
   it("scenario E returns a policy observation after approval is denied", async () => {
     const deleteArgs = { paths: ["components/Old.tsx"], summary: "Remove obsolete component" };
     const ports = createFakePorts({
@@ -703,12 +816,37 @@ function createFakePorts({
         approvals.find(
           (approval) => approval.runId === runId && !approval.decision && !approval.resolvedAt,
         ) ?? null,
-      listApprovedHashes: async (runId) =>
-        new Set(
-          approvals
-            .filter((approval) => approval.runId === runId && approval.decision === "approved")
-            .map((approval) => approval.normalizedArgsHash),
+      listApprovedAuthorizations: async (runId) =>
+        approvals.filter(
+          (approval) =>
+            approval.runId === runId &&
+            approval.decision === "approved" &&
+            !approval.consumedAt,
         ),
+      claimApprovedAuthorization: async ({
+        approvalId,
+        consumedAt,
+        normalizedArgsHash,
+        runId,
+        toolCallId,
+      }) => {
+        const approval = approvals.find(
+          (item) =>
+            item.id === approvalId &&
+            item.runId === runId &&
+            item.decision === "approved" &&
+            item.normalizedArgsHash === normalizedArgsHash &&
+            !item.consumedAt,
+        );
+
+        if (!approval) {
+          throw new Error("Approval claim failed.");
+        }
+
+        approval.consumedAt = consumedAt;
+        approval.consumedToolCallId = toolCallId;
+        return approval;
+      },
       resolve: async (runId, approvalId, decision, resolvedAt) => {
         const approval = approvals.find((item) => item.runId === runId && item.id === approvalId);
 

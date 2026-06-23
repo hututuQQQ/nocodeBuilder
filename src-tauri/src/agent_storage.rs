@@ -18,7 +18,7 @@ const ARTIFACTS_DIR: &str = "artifacts";
 const METADATA_DIR: &str = ".aibuilder";
 const SITE_SPEC_FILE: &str = "site-spec.json";
 const SOURCE_MAP_FILE: &str = "source-map.json";
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -160,6 +160,10 @@ pub struct AgentApprovalRecord {
     pub resolved_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumed_tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -183,6 +187,16 @@ pub struct AgentApprovalResolveInput {
     pub approval_id: String,
     pub decision: String,
     pub resolved_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentApprovalClaimInput {
+    pub run_id: String,
+    pub approval_id: String,
+    pub normalized_args_hash: String,
+    pub tool_call_id: String,
+    pub consumed_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -608,6 +622,16 @@ pub async fn resolve_agent_approval(
 }
 
 #[tauri::command]
+pub async fn claim_agent_approval(
+    project_id: String,
+    claim: AgentApprovalClaimInput,
+) -> Result<AgentApprovalRecord, String> {
+    let project_dir = resolve_project_dir(&project_id)?;
+    let pool = open_project_agent_db(&project_dir).await?;
+    claim_agent_approval_with_pool(&pool, claim).await
+}
+
+#[tauri::command]
 pub async fn save_agent_checkpoint(
     project_id: String,
     checkpoint: AgentCheckpointInput,
@@ -842,6 +866,8 @@ async fn init_database(pool: &SqlitePool) -> Result<(), String> {
             expires_at TEXT NOT NULL,
             resolved_at TEXT,
             decision TEXT,
+            consumed_at TEXT,
+            consumed_tool_call_id TEXT,
             FOREIGN KEY(run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
         )
         "#,
@@ -1154,6 +1180,38 @@ async fn resolve_agent_approval_with_pool(
     read_agent_approval_with_pool(pool, &resolution.approval_id).await
 }
 
+async fn claim_agent_approval_with_pool(
+    pool: &SqlitePool,
+    claim: AgentApprovalClaimInput,
+) -> Result<AgentApprovalRecord, String> {
+    let result = sqlx::query(
+        r#"
+        UPDATE approvals
+        SET consumed_at = ?1,
+            consumed_tool_call_id = ?2
+        WHERE id = ?3
+          AND run_id = ?4
+          AND decision = 'approved'
+          AND normalized_args_hash = ?5
+          AND consumed_at IS NULL
+        "#,
+    )
+    .bind(&claim.consumed_at)
+    .bind(&claim.tool_call_id)
+    .bind(&claim.approval_id)
+    .bind(&claim.run_id)
+    .bind(&claim.normalized_args_hash)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("agent-storage: failed to claim approval: {error}"))?;
+
+    if result.rows_affected() != 1 {
+        return Err("agent-storage: approval consumption claim failed".to_string());
+    }
+
+    read_agent_approval_with_pool(pool, &claim.approval_id).await
+}
+
 async fn read_agent_approval_with_pool(
     pool: &SqlitePool,
     approval_id: &str,
@@ -1456,6 +1514,8 @@ fn row_to_approval(row: sqlx::sqlite::SqliteRow) -> Result<AgentApprovalRecord, 
         expires_at: row.try_get("expires_at").map_err(row_error)?,
         resolved_at: row.try_get("resolved_at").map_err(row_error)?,
         decision: row.try_get("decision").map_err(row_error)?,
+        consumed_at: row.try_get("consumed_at").map_err(row_error)?,
+        consumed_tool_call_id: row.try_get("consumed_tool_call_id").map_err(row_error)?,
     })
 }
 
@@ -1534,6 +1594,9 @@ async fn migrate_approval_columns(pool: &SqlitePool) -> Result<(), String> {
     let has_normalized_args_hash =
         table_has_column(pool, "approvals", "normalized_args_hash").await?;
     let has_created_at = table_has_column(pool, "approvals", "created_at").await?;
+    let has_consumed_at = table_has_column(pool, "approvals", "consumed_at").await?;
+    let has_consumed_tool_call_id =
+        table_has_column(pool, "approvals", "consumed_tool_call_id").await?;
     let has_legacy_args_hash = table_has_column(pool, "approvals", "args_hash").await?;
 
     if !has_normalized_args_hash {
@@ -1551,6 +1614,24 @@ async fn migrate_approval_columns(pool: &SqlitePool) -> Result<(), String> {
             .await
             .map_err(|error| {
                 format!("agent-storage: failed to add approval created_at column: {error}")
+            })?;
+    }
+
+    if !has_consumed_at {
+        sqlx::query("ALTER TABLE approvals ADD COLUMN consumed_at TEXT")
+            .execute(pool)
+            .await
+            .map_err(|error| {
+                format!("agent-storage: failed to add approval consumed timestamp column: {error}")
+            })?;
+    }
+
+    if !has_consumed_tool_call_id {
+        sqlx::query("ALTER TABLE approvals ADD COLUMN consumed_tool_call_id TEXT")
+            .execute(pool)
+            .await
+            .map_err(|error| {
+                format!("agent-storage: failed to add approval consumed tool call column: {error}")
             })?;
     }
 
@@ -2015,6 +2096,122 @@ mod tests {
                 pending_after_resolve.is_none(),
                 "resolved approvals must no longer be pending"
             );
+
+            let _ = fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn atomically_claims_approved_authorization_once() {
+        tauri::async_runtime::block_on(async {
+            let root = std::env::temp_dir().join(format!("agent-storage-claim-{}", rand_suffix()));
+            fs::create_dir_all(root.join(METADATA_DIR)).expect("create metadata dir");
+            let pool = open_project_agent_db(&root).await.expect("open db");
+
+            insert_test_run(&pool, "run-claim").await;
+
+            create_agent_approval_with_pool(
+                &pool,
+                AgentApprovalCreateInput {
+                    id: "approval-claim".to_string(),
+                    run_id: "run-claim".to_string(),
+                    tool_call_id: "tool-call-request".to_string(),
+                    tool_name: "delete_files".to_string(),
+                    normalized_args_hash: "12:claim".to_string(),
+                    target_resources: vec!["app/page.tsx".to_string()],
+                    exact_side_effect: "delete app/page.tsx".to_string(),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    expires_at: "2026-01-01T00:10:00Z".to_string(),
+                },
+            )
+            .await
+            .expect("create approval");
+
+            resolve_agent_approval_with_pool(
+                &pool,
+                AgentApprovalResolveInput {
+                    run_id: "run-claim".to_string(),
+                    approval_id: "approval-claim".to_string(),
+                    decision: "approved".to_string(),
+                    resolved_at: "2026-01-01T00:01:00Z".to_string(),
+                },
+            )
+            .await
+            .expect("approve authorization");
+
+            let claimed = claim_agent_approval_with_pool(
+                &pool,
+                AgentApprovalClaimInput {
+                    run_id: "run-claim".to_string(),
+                    approval_id: "approval-claim".to_string(),
+                    normalized_args_hash: "12:claim".to_string(),
+                    tool_call_id: "tool-call-execute".to_string(),
+                    consumed_at: "2026-01-01T00:02:00Z".to_string(),
+                },
+            )
+            .await
+            .expect("claim once");
+
+            assert_eq!(claimed.consumed_at.as_deref(), Some("2026-01-01T00:02:00Z"));
+            assert_eq!(
+                claimed.consumed_tool_call_id.as_deref(),
+                Some("tool-call-execute")
+            );
+
+            let second_claim = claim_agent_approval_with_pool(
+                &pool,
+                AgentApprovalClaimInput {
+                    run_id: "run-claim".to_string(),
+                    approval_id: "approval-claim".to_string(),
+                    normalized_args_hash: "12:claim".to_string(),
+                    tool_call_id: "tool-call-replay".to_string(),
+                    consumed_at: "2026-01-01T00:03:00Z".to_string(),
+                },
+            )
+            .await;
+            assert!(second_claim.is_err(), "same approval must not claim twice");
+
+            create_agent_approval_with_pool(
+                &pool,
+                AgentApprovalCreateInput {
+                    id: "approval-wrong-hash".to_string(),
+                    run_id: "run-claim".to_string(),
+                    tool_call_id: "tool-call-request-2".to_string(),
+                    tool_name: "delete_files".to_string(),
+                    normalized_args_hash: "12:expected".to_string(),
+                    target_resources: vec!["components/Old.tsx".to_string()],
+                    exact_side_effect: "delete components/Old.tsx".to_string(),
+                    created_at: "2026-01-01T00:04:00Z".to_string(),
+                    expires_at: "2026-01-01T00:10:00Z".to_string(),
+                },
+            )
+            .await
+            .expect("create second approval");
+
+            resolve_agent_approval_with_pool(
+                &pool,
+                AgentApprovalResolveInput {
+                    run_id: "run-claim".to_string(),
+                    approval_id: "approval-wrong-hash".to_string(),
+                    decision: "approved".to_string(),
+                    resolved_at: "2026-01-01T00:05:00Z".to_string(),
+                },
+            )
+            .await
+            .expect("approve second authorization");
+
+            let wrong_hash = claim_agent_approval_with_pool(
+                &pool,
+                AgentApprovalClaimInput {
+                    run_id: "run-claim".to_string(),
+                    approval_id: "approval-wrong-hash".to_string(),
+                    normalized_args_hash: "12:actual".to_string(),
+                    tool_call_id: "tool-call-wrong".to_string(),
+                    consumed_at: "2026-01-01T00:06:00Z".to_string(),
+                },
+            )
+            .await;
+            assert!(wrong_hash.is_err(), "hash mismatch must not claim approval");
 
             let _ = fs::remove_dir_all(root);
         });

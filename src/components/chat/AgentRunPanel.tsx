@@ -11,6 +11,8 @@ import {
   XCircle,
 } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
+import { isRunControllerActive } from "../../agent-runtime/agentRunControl";
+import { getLegalRunTransitions } from "../../agent-core/runtime/runStateMachine";
 import type {
   AgentApproval,
   AgentEvent,
@@ -37,7 +39,7 @@ export function AgentRunPanel() {
     (state) => state.denyCurrentAgentApproval,
   );
   const pauseCurrentAgentRun = useAppStore((state) => state.pauseCurrentAgentRun);
-  const resumeCurrentAgentRun = useAppStore((state) => state.resumeCurrentAgentRun);
+  const recoverCurrentAgentRun = useAppStore((state) => state.recoverCurrentAgentRun);
   const sendAgentSteering = useAppStore((state) => state.sendAgentSteering);
 
   if (!currentRun) {
@@ -56,8 +58,17 @@ export function AgentRunPanel() {
     setSteering("");
   }
 
-  const canPause = !isTerminalRun(currentRun) && currentRun.status !== "paused";
-  const canResume = currentRun.status === "paused";
+  const controllerActive = isRunControllerActive(currentRun.id);
+  const legalTransitions = getLegalRunTransitions(currentRun.status);
+  const approvalPending = currentApproval ? isApprovalPending(currentApproval) : false;
+  const canPause =
+    controllerActive &&
+    !isTerminalRun(currentRun) &&
+    legalTransitions.includes("request_pause");
+  const canResume =
+    !controllerActive &&
+    !isTerminalRun(currentRun) &&
+    !(currentRun.status === "waiting_approval" && approvalPending);
   const canCancel = !isTerminalRun(currentRun);
 
   return (
@@ -94,8 +105,8 @@ export function AgentRunPanel() {
             aria-label="Resume run"
             className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-emerald-400/40 hover:text-emerald-200 disabled:cursor-not-allowed disabled:text-zinc-700"
             disabled={!canResume}
-            onClick={() => void resumeCurrentAgentRun()}
-            title="Resume"
+            onClick={() => void recoverCurrentAgentRun()}
+            title={currentRun.status === "paused" ? "Resume" : "Recover"}
             type="button"
           >
             <Play size={14} aria-hidden="true" />
@@ -121,7 +132,7 @@ export function AgentRunPanel() {
         />
       </div>
 
-      {currentApproval ? (
+      {currentApproval && approvalPending ? (
         <ApprovalCard
           approval={currentApproval}
           onApprove={() => void approveCurrentAgentApproval()}
@@ -366,6 +377,14 @@ function formatBytes(sizeBytes: number) {
 
 function formatRunStatus(run: AgentRun) {
   return `${run.status} / ${run.phase} / r${run.repairCycles}`;
+}
+
+function isApprovalPending(approval: AgentApproval) {
+  return (
+    !approval.decision &&
+    !approval.resolvedAt &&
+    new Date(approval.expiresAt).getTime() > Date.now()
+  );
 }
 
 function isTerminalRun(run: AgentRun) {

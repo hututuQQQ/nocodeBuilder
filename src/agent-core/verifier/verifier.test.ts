@@ -804,6 +804,199 @@ describe("AgentVerifier", () => {
       });
   });
 
+  it("fails when a controlled CSS token block is empty but SiteSpec has tokens", async () => {
+    const run = createRun("Change the theme color", "full_site");
+    const verifier = new AgentVerifier({
+      httpProbe: async () => ({
+        ok: true,
+        status: 200,
+        summary: "ok",
+      }),
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+        "styles/nocode-tokens.css": [
+          "/* nocode-builder-design-tokens:start */",
+          ":root {",
+          "}",
+          "/* nocode-builder-design-tokens:end */",
+        ].join("\n"),
+      }),
+      readSiteSpec: async () => ({
+        ...createSiteSpec(),
+        designSystem: {
+          ...createSiteSpec().designSystem,
+          colors: {
+            primary: "#0f766e",
+            secondary: "#164e63",
+          },
+        },
+      }),
+      runCommand: async (command) => ({
+        command,
+        exitCode: 0,
+        output: "ok",
+        success: true,
+      }),
+    });
+
+    const report = await verifier.verify({
+      changedFiles: ["styles/nocode-tokens.css"],
+      packageChanged: false,
+      previewUrl: "http://localhost:3000",
+      run,
+    });
+
+    expect(report.status).toBe("failed");
+    expect(report.checks.find((check) => check.id === "design-tokens"))
+      .toMatchObject({
+        status: "failed",
+        summary:
+          "Design token mismatch: 0 value mismatch(es), 2 missing in CSS, 0 missing in SiteSpec.",
+        details: {
+          missingInCss: ["colors-primary", "colors-secondary"],
+        },
+      });
+  });
+
+  it("passes when a controlled CSS token block and SiteSpec tokens are both empty", async () => {
+    const run = createRun("Change the theme color", "full_site");
+    const verifier = new AgentVerifier({
+      httpProbe: async () => ({
+        ok: true,
+        status: 200,
+        summary: "ok",
+      }),
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+        "styles/nocode-tokens.css": [
+          "/* nocode-builder-design-tokens:start */",
+          ":root {",
+          "}",
+          "/* nocode-builder-design-tokens:end */",
+        ].join("\n"),
+      }),
+      readSiteSpec: async () => createSiteSpec(),
+      runCommand: async (command) => ({
+        command,
+        exitCode: 0,
+        output: "ok",
+        success: true,
+      }),
+    });
+
+    const report = await verifier.verify({
+      changedFiles: ["styles/nocode-tokens.css"],
+      packageChanged: false,
+      previewUrl: "http://localhost:3000",
+      run,
+    });
+
+    expect(report.status).toBe("passed");
+    expect(report.checks.find((check) => check.id === "design-tokens"))
+      .toMatchObject({
+        status: "passed",
+        summary: "0 controlled CSS design token(s) match SiteSpec designSystem.",
+      });
+  });
+
+  it("skips design token checks only when the controlled CSS token block is absent", async () => {
+    const run = createRun("Change the theme color", "full_site");
+    const verifier = new AgentVerifier({
+      httpProbe: async () => ({
+        ok: true,
+        status: 200,
+        summary: "ok",
+      }),
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+      }),
+      readSiteSpec: async () => ({
+        ...createSiteSpec(),
+        designSystem: {
+          ...createSiteSpec().designSystem,
+          colors: { primary: "#0f766e" },
+        },
+      }),
+      runCommand: async (command) => ({
+        command,
+        exitCode: 0,
+        output: "ok",
+        success: true,
+      }),
+    });
+
+    const report = await verifier.verify({
+      changedFiles: ["app/page.tsx"],
+      packageChanged: false,
+      previewUrl: "http://localhost:3000",
+      run,
+    });
+
+    expect(report.checks.find((check) => check.id === "design-tokens"))
+      .toMatchObject({
+        status: "skipped",
+        summary: "No controlled design token CSS block was found.",
+      });
+  });
+
+  it("fails when controlled CSS has tokens but SiteSpec tokens are empty", async () => {
+    const run = createRun("Change the theme color", "full_site");
+    const verifier = new AgentVerifier({
+      httpProbe: async () => ({
+        ok: true,
+        status: 200,
+        summary: "ok",
+      }),
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+        "styles/nocode-tokens.css": [
+          "/* nocode-builder-design-tokens:start */",
+          ":root {",
+          "  --ncb-colors-primary: #0f766e;",
+          "}",
+          "/* nocode-builder-design-tokens:end */",
+        ].join("\n"),
+      }),
+      readSiteSpec: async () => createSiteSpec(),
+      runCommand: async (command) => ({
+        command,
+        exitCode: 0,
+        output: "ok",
+        success: true,
+      }),
+    });
+
+    const report = await verifier.verify({
+      changedFiles: ["styles/nocode-tokens.css"],
+      packageChanged: false,
+      previewUrl: "http://localhost:3000",
+      run,
+    });
+
+    expect(report.status).toBe("failed");
+    expect(report.checks.find((check) => check.id === "design-tokens"))
+      .toMatchObject({
+        status: "failed",
+        summary:
+          "Design token mismatch: 0 value mismatch(es), 0 missing in CSS, 1 missing in SiteSpec.",
+        details: {
+          missingInSiteSpec: ["colors-primary"],
+        },
+      });
+  });
+
   it("passes approved dependency changes after comparing baseline package.json", async () => {
     const run = createRun("Change dependency setup", "full_site");
     const verifier = new AgentVerifier({

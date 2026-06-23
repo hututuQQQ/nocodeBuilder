@@ -90,6 +90,33 @@ describe("RunStateMachine", () => {
     expect(cancelled.status).toBe("cancelled");
   });
 
+  it("emits explicit recovery events for interrupted non-terminal runs", () => {
+    const machine = new RunStateMachine();
+    const run = machine.createRun({
+      contract: compileTaskContract({ objective: "Adjust styles" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-1",
+    });
+    const started = machine.transition(run, { type: "start" }).run;
+    const exploring = machine.transition(started, { type: "enter_exploring" }).run;
+    const recovered = machine.transition(exploring, {
+      checkpointId: "checkpoint-1",
+      nextStatus: "planning",
+      reason: "exploring-run-normalized-to-planning",
+      type: "recover_interrupted",
+    });
+
+    expect(recovered.run.status).toBe("planning");
+    expect(recovered.event.type).toBe("run.recovered");
+    expect(recovered.event.payload).toEqual({
+      checkpointId: "checkpoint-1",
+      nextStatus: "planning",
+      previousStatus: "exploring",
+      reason: "exploring-run-normalized-to-planning",
+    });
+  });
+
   it("only resolves approval while waiting for approval", () => {
     const machine = new RunStateMachine();
     const run = machine.createRun({

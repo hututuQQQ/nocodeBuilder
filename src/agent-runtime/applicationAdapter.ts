@@ -734,19 +734,18 @@ function createApprovalPort(
         .find((approval) => !approval.decision && !approval.resolvedAt) ?? null;
     },
     getPending: (runId) => agentRuntimeApi.getPendingApproval(projectId, runId),
-    listApprovedHashes: async (runId) => {
+    listApprovedAuthorizations: async (runId) => {
       const approvals = await agentRuntimeApi.listApprovals(projectId, runId);
-      return new Set(
-        approvals
-          .filter(
-            (approval) =>
-              approval.decision === "approved" &&
-              approval.resolvedAt &&
-              wasResolvedBeforeExpiry(approval),
-          )
-          .map((approval) => approval.normalizedArgsHash),
+      return approvals.filter(
+        (approval) =>
+          approval.decision === "approved" &&
+          approval.resolvedAt &&
+          !approval.consumedAt &&
+          wasResolvedBeforeExpiry(approval),
       );
     },
+    claimApprovedAuthorization: (input) =>
+      agentRuntimeApi.claimApproval(projectId, input),
     resolve: async (runId, approvalId, decision, resolvedAt) => {
       const resolved = await agentRuntimeApi.resolveApproval(
         projectId,

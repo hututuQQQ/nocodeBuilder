@@ -98,7 +98,14 @@ export type ApprovalPort = {
   getLatestUnresolved(runId: string): Promise<AgentApproval | null>;
   getPending(runId: string): Promise<AgentApproval | null>;
   getLatestResolved(runId: string): Promise<AgentApproval | null>;
-  listApprovedHashes(runId: string): Promise<Set<string>>;
+  listApprovedAuthorizations(runId: string): Promise<AgentApproval[]>;
+  claimApprovedAuthorization(input: {
+    approvalId: string;
+    consumedAt: string;
+    normalizedArgsHash: string;
+    runId: string;
+    toolCallId: string;
+  }): Promise<AgentApproval>;
   resolve(
     runId: string,
     approvalId: string,
@@ -151,7 +158,6 @@ type RunDriveState = {
   baselineCommandResults?: Record<string, unknown>;
   baselinePackageJson?: string | null;
   changedFiles: Set<string>;
-  consumedApprovalHashes: Set<string>;
   deletedFiles: Set<string>;
   finishSummary?: string;
   latestReportId?: string;
@@ -204,15 +210,79 @@ export class RunController {
     }
 
     let run = loaded;
+    const previousStatus = run.status;
+
+    if (isTerminalAgentRunStatus(run.status)) {
+      return run;
+    }
+
+    await this.appendRecoveryRequested(run, "manual-resume");
 
     let restoredState: RunDriveState | undefined;
 
-    if (run.status === "paused") {
+    if (run.status === "created") {
+      run = await this.commit(run, this.machine.transition(run, { type: "start" }));
+      const checkpoint = await this.saveCheckpoint(
+        run,
+        createEmptyDriveState(),
+        "recover-created-start",
+      );
+      await this.appendRecoveredEvent({
+        checkpointId: checkpoint.id,
+        nextStatus: run.status,
+        previousStatus,
+        reason: "created-run-restarted",
+        runId: run.id,
+      });
+    } else if (run.status === "paused") {
       run = await this.commit(run, this.machine.transition(run, { type: "resume" }));
+      const restored = await this.restoreCheckpointBundle(run);
+      restoredState = restored.state;
+      await this.appendRecoveredEvent({
+        checkpointId: restored.checkpointId,
+        nextStatus: run.status,
+        previousStatus,
+        reason: "paused-run-resumed",
+        runId: run.id,
+      });
     } else if (run.status === "waiting_approval") {
       const resumedApproval = await this.resumeApproval(run, signal);
       run = resumedApproval.run;
       restoredState = resumedApproval.state;
+      if (!resumedApproval.recoveredEventWritten) {
+        await this.appendRecoveredEvent({
+          checkpointId: resumedApproval.checkpointId,
+          nextStatus: run.status,
+          previousStatus,
+          reason: resumedApproval.recoveryReason,
+          runId: run.id,
+        });
+      }
+    } else {
+      const restored = await this.restoreCheckpointBundle(run);
+      restoredState = restored.state;
+
+      if (run.status === "mutating") {
+        restoredState.observations.push(
+          "The previous write step was interrupted. Reinspect the workspace before applying another mutation.",
+        );
+      } else if (run.status === "verifying") {
+        restoredState.observations.push(
+          "The previous verification step was interrupted. Re-run verification before completing the run.",
+        );
+      }
+
+      const recoveryReason = recoveryReasonForStatus(run.status);
+      run = await this.commit(
+        run,
+        this.machine.transition(run, {
+          checkpointId: restored.checkpointId,
+          nextStatus: "planning",
+          reason: recoveryReason,
+          type: "recover_interrupted",
+        }),
+      );
+      await this.saveCheckpoint(run, restoredState, `recover:${recoveryReason}`);
     }
 
     if (isTerminalAgentRunStatus(run.status) || run.status === "waiting_approval") {
@@ -355,14 +425,15 @@ export class RunController {
       }
     }
 
-    const persistedApprovedHashes = await this.ports.approvals.listApprovedHashes(run.id);
+    const approvedAuthorizations =
+      await this.ports.approvals.listApprovedAuthorizations(run.id);
     const approvedHashes = new Set(
-      [...persistedApprovedHashes].filter((hash) => !state.consumedApprovalHashes.has(hash)),
+      approvedAuthorizations.map((approval) => approval.normalizedArgsHash),
     );
     const actionApprovalHash = normalizeApprovalHash(run.id, action.tool, action.args);
-    const willConsumeApprovalHash = approvedHashes.has(actionApprovalHash)
-      ? actionApprovalHash
-      : null;
+    const approvedAuthorization = approvedAuthorizations.find(
+      (approval) => approval.normalizedArgsHash === actionApprovalHash,
+    ) ?? null;
     const policyDecision = this.policy.evaluate({
       approvedHashes,
       args: action.args,
@@ -406,12 +477,59 @@ export class RunController {
       return waitingRun;
     }
 
+    const toolCallId = createId("tool-call");
+
+    if (approvedAuthorization) {
+      const consumedAt = this.ports.clock.now();
+
+      try {
+        await this.ports.approvals.claimApprovedAuthorization({
+          approvalId: approvedAuthorization.id,
+          consumedAt,
+          normalizedArgsHash: actionApprovalHash,
+          runId: run.id,
+          toolCallId,
+        });
+        await this.ports.eventStore.append({
+          runId: run.id,
+          type: "approval.consumed",
+          timestamp: consumedAt,
+          payload: {
+            approvalId: approvedAuthorization.id,
+            consumedAt,
+            normalizedArgsHash: actionApprovalHash,
+            toolCallId,
+            toolName: action.tool,
+          },
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        state.observations.push(
+          `Approved authorization for ${action.tool} could not be claimed. Request a fresh approval before executing this action.`,
+        );
+        await this.ports.eventStore.append({
+          runId: run.id,
+          type: "approval.consume_failed",
+          timestamp: this.ports.clock.now(),
+          payload: {
+            approvalId: approvedAuthorization.id,
+            normalizedArgsHash: actionApprovalHash,
+            reason: message,
+            toolCallId,
+            toolName: action.tool,
+          },
+        });
+        await this.saveCheckpoint(run, state, "approval-claim-failed");
+        return run;
+      }
+    }
+
     const startedAt = this.ports.clock.now();
     await this.ports.eventStore.append({
       runId: run.id,
       type: "tool.started",
       timestamp: startedAt,
-      payload: { tool: action.tool },
+      payload: { tool: action.tool, toolCallId },
     });
 
     if (tool.readOnly && run.status !== "exploring") {
@@ -454,10 +572,6 @@ export class RunController {
       state.readSnapshots,
       result.workspaceEffects?.readSnapshots ?? [],
     );
-    if (willConsumeApprovalHash) {
-      state.consumedApprovalHashes.add(willConsumeApprovalHash);
-    }
-
     const mutationDelta = !tool.readOnly && changed.length + deleted.length > 0 ? 1 : 0;
     const nextRun = await this.ports.runStore.recordProgress(
       run,
@@ -570,7 +684,10 @@ export class RunController {
       return exceededRun;
     }
 
-    const approvedHashes = await this.ports.approvals.listApprovedHashes(run.id);
+    const approvedHashes = new Set(
+      (await this.ports.approvals.listApprovedAuthorizations(run.id))
+        .map((approval) => approval.normalizedArgsHash),
+    );
 
     for (const { action, tool } of toolEntries) {
       const policyDecision = this.policy.evaluate({
@@ -769,11 +886,18 @@ export class RunController {
   private async resumeApproval(
     run: AgentRun,
     signal?: AbortSignal,
-  ): Promise<{ run: AgentRun; state?: RunDriveState }> {
+  ): Promise<{
+    checkpointId?: string;
+    recoveredEventWritten?: boolean;
+    recoveryReason: string;
+    run: AgentRun;
+    state?: RunDriveState;
+  }> {
     const unresolved = await this.ports.approvals.getLatestUnresolved(run.id);
 
     if (unresolved && isApprovalExpired(unresolved, this.ports.clock.now())) {
-      const state = await this.restoreCheckpoint(run);
+      const restored = await this.restoreCheckpointBundle(run);
+      const state = restored.state;
       await this.ports.approvals.resolve(
         run.id,
         unresolved.id,
@@ -792,20 +916,53 @@ export class RunController {
         }),
       );
       await this.saveCheckpoint(nextRun, state, "approval-expired");
-      return { run: nextRun, state };
+      return {
+        checkpointId: restored.checkpointId,
+        recoveryReason: "approval-expired",
+        run: nextRun,
+        state,
+      };
     }
 
     if (unresolved ?? await this.ports.approvals.getPending(run.id)) {
-      return { run };
+      const checkpoint = await this.ports.checkpoints.getLatest(run.id);
+      return {
+        checkpointId: checkpoint?.id,
+        recoveryReason: "pending-approval-still-valid",
+        run,
+      };
     }
 
     const resolved = await this.ports.approvals.getLatestResolved(run.id);
 
     if (!resolved) {
-      return { run };
+      const restored = await this.restoreCheckpointBundle(run);
+      const state = restored.state;
+      state.pendingApprovalAction = undefined;
+      state.observations.push(
+        "No approval record was available for the interrupted waiting_approval run. Replan and request approval again if needed.",
+      );
+      const nextRun = await this.commit(
+        run,
+        this.machine.transition(run, {
+          checkpointId: restored.checkpointId,
+          nextStatus: "planning",
+          reason: "approval-record-missing",
+          type: "recover_interrupted",
+        }),
+      );
+      await this.saveCheckpoint(nextRun, state, "approval-record-missing");
+      return {
+        checkpointId: restored.checkpointId,
+        recoveredEventWritten: true,
+        recoveryReason: "approval-record-missing",
+        run: nextRun,
+        state,
+      };
     }
 
-    const state = await this.restoreCheckpoint(run);
+    const restored = await this.restoreCheckpointBundle(run);
+    const state = restored.state;
 
     if (resolved.decision === "approved") {
       let nextRun = await this.commit(
@@ -816,13 +973,26 @@ export class RunController {
         }),
       );
       await this.saveCheckpoint(nextRun, state, "approval-approved");
+      await this.appendRecoveredEvent({
+        checkpointId: restored.checkpointId,
+        nextStatus: nextRun.status,
+        previousStatus: run.status,
+        reason: "approved-action-resumed",
+        runId: run.id,
+      });
 
       const approvedAction = state.pendingApprovalAction;
       state.pendingApprovalAction = undefined;
 
       if (!approvedAction) {
         state.observations.push("Approved action was not found in the latest checkpoint.");
-        return { run: nextRun, state };
+        return {
+          checkpointId: restored.checkpointId,
+          recoveredEventWritten: true,
+          recoveryReason: "approved-action-missing",
+          run: nextRun,
+          state,
+        };
       }
 
       const approvedHash = normalizeApprovalHash(
@@ -835,11 +1005,23 @@ export class RunController {
         state.observations.push(
           "Approved action arguments no longer match the stored approval hash.",
         );
-        return { run: nextRun, state };
+        return {
+          checkpointId: restored.checkpointId,
+          recoveredEventWritten: true,
+          recoveryReason: "approved-action-hash-mismatch",
+          run: nextRun,
+          state,
+        };
       }
 
       nextRun = await this.executeToolAction(nextRun, approvedAction, state, signal);
-      return { run: nextRun, state };
+      return {
+        checkpointId: restored.checkpointId,
+        recoveredEventWritten: true,
+        recoveryReason: "approved-action-resumed",
+        run: nextRun,
+        state,
+      };
     }
 
     if (resolved.decision === "expired") {
@@ -855,7 +1037,12 @@ export class RunController {
         }),
       );
       await this.saveCheckpoint(nextRun, state, "approval-expired");
-      return { run: nextRun, state };
+      return {
+        checkpointId: restored.checkpointId,
+        recoveryReason: "approval-expired",
+        run: nextRun,
+        state,
+      };
     }
 
     state.observations.push("Approval denied by user.");
@@ -869,7 +1056,12 @@ export class RunController {
     );
     await this.saveCheckpoint(nextRun, state, "approval-denied");
     state.pendingApprovalAction = undefined;
-    return { run: nextRun, state };
+    return {
+      checkpointId: restored.checkpointId,
+      recoveryReason: "approval-denied",
+      run: nextRun,
+      state,
+    };
   }
 
   private async compileContext(
@@ -947,11 +1139,49 @@ export class RunController {
     return cancelledRun;
   }
 
+  private async appendRecoveryRequested(run: AgentRun, reason: string) {
+    await this.ports.eventStore.append({
+      runId: run.id,
+      type: "run.recovery_requested",
+      timestamp: this.ports.clock.now(),
+      payload: {
+        reason,
+        status: run.status,
+      },
+    });
+  }
+
+  private async appendRecoveredEvent(input: {
+    checkpointId?: string;
+    nextStatus: AgentRun["status"];
+    previousStatus: AgentRun["status"];
+    reason: string;
+    runId: string;
+  }) {
+    await this.ports.eventStore.append({
+      runId: input.runId,
+      type: "run.recovered",
+      timestamp: this.ports.clock.now(),
+      payload: {
+        checkpointId: input.checkpointId,
+        nextStatus: input.nextStatus,
+        previousStatus: input.previousStatus,
+        reason: input.reason,
+      },
+    });
+  }
+
   private async restoreCheckpoint(run: AgentRun): Promise<RunDriveState> {
+    return (await this.restoreCheckpointBundle(run)).state;
+  }
+
+  private async restoreCheckpointBundle(
+    run: AgentRun,
+  ): Promise<{ checkpointId?: string; state: RunDriveState }> {
     const checkpoint = await this.ports.checkpoints.getLatest(run.id);
 
     if (!checkpoint) {
-      return createEmptyDriveState();
+      return { state: createEmptyDriveState() };
     }
 
     const currentFingerprint = await this.ports.workspace.fingerprint();
@@ -964,22 +1194,24 @@ export class RunController {
     const metadata = readRunDriveStateMetadata(checkpoint.plan);
 
     return {
-      answerMessage: metadata.answerMessage,
-      baselineArtifactId: metadata.baselineArtifactId,
-      baselineCommandResults: metadata.baselineCommandResults,
-      baselinePackageJson: metadata.baselinePackageJson ?? checkpoint.packageBaselineJson,
-      changedFiles: new Set(checkpoint.changedFiles),
-      consumedApprovalHashes: new Set(metadata.consumedApprovalHashes),
-      deletedFiles: new Set(checkpoint.deletedFiles),
-      finishSummary: metadata.finishSummary,
-      latestReportId: checkpoint.latestReportId,
-      observations: [...checkpoint.observations],
-      packageChanged: checkpoint.packageChanged,
-      pendingApprovalAction: metadata.pendingApprovalAction,
-      plan: metadata.userPlan,
-      readSnapshots,
-      repairFeedback: [...checkpoint.repairFeedback],
-      steeringWatermark: checkpoint.steeringWatermark,
+      checkpointId: checkpoint.id,
+      state: {
+        answerMessage: metadata.answerMessage,
+        baselineArtifactId: metadata.baselineArtifactId,
+        baselineCommandResults: metadata.baselineCommandResults,
+        baselinePackageJson: metadata.baselinePackageJson ?? checkpoint.packageBaselineJson,
+        changedFiles: new Set(checkpoint.changedFiles),
+        deletedFiles: new Set(checkpoint.deletedFiles),
+        finishSummary: metadata.finishSummary,
+        latestReportId: checkpoint.latestReportId,
+        observations: [...checkpoint.observations],
+        packageChanged: checkpoint.packageChanged,
+        pendingApprovalAction: metadata.pendingApprovalAction,
+        plan: metadata.userPlan,
+        readSnapshots,
+        repairFeedback: [...checkpoint.repairFeedback],
+        steeringWatermark: checkpoint.steeringWatermark,
+      },
     };
   }
 
@@ -1047,7 +1279,6 @@ function createEmptyDriveState(
     baselineCommandResults: initial.baselineCommandResults,
     baselinePackageJson: initial.baselinePackageJson,
     changedFiles: new Set(),
-    consumedApprovalHashes: new Set(),
     deletedFiles: new Set(),
     finishSummary: undefined,
     observations: [],
@@ -1057,6 +1288,23 @@ function createEmptyDriveState(
     repairFeedback: [],
     steeringWatermark: 0,
   };
+}
+
+function recoveryReasonForStatus(status: AgentRun["status"]) {
+  switch (status) {
+    case "planning":
+      return "planning-run-recovered";
+    case "exploring":
+      return "exploring-run-normalized-to-planning";
+    case "mutating":
+      return "mutating-run-interrupted";
+    case "verifying":
+      return "verifying-run-normalized-to-planning";
+    case "repairing":
+      return "repairing-run-normalized-to-planning";
+    default:
+      return "interrupted-run-recovered";
+  }
 }
 
 function mergeReadSnapshots(
@@ -1088,7 +1336,6 @@ type CheckpointDriveStateMetadata = {
   baselineArtifactId?: string;
   baselineCommandResults?: Record<string, unknown>;
   baselinePackageJson?: string | null;
-  consumedApprovalHashes?: string[];
   finishSummary?: string;
   pendingApprovalAction?: HeadlessToolCallAction;
   userPlan: unknown;
@@ -1104,7 +1351,6 @@ function writeDriveStateMetadata(state: RunDriveState) {
       baselineArtifactId: state.baselineArtifactId,
       baselineCommandResults: state.baselineCommandResults,
       baselinePackageJson: state.baselinePackageJson,
-      consumedApprovalHashes: [...state.consumedApprovalHashes],
       finishSummary: state.finishSummary,
       pendingApprovalAction: state.pendingApprovalAction,
     },
@@ -1141,11 +1387,6 @@ export function readRunDriveStateMetadata(plan: unknown): CheckpointDriveStateMe
       metadataRecord.baselinePackageJson === null
         ? metadataRecord.baselinePackageJson
         : undefined,
-    consumedApprovalHashes: Array.isArray(metadataRecord.consumedApprovalHashes)
-      ? metadataRecord.consumedApprovalHashes.filter(
-          (hash): hash is string => typeof hash === "string",
-        )
-      : [],
     finishSummary:
       typeof metadataRecord.finishSummary === "string"
         ? metadataRecord.finishSummary

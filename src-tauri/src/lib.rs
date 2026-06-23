@@ -236,6 +236,7 @@ pub fn run() {
             app_storage::read_app_storage,
             app_storage::write_app_storage,
             agent_storage::append_agent_event,
+            agent_storage::claim_agent_approval,
             agent_storage::create_agent_approval,
             agent_storage::create_agent_run,
             agent_storage::get_agent_run,
