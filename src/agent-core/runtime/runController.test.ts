@@ -69,7 +69,6 @@ describe("Headless RunController", () => {
             summary: "Introduce first attempt",
           },
         },
-        { type: "finish_candidate", summary: "First attempt ready" },
         {
           type: "tool_call",
           tool: "edit_file",
@@ -82,7 +81,7 @@ describe("Headless RunController", () => {
         },
         { type: "finish_candidate", summary: "Repair complete" },
       ],
-      verificationStatuses: ["failed", "passed"],
+      verificationStatuses: ["failed", "passed", "passed"],
     });
     const controller = new RunController(ports);
 
@@ -95,9 +94,9 @@ describe("Headless RunController", () => {
 
     expect(run.status).toBe("completed");
     expect(run.repairCycles).toBe(1);
-    expect(run.modelTurns).toBe(4);
+    expect(run.modelTurns).toBe(3);
     expect(run.toolCalls).toBe(2);
-    expect(ports.contexts[2]?.observations).toContain("Build failed");
+    expect(ports.contexts[1]?.observations).toContain("Build failed");
     expect(ports.events.map((event) => event.type)).toContain("verification.completed");
     expect(ports.events.map((event) => event.type)).toContain("run.completed");
   });
@@ -107,10 +106,9 @@ describe("Headless RunController", () => {
     const ports = createFakePorts({
       modelActions: [
         { type: "tool_call", tool: "delete_files", args: deleteArgs },
-        { type: "tool_call", tool: "delete_files", args: deleteArgs },
         { type: "finish_candidate", summary: "Removed component" },
       ],
-      verificationStatuses: ["passed"],
+      verificationStatuses: ["passed", "passed"],
     });
     const controller = new RunController(ports);
 
@@ -274,7 +272,7 @@ describe("Headless RunController", () => {
     expect(ports.events.map((event) => event.type)).toContain("run.failed");
   });
 
-  it("scenario H preserves counters and stops after budget exhaustion", async () => {
+  it("scenario H verifies answers once and completes without exhausting budget", async () => {
     const ports = createFakePorts({
       modelActions: [
         { type: "answer", message: "First turn" },
@@ -300,10 +298,139 @@ describe("Headless RunController", () => {
       runId: "run-budget",
     });
 
-    expect(run.status).toBe("budget_exceeded");
+    expect(run.status).toBe("completed");
     expect(run.modelTurns).toBe(1);
     expect(ports.modelCalls).toBe(1);
-    expect(ports.events.map((event) => event.type)).toContain("run.budget_exceeded");
+    expect(ports.events.map((event) => event.type)).toContain("run.completed");
+  });
+
+  it("stops before executing a tool after maxToolCalls is reached", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "tool_call", tool: "read_files", args: { paths: ["app/page.tsx"] } },
+        { type: "tool_call", tool: "read_files", args: { paths: ["components/Hero.tsx"] } },
+      ],
+      verificationStatuses: [],
+    });
+    const controller = new RunController(ports);
+    const contract: TaskContract = {
+      ...compileTaskContract({ objective: "Inspect files" }),
+      budget: {
+        maxModelTurns: 4,
+        maxToolCalls: 1,
+        maxMutations: 2,
+        maxRepairCycles: 1,
+      },
+    };
+
+    const run = await controller.start({
+      contract,
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-tool-budget",
+    });
+
+    expect(run.status).toBe("budget_exceeded");
+    expect(run.toolCalls).toBe(1);
+    expect(ports.events.filter((event) => event.type === "tool.completed")).toHaveLength(1);
+  });
+
+  it("stops before executing a write tool after maxMutations is reached", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        {
+          type: "tool_call",
+          tool: "edit_file",
+          args: {
+            new_string: "Hello",
+            old_string: "Hi",
+            path: "app/page.tsx",
+            summary: "First edit",
+          },
+        },
+        {
+          type: "tool_call",
+          tool: "edit_file",
+          args: {
+            new_string: "Hey",
+            old_string: "Hello",
+            path: "app/page.tsx",
+            summary: "Second edit",
+          },
+        },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    const controller = new RunController(ports);
+    const contract: TaskContract = {
+      ...compileTaskContract({ objective: "Edit copy" }),
+      budget: {
+        maxModelTurns: 4,
+        maxToolCalls: 4,
+        maxMutations: 1,
+        maxRepairCycles: 1,
+      },
+    };
+
+    const run = await controller.start({
+      contract,
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-mutation-budget",
+    });
+
+    expect(run.status).toBe("budget_exceeded");
+    expect(run.mutationCount).toBe(1);
+    expect(ports.events.filter((event) => event.type === "tool.completed")).toHaveLength(1);
+  });
+
+  it("does not continue repairing after the repair budget is exhausted", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        {
+          type: "tool_call",
+          tool: "edit_file",
+          args: {
+            new_string: "Broken",
+            old_string: "Hi",
+            path: "app/page.tsx",
+            summary: "Break build",
+          },
+        },
+        {
+          type: "tool_call",
+          tool: "edit_file",
+          args: {
+            new_string: "Should not run",
+            old_string: "Broken",
+            path: "app/page.tsx",
+            summary: "Repair",
+          },
+        },
+      ],
+      verificationStatuses: ["failed"],
+    });
+    const controller = new RunController(ports);
+    const contract: TaskContract = {
+      ...compileTaskContract({ objective: "Fix preview" }),
+      budget: {
+        maxModelTurns: 4,
+        maxToolCalls: 4,
+        maxMutations: 4,
+        maxRepairCycles: 0,
+      },
+    };
+
+    const run = await controller.start({
+      contract,
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-repair-budget",
+    });
+
+    expect(run.status).toBe("budget_exceeded");
+    expect(run.modelTurns).toBe(1);
+    expect(run.toolCalls).toBe(1);
   });
 });
 

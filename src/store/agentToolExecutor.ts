@@ -628,14 +628,9 @@ async function updateDesignTokens(
   const fileTree = await ensureFileTree(store, project);
   const siteSpec = await ensureSiteIndex(project, fileTree);
   const tokenPath = findDesignTokenPath(fileTree);
+  const tokenFileExisted = hasFilePath(fileTree, tokenPath);
   const currentContent = await readOptionalProjectFile(project.id, tokenPath);
   const nextContent = updateCssTokenBlock(currentContent, args.tokens);
-  const changeRecord = await writeAgentFiles(
-    store,
-    project,
-    [{ content: nextContent, path: tokenPath }],
-    args.summary ?? "Updated design tokens.",
-  );
   const nextSiteSpec: SiteSpec = {
     ...siteSpec,
     designSystem: {
@@ -658,14 +653,61 @@ async function updateDesignTokens(
     },
   };
 
-  await agentRuntimeApi.writeSiteSpec(project.id, nextSiteSpec);
-  store.set({ fileTree: await projectApi.listFiles(project.id) });
+  let cssChanged = false;
 
-  return {
-    changedFiles: changeRecord.files.map((file) => file.path),
-    designSystem: nextSiteSpec.designSystem,
-    tokenPath,
-  };
+  try {
+    const changeRecord = await writeAgentFiles(
+      store,
+      project,
+      [{ content: nextContent, path: tokenPath }],
+      args.summary ?? "Updated design tokens.",
+    );
+    cssChanged = true;
+    await agentRuntimeApi.writeSiteSpec(project.id, nextSiteSpec);
+    store.set({ fileTree: await projectApi.listFiles(project.id) });
+
+    return {
+      changedFiles: changeRecord.files.map((file) => file.path),
+      designSystem: nextSiteSpec.designSystem,
+      tokenPath,
+    };
+  } catch (error) {
+    const rollbackErrors: string[] = [];
+
+    if (cssChanged) {
+      try {
+        if (tokenFileExisted) {
+          await writeAgentFiles(
+            store,
+            project,
+            [{ content: currentContent, path: tokenPath }],
+            "Rolled back design token CSS after metadata update failed.",
+          );
+        } else {
+          await deleteAgentFiles(
+            store,
+            project,
+            [tokenPath],
+            "Rolled back design token CSS after metadata update failed.",
+          );
+        }
+      } catch (rollbackError) {
+        rollbackErrors.push(getProjectErrorMessage(rollbackError));
+      }
+    }
+
+    try {
+      await agentRuntimeApi.writeSiteSpec(project.id, siteSpec);
+    } catch (rollbackError) {
+      rollbackErrors.push(getProjectErrorMessage(rollbackError));
+    }
+
+    const message = getProjectErrorMessage(error);
+    const rollbackSuffix = rollbackErrors.length > 0
+      ? ` Rollback also reported: ${rollbackErrors.join("; ")}`
+      : "";
+    throw new Error(`update_design_tokens failed before committing CSS/SiteSpec together: ${message}.${rollbackSuffix}`);
+  }
 }
 
 function findDesignTokenPath(fileTree: FileTree) {

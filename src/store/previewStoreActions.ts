@@ -40,11 +40,14 @@ export function createPreviewActions({ get, set }: StoreAccess): PreviewActions 
 
     recordPreviewDiagnostic: (diagnostic) => {
       set((state) => {
-        const runId = state.currentAgentRun?.id ?? null;
+        const session = state.previewVerificationSession;
+        const runId = session?.runId ?? state.currentAgentRun?.id ?? null;
         const record = {
           ...diagnostic,
           id: `preview-diagnostic-${Date.now()}-${Math.random().toString(16).slice(2)}`,
           runId,
+          sessionId: session?.id ?? diagnostic.sessionId ?? null,
+          url: diagnostic.url ?? session?.previewUrl,
           timestamp: new Date().toISOString(),
         };
 

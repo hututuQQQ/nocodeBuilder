@@ -61,16 +61,20 @@ export type VerifierPorts = {
   httpProbe?: (url: string) => Promise<{ ok: boolean; status: number; summary: string }>;
   waitForPreviewDiagnostics?: (input: {
     runId: string;
+    sessionId: string;
+    startedAt: string;
     url: string;
     windowMs: number;
   }) => Promise<PreviewDiagnostic[]>;
 };
 
 export type VerificationInput = {
+  answerMessage?: string;
   baselineCommandResults?: BaselineCommandResults;
   baselinePackageJson?: string | null;
   changedFiles: string[];
   deletedFiles?: string[];
+  noOpReason?: string;
   packageChanged: boolean;
   approvedPackageChangeKeys?: string[];
   approvedDeletionPaths?: string[];
@@ -99,6 +103,7 @@ export class AgentVerifier {
     checks.push(await this.verifyStatic(input));
     checks.push(await this.verifyBuild(input));
     checks.push(await this.verifyPreview(input));
+    checks.push(...verifyAcceptanceCriteria(input.run.contract, input, checks));
 
     const status = summarizeStatus(checks);
     const failedChecks = checks.filter((check) => check.status === "failed");
@@ -429,7 +434,8 @@ export class AgentVerifier {
       );
     }
 
-    const diagnostics = await this.collectPreviewDiagnostics(input, url);
+    const previewEvidence = await this.collectPreviewDiagnostics(input, url);
+    const diagnostics = previewEvidence.diagnostics;
 
     if (!this.ports.httpProbe) {
       const summary = `Preview URL is available at ${url}; HTTP probe unavailable.`;
@@ -437,6 +443,7 @@ export class AgentVerifier {
         await this.recordPreviewArtifact(input.run.id, {
           diagnostics,
           required,
+          sessionId: previewEvidence.sessionId,
           summary,
           url,
         }),
@@ -463,6 +470,7 @@ export class AgentVerifier {
           diagnostics,
           probe,
           required,
+          sessionId: previewEvidence.sessionId,
           summary,
           url,
         }),
@@ -484,6 +492,7 @@ export class AgentVerifier {
           diagnostics,
           probe,
           required,
+          sessionId: previewEvidence.sessionId,
           summary,
           url,
         }),
@@ -505,6 +514,7 @@ export class AgentVerifier {
         diagnostics,
         probe,
         required,
+        sessionId: previewEvidence.sessionId,
         summary,
         url,
       }),
@@ -594,20 +604,39 @@ export class AgentVerifier {
     return `artifact:${runId}:${relativePath}`;
   }
 
-  private async collectPreviewDiagnostics(input: VerificationInput, url: string) {
+  private async collectPreviewDiagnostics(input: VerificationInput, url: string): Promise<{
+    diagnostics: PreviewDiagnostic[];
+    sessionId: string | null;
+  }> {
     const initialDiagnostics = input.previewDiagnostics ?? [];
 
     if (!this.ports.waitForPreviewDiagnostics) {
-      return initialDiagnostics;
+      return {
+        diagnostics: initialDiagnostics,
+        sessionId: initialDiagnostics.find((diagnostic) => diagnostic.sessionId)?.sessionId ?? null,
+      };
     }
 
+    const sessionId = createId("preview-session");
+    const startedAt = new Date().toISOString();
     const settledDiagnostics = await this.ports.waitForPreviewDiagnostics({
       runId: input.run.id,
+      sessionId,
+      startedAt,
       url,
       windowMs: DEFAULT_PREVIEW_DIAGNOSTIC_WINDOW_MS,
     });
 
-    return mergePreviewDiagnostics(initialDiagnostics, settledDiagnostics);
+    return {
+      diagnostics: mergePreviewDiagnostics(initialDiagnostics, settledDiagnostics).filter(
+        (diagnostic) =>
+          diagnostic.runId === input.run.id &&
+          diagnostic.sessionId === sessionId &&
+          diagnostic.timestamp >= startedAt &&
+          (!diagnostic.url || diagnostic.url === url),
+      ),
+      sessionId,
+    };
   }
 
   private diffPackageDependencies(
@@ -663,6 +692,7 @@ export class AgentVerifier {
       diagnostics: PreviewDiagnostic[];
       probe?: { ok: boolean; status: number; summary: string };
       required: boolean;
+      sessionId?: string | null;
       summary: string;
       url: string | null;
     },
@@ -809,6 +839,94 @@ export function verifyScope(
   }
 
   return passedCheck("scope", "ScopeVerifier", "Changed files stayed within scope.", true);
+}
+
+function verifyAcceptanceCriteria(
+  contract: TaskContract,
+  input: VerificationInput,
+  technicalChecks: VerificationCheck[],
+): VerificationCheck[] {
+  return contract.acceptanceCriteria.map((criterion) => {
+    if (criterion.id === "verifier-passed") {
+      const technicalStatus = summarizeStatus(technicalChecks);
+
+      return technicalStatus === "passed"
+        ? passedCheck(
+            `acceptance:${criterion.id}`,
+            `Acceptance: ${criterion.id}`,
+            "Required technical verification checks passed.",
+            criterion.required,
+          )
+        : unavailableEvidenceCheck(
+            `acceptance:${criterion.id}`,
+            `Acceptance: ${criterion.id}`,
+            `Technical verification is ${technicalStatus}.`,
+            criterion.required,
+          );
+    }
+
+    if (criterion.id === "request-addressed") {
+      const evidence = collectRequestAddressedEvidence(contract, input);
+
+      return evidence
+        ? passedCheck(
+            `acceptance:${criterion.id}`,
+            `Acceptance: ${criterion.id}`,
+            evidence,
+            criterion.required,
+          )
+        : unavailableEvidenceCheck(
+            `acceptance:${criterion.id}`,
+            `Acceptance: ${criterion.id}`,
+            "No non-model evidence shows that the request was addressed.",
+            criterion.required,
+          );
+    }
+
+    return unavailableEvidenceCheck(
+      `acceptance:${criterion.id}`,
+      `Acceptance: ${criterion.id}`,
+      `No verifier mapping is implemented for acceptance criterion "${criterion.id}".`,
+      criterion.required,
+    );
+  });
+}
+
+function collectRequestAddressedEvidence(
+  contract: TaskContract,
+  input: VerificationInput,
+) {
+  const changedFiles = input.changedFiles.map(normalizeProjectPath);
+
+  if (contract.taskType === "answer" && input.answerMessage?.trim()) {
+    return "AnswerVerifier produced a non-empty answer for the read-only task.";
+  }
+
+  if (input.noOpReason?.trim()) {
+    return `No-op conclusion supplied: ${input.noOpReason.trim()}`;
+  }
+
+  if (changedFiles.length === 0) {
+    return null;
+  }
+
+  const scopeEvidence = changedFiles.some((path) =>
+    contract.scope.allowedPaths.some((pattern) => matchesPattern(path, pattern)),
+  );
+
+  if (!scopeEvidence) {
+    return null;
+  }
+
+  if (contract.scope.componentIds?.length) {
+    return `Changed ${changedFiles.length} file(s) while scoped to component(s): ${contract.scope.componentIds.join(", ")}.`;
+  }
+
+  if (contract.scope.pages?.length) {
+    return `Changed ${changedFiles.length} file(s) while scoped to page(s): ${contract.scope.pages.join(", ")}.`;
+  }
+
+  return `Changed ${changedFiles.length} task-scoped file(s).`;
 }
 
 function summarizeStatus(checks: VerificationCheck[]): VerificationStatus {

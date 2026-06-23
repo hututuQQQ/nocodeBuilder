@@ -30,6 +30,7 @@ import type {
   AgentEvent,
   AgentRun,
   PreviewDiagnostic,
+  PreviewVerificationSession,
   VerificationReport,
 } from "../agent-core/types";
 
@@ -63,6 +64,8 @@ export type AppState = {
   previewRefreshKey: number;
   previewUrl: string | null;
   previewDiagnostics: PreviewDiagnostic[];
+  previewVerificationSession: PreviewVerificationSession | null;
+  previewVerificationSessions: PreviewVerificationSession[];
   lastDeploymentUrl: string | null;
   isInstallingDependencies: boolean;
   isLoadingProjects: boolean;
@@ -173,6 +176,8 @@ const initialState = {
   previewRefreshKey: 0,
   previewUrl: null,
   previewDiagnostics: [],
+  previewVerificationSession: null,
+  previewVerificationSessions: [],
   lastDeploymentUrl: null,
   isInstallingDependencies: false,
   isLoadingProjects: false,

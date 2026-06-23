@@ -48,6 +48,7 @@ describe("AgentVerifier", () => {
     });
 
     const report = await verifier.verify({
+      answerMessage: "The project has no requested code changes.",
       changedFiles: [],
       packageChanged: false,
       run,
@@ -151,7 +152,9 @@ describe("AgentVerifier", () => {
             level: "error",
             message: "Client render crashed after load",
             runId: run.id,
-            timestamp: "2026-01-01T00:00:01.000Z",
+            sessionId: input.sessionId,
+            timestamp: input.startedAt,
+            url: input.url,
           },
         ];
       },
@@ -165,16 +168,63 @@ describe("AgentVerifier", () => {
     });
 
     expect(waits).toEqual([
-      {
+      expect.objectContaining({
         runId: run.id,
         url: "http://localhost:3000",
         windowMs: 750,
-      },
+      }),
     ]);
     expect(report.status).toBe("failed");
     expect(report.checks.find((check) => check.id === "preview")).toMatchObject({
       status: "failed",
       summary: "Preview reported 1 error diagnostic(s).",
+    });
+  });
+
+  it("ignores stale preview diagnostics from an earlier verification session", async () => {
+    const run = createRun("Build a complete landing page", "full_site");
+    const verifier = new AgentVerifier({
+      httpProbe: async () => ({
+        ok: true,
+        status: 200,
+        summary: "ok",
+      }),
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+      }),
+      runCommand: async (command) =>
+        command === "npm run build"
+          ? { command, exitCode: 0, output: "ok", success: true }
+          : null,
+      waitForPreviewDiagnostics: async () => [],
+    });
+
+    const report = await verifier.verify({
+      changedFiles: ["app/page.tsx"],
+      packageChanged: false,
+      previewDiagnostics: [
+        {
+          id: "old-diagnostic",
+          kind: "console-error",
+          level: "error",
+          message: "Old crash",
+          runId: run.id,
+          sessionId: "old-session",
+          timestamp: "2026-01-01T00:00:00.000Z",
+          url: "http://localhost:3000",
+        },
+      ],
+      previewUrl: "http://localhost:3000",
+      run,
+    });
+
+    expect(report.status).toBe("passed");
+    expect(report.checks.find((check) => check.id === "preview")).toMatchObject({
+      status: "passed",
+      summary: "Preview probe returned HTTP 200.",
     });
   });
 
@@ -372,6 +422,75 @@ describe("AgentVerifier", () => {
     });
   });
 
+  it("does not pass a write task when no task-scoped file changed", async () => {
+    const run = createRun("Change the hero copy", "full_site");
+    const verifier = new AgentVerifier({
+      httpProbe: async () => ({
+        ok: true,
+        status: 200,
+        summary: "ok",
+      }),
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+      }),
+      runCommand: async (command) => ({
+        command,
+        exitCode: 0,
+        output: "ok",
+        success: true,
+      }),
+    });
+
+    const report = await verifier.verify({
+      changedFiles: [],
+      packageChanged: false,
+      previewUrl: "http://localhost:3000",
+      run,
+    });
+
+    expect(report.status).toBe("inconclusive");
+    expect(report.checks.find((check) => check.id === "acceptance:request-addressed"))
+      .toMatchObject({
+        required: true,
+        status: "inconclusive",
+      });
+  });
+
+  it("passes an answer task with AnswerVerifier evidence", async () => {
+    const run = createRun("What changed?", "answer");
+    const verifier = new AgentVerifier({
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+      }),
+      runCommand: async (command) => ({
+        command,
+        exitCode: 0,
+        output: "ok",
+        success: true,
+      }),
+    });
+
+    const report = await verifier.verify({
+      answerMessage: "Only tests were changed.",
+      changedFiles: [],
+      packageChanged: false,
+      run,
+    });
+
+    expect(report.status).toBe("passed");
+    expect(report.checks.find((check) => check.id === "acceptance:request-addressed"))
+      .toMatchObject({
+        status: "passed",
+        summary: "AnswerVerifier produced a non-empty answer for the read-only task.",
+      });
+  });
+
   it("passes approved dependency changes after comparing baseline package.json", async () => {
     const run = createRun("Explain dependency changes", "answer");
     const verifier = new AgentVerifier({
@@ -393,6 +512,7 @@ describe("AgentVerifier", () => {
     });
 
     const report = await verifier.verify({
+      answerMessage: "The dependency changes are approved.",
       approvedPackageChangeKeys: ["dependencies:add:framer-motion"],
       baselinePackageJson: JSON.stringify({
         scripts: { build: "next build" },

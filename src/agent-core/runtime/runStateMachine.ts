@@ -17,6 +17,7 @@ export type RunTransition =
   | { type: "approval_granted"; approvalId: string }
   | { type: "approval_denied"; approvalId: string; reason?: string }
   | { type: "enter_verifying" }
+  | { type: "verification_passed_continue"; report: VerificationReport }
   | { type: "verification_passed"; report: VerificationReport }
   | { type: "verification_failed"; report: VerificationReport }
   | {
@@ -93,6 +94,7 @@ const LEGAL_TRANSITIONS: Record<AgentRunStatus, ReadonlySet<RunTransitionType>> 
     "fail",
   ]),
   verifying: new Set([
+    "verification_passed_continue",
     "verification_passed",
     "verification_failed",
     "repair_budget_exceeded",
@@ -230,6 +232,16 @@ export class RunStateMachine {
           { reportId: transition.report.id },
           now,
           { completedAt: now },
+        );
+      case "verification_passed_continue":
+        assertReportStatus(transition.report, "passed");
+        return this.move(
+          currentRun,
+          "planning",
+          "planning",
+          "verification.completed",
+          { reportId: transition.report.id, status: transition.report.status },
+          now,
         );
       case "verification_failed": {
         if (currentRun.repairCycles >= currentRun.contract.budget.maxRepairCycles) {

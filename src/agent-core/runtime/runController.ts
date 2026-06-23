@@ -7,7 +7,7 @@ import type {
   ToolResult,
   VerificationReport,
 } from "../types";
-import { PolicyEngine } from "../policy/policyEngine";
+import { normalizeApprovalHash, PolicyEngine } from "../policy/policyEngine";
 import { getCoreToolDefinition, validateCoreToolInput } from "../tools/toolRegistry";
 import { isTerminalAgentRunStatus, RunStateMachine } from "./runStateMachine";
 
@@ -16,6 +16,16 @@ export type HeadlessModelAction =
       type: "tool_call";
       tool: string;
       args: unknown;
+      rationale?: string;
+    }
+  | {
+      type: "tool_calls";
+      calls: Array<{
+        type?: "tool_call";
+        tool: string;
+        args: unknown;
+        rationale?: string;
+      }>;
       rationale?: string;
     }
   | {
@@ -66,6 +76,9 @@ export type ToolExecutorPort = {
 
 export type VerifierPort = {
   verify(input: {
+    answerMessage?: string;
+    baselineCommandResults?: Record<string, unknown>;
+    baselinePackageJson?: string | null;
     changedFiles: string[];
     deletedFiles: string[];
     packageChanged: boolean;
@@ -111,18 +124,28 @@ export type RunControllerPorts = {
 };
 
 export type StartRunInput = {
+  baselineCommandResults?: Record<string, unknown>;
+  baselinePackageJson?: string | null;
+  baselineArtifactId?: string;
   contract: TaskContract;
   conversationId: string;
   projectId: string;
   runId?: string;
 };
 
+type HeadlessToolCallAction = Extract<HeadlessModelAction, { type: "tool_call" }>;
+
 type RunDriveState = {
+  answerMessage?: string;
+  baselineArtifactId?: string;
+  baselineCommandResults?: Record<string, unknown>;
+  baselinePackageJson?: string | null;
   changedFiles: Set<string>;
   deletedFiles: Set<string>;
   latestReportId?: string;
   observations: unknown[];
   packageChanged: boolean;
+  pendingApprovalAction?: HeadlessToolCallAction;
   plan: unknown;
   readSnapshots: AgentRunCheckpoint["readSnapshots"];
   repairFeedback: string[];
@@ -148,7 +171,15 @@ export class RunController {
     });
     let run = await this.ports.runStore.create(created);
     run = await this.commit(run, this.machine.transition(run, { type: "start" }));
-    await this.saveCheckpoint(run, createEmptyDriveState(), "run-started");
+    await this.saveCheckpoint(
+      run,
+      createEmptyDriveState({
+        baselineArtifactId: input.baselineArtifactId,
+        baselineCommandResults: input.baselineCommandResults,
+        baselinePackageJson: input.baselinePackageJson,
+      }),
+      "run-started",
+    );
 
     return this.drive(run, signal);
   }
@@ -162,18 +193,21 @@ export class RunController {
 
     let run = loaded;
 
+    let restoredState: RunDriveState | undefined;
+
     if (run.status === "paused") {
       run = await this.commit(run, this.machine.transition(run, { type: "resume" }));
     } else if (run.status === "waiting_approval") {
-      run = await this.resumeApproval(run);
+      const resumedApproval = await this.resumeApproval(run, signal);
+      run = resumedApproval.run;
+      restoredState = resumedApproval.state;
     }
 
     if (isTerminalAgentRunStatus(run.status) || run.status === "waiting_approval") {
       return run;
     }
 
-    const restoredState = await this.restoreCheckpoint(run);
-    return this.drive(run, signal, restoredState);
+    return this.drive(run, signal, restoredState ?? await this.restoreCheckpoint(run));
   }
 
   private async drive(
@@ -185,6 +219,14 @@ export class RunController {
     const state = restoredState ?? createEmptyDriveState();
 
     while (!isTerminalAgentRunStatus(run.status)) {
+      run = await this.refreshRunRequests(run);
+
+      if (run.cancelRequested && run.status !== "cancelled") {
+        run = await this.commit(run, this.machine.transition(run, { type: "cancel" }));
+        await this.saveCheckpoint(run, state, "cancelled");
+        return run;
+      }
+
       if (run.status === "waiting_approval" || run.status === "paused") {
         await this.saveCheckpoint(run, state, run.status);
         return run;
@@ -194,6 +236,11 @@ export class RunController {
         run = await this.commit(run, this.machine.transition(run, { type: "pause_at_boundary" }));
         await this.saveCheckpoint(run, state, "pause-boundary");
         return run;
+      }
+
+      if (run.status === "repairing") {
+        run = await this.commit(run, this.machine.transition(run, { type: "enter_planning" }));
+        await this.saveCheckpoint(run, state, "repair-planning");
       }
 
       run = await this.enforceBudget(run, "maxModelTurns", run.modelTurns);
@@ -218,13 +265,30 @@ export class RunController {
       await this.saveCheckpoint(run, state, "model-completed");
 
       if (action.type === "answer") {
+        state.answerMessage = action.message;
         state.observations.push(action.message);
-        await this.saveCheckpoint(run, state, "answer-observed");
+        run = await this.verifyAndAdvance(run, state, { final: true });
         continue;
       }
 
       if (action.type === "finish_candidate") {
-        run = await this.verifyAndAdvance(run, state);
+        run = await this.verifyAndAdvance(run, state, { final: true });
+        continue;
+      }
+
+      if (action.type === "tool_calls") {
+        for (const call of action.calls) {
+          run = await this.executeToolAction(
+            run,
+            { ...call, type: "tool_call" },
+            state,
+            signal,
+          );
+
+          if (isTerminalAgentRunStatus(run.status) || run.status === "waiting_approval" || run.status === "paused") {
+            break;
+          }
+        }
         continue;
       }
 
@@ -290,7 +354,7 @@ export class RunController {
     }
 
     if (policyDecision.approvalRequired) {
-      await this.ports.approvals.create({
+      const approval = await this.ports.approvals.create({
         id: createId("approval"),
         runId: run.id,
         toolCallId: createId("tool-call"),
@@ -301,11 +365,12 @@ export class RunController {
         createdAt: this.ports.clock.now(),
         expiresAt: addMinutesIso(this.ports.clock.now(), 30),
       });
+      state.pendingApprovalAction = action;
       const waitingRun = await this.commit(
         run,
         this.machine.transition(run, { type: "enter_waiting_approval" }),
       );
-      await this.saveCheckpoint(waitingRun, state, "approval-requested");
+      await this.saveCheckpoint(waitingRun, state, `approval-requested:${approval.id}`);
       return waitingRun;
     }
 
@@ -317,7 +382,9 @@ export class RunController {
       payload: { tool: action.tool },
     });
 
-    if (!tool.readOnly && run.status !== "mutating") {
+    if (tool.readOnly && run.status !== "exploring") {
+      run = await this.commit(run, this.machine.transition(run, { type: "enter_exploring" }));
+    } else if (!tool.readOnly && run.status !== "mutating") {
       run = await this.commit(run, this.machine.transition(run, { type: "enter_mutating" }));
     }
 
@@ -362,19 +429,41 @@ export class RunController {
         },
       },
     );
-    state.observations.push(result.summary);
+    state.observations.push(result.structuredData ?? result.summary);
     await this.saveCheckpoint(nextRun, state, "tool-completed");
+
+    if (
+      result.status === "success" &&
+      tool.requiresVerification &&
+      changed.length + deleted.length > 0
+    ) {
+      return this.verifyAndAdvance(nextRun, state, { final: false });
+    }
+
+    if (nextRun.status !== "planning") {
+      const planningRun = await this.commit(
+        nextRun,
+        this.machine.transition(nextRun, { type: "enter_planning" }),
+      );
+      await this.saveCheckpoint(planningRun, state, "tool-returned-to-planning");
+      return planningRun;
+    }
+
     return nextRun;
   }
 
   private async verifyAndAdvance(
     run: AgentRun,
     state: RunDriveState,
+    options: { final: boolean },
   ): Promise<AgentRun> {
     run = await this.commit(run, this.machine.transition(run, { type: "enter_verifying" }));
     await this.saveCheckpoint(run, state, "verification-started");
 
     const report = await this.ports.verifier.verify({
+      answerMessage: state.answerMessage,
+      baselineCommandResults: state.baselineCommandResults,
+      baselinePackageJson: state.baselinePackageJson,
       changedFiles: [...state.changedFiles],
       deletedFiles: [...state.deletedFiles],
       packageChanged: state.packageChanged,
@@ -392,12 +481,19 @@ export class RunController {
     });
 
     if (report.status === "passed") {
-      const completedRun = await this.commit(
+      const nextRun = await this.commit(
         run,
-        this.machine.transition(run, { type: "verification_passed", report }),
+        this.machine.transition(run, {
+          type: options.final ? "verification_passed" : "verification_passed_continue",
+          report,
+        }),
       );
-      await this.saveCheckpoint(completedRun, state, "verification-passed");
-      return completedRun;
+      await this.saveCheckpoint(
+        nextRun,
+        state,
+        options.final ? "verification-passed" : "verification-passed-continue",
+      );
+      return nextRun;
     }
 
     state.observations.push(...report.repairFeedback);
@@ -409,23 +505,26 @@ export class RunController {
     return repairingRun;
   }
 
-  private async resumeApproval(run: AgentRun): Promise<AgentRun> {
+  private async resumeApproval(
+    run: AgentRun,
+    signal?: AbortSignal,
+  ): Promise<{ run: AgentRun; state?: RunDriveState }> {
     const pending = await this.ports.approvals.getPending(run.id);
 
     if (pending) {
-      return run;
+      return { run };
     }
 
     const resolved = await this.ports.approvals.getLatestResolved(run.id);
 
     if (!resolved) {
-      return run;
+      return { run };
     }
 
     const state = await this.restoreCheckpoint(run);
 
     if (resolved.decision === "approved") {
-      const nextRun = await this.commit(
+      let nextRun = await this.commit(
         run,
         this.machine.transition(run, {
           type: "approval_granted",
@@ -433,7 +532,30 @@ export class RunController {
         }),
       );
       await this.saveCheckpoint(nextRun, state, "approval-approved");
-      return nextRun;
+
+      const approvedAction = state.pendingApprovalAction;
+      state.pendingApprovalAction = undefined;
+
+      if (!approvedAction) {
+        state.observations.push("Approved action was not found in the latest checkpoint.");
+        return { run: nextRun, state };
+      }
+
+      const approvedHash = normalizeApprovalHash(
+        run.id,
+        approvedAction.tool,
+        approvedAction.args,
+      );
+
+      if (approvedHash !== resolved.normalizedArgsHash) {
+        state.observations.push(
+          "Approved action arguments no longer match the stored approval hash.",
+        );
+        return { run: nextRun, state };
+      }
+
+      nextRun = await this.executeToolAction(nextRun, approvedAction, state, signal);
+      return { run: nextRun, state };
     }
 
     state.observations.push("Approval denied by user.");
@@ -446,7 +568,8 @@ export class RunController {
       }),
     );
     await this.saveCheckpoint(nextRun, state, "approval-denied");
-    return nextRun;
+    state.pendingApprovalAction = undefined;
+    return { run: nextRun, state };
   }
 
   private async compileContext(
@@ -491,6 +614,20 @@ export class RunController {
     );
   }
 
+  private async refreshRunRequests(run: AgentRun): Promise<AgentRun> {
+    const persisted = await this.ports.runStore.get(run.id);
+
+    if (!persisted || persisted.stateVersion < run.stateVersion) {
+      return run;
+    }
+
+    return {
+      ...run,
+      cancelRequested: persisted.cancelRequested,
+      pauseRequested: persisted.pauseRequested,
+    };
+  }
+
   private async restoreCheckpoint(run: AgentRun): Promise<RunDriveState> {
     const checkpoint = await this.ports.checkpoints.getLatest(run.id);
 
@@ -512,13 +649,20 @@ export class RunController {
       throw new Error("Workspace fingerprint changed since checkpoint.");
     }
 
+    const metadata = readDriveStateMetadata(checkpoint.plan);
+
     return {
+      answerMessage: metadata.answerMessage,
+      baselineArtifactId: metadata.baselineArtifactId,
+      baselineCommandResults: metadata.baselineCommandResults,
+      baselinePackageJson: metadata.baselinePackageJson ?? checkpoint.packageBaselineJson,
       changedFiles: new Set(checkpoint.changedFiles),
       deletedFiles: new Set(checkpoint.deletedFiles),
       latestReportId: checkpoint.latestReportId,
       observations: [...checkpoint.observations],
       packageChanged: checkpoint.packageChanged,
-      plan: checkpoint.plan,
+      pendingApprovalAction: metadata.pendingApprovalAction,
+      plan: metadata.userPlan,
       readSnapshots: [...checkpoint.readSnapshots],
       repairFeedback: [...checkpoint.repairFeedback],
       steeringWatermark: checkpoint.steeringWatermark,
@@ -535,11 +679,12 @@ export class RunController {
       runId: run.id,
       createdAt: this.ports.clock.now(),
       workspaceFingerprint: await this.ports.workspace.fingerprint(),
-      plan: state.plan,
+      plan: writeDriveStateMetadata(state),
       observations: [...state.observations],
       changedFiles: [...state.changedFiles],
       deletedFiles: [...state.deletedFiles],
       packageChanged: state.packageChanged,
+      packageBaselineJson: state.baselinePackageJson,
       readSnapshots: [...state.readSnapshots],
       latestReportId: state.latestReportId,
       repairFeedback: [...state.repairFeedback],
@@ -569,8 +714,16 @@ export class RunController {
   }
 }
 
-function createEmptyDriveState(): RunDriveState {
+function createEmptyDriveState(
+  initial: Pick<
+    RunDriveState,
+    "baselineArtifactId" | "baselineCommandResults" | "baselinePackageJson"
+  > = {},
+): RunDriveState {
   return {
+    baselineArtifactId: initial.baselineArtifactId,
+    baselineCommandResults: initial.baselineCommandResults,
+    baselinePackageJson: initial.baselinePackageJson,
     changedFiles: new Set(),
     deletedFiles: new Set(),
     observations: [],
@@ -580,6 +733,80 @@ function createEmptyDriveState(): RunDriveState {
     repairFeedback: [],
     steeringWatermark: 0,
   };
+}
+
+type CheckpointDriveStateMetadata = {
+  answerMessage?: string;
+  baselineArtifactId?: string;
+  baselineCommandResults?: Record<string, unknown>;
+  baselinePackageJson?: string | null;
+  pendingApprovalAction?: HeadlessToolCallAction;
+  userPlan: unknown;
+};
+
+const DRIVE_STATE_PLAN_KEY = "__headlessRunController";
+
+function writeDriveStateMetadata(state: RunDriveState) {
+  return {
+    userPlan: state.plan,
+    [DRIVE_STATE_PLAN_KEY]: {
+      answerMessage: state.answerMessage,
+      baselineArtifactId: state.baselineArtifactId,
+      baselineCommandResults: state.baselineCommandResults,
+      baselinePackageJson: state.baselinePackageJson,
+      pendingApprovalAction: state.pendingApprovalAction,
+    },
+  };
+}
+
+function readDriveStateMetadata(plan: unknown): CheckpointDriveStateMetadata {
+  if (!plan || typeof plan !== "object" || Array.isArray(plan)) {
+    return { userPlan: plan };
+  }
+
+  const record = plan as Record<string, unknown>;
+  const metadata = record[DRIVE_STATE_PLAN_KEY];
+
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return { userPlan: plan };
+  }
+
+  const metadataRecord = metadata as Record<string, unknown>;
+  return {
+    answerMessage:
+      typeof metadataRecord.answerMessage === "string"
+        ? metadataRecord.answerMessage
+        : undefined,
+    baselineArtifactId:
+      typeof metadataRecord.baselineArtifactId === "string"
+        ? metadataRecord.baselineArtifactId
+        : undefined,
+    baselineCommandResults: isRecord(metadataRecord.baselineCommandResults)
+      ? metadataRecord.baselineCommandResults
+      : undefined,
+    baselinePackageJson:
+      typeof metadataRecord.baselinePackageJson === "string" ||
+      metadataRecord.baselinePackageJson === null
+        ? metadataRecord.baselinePackageJson
+        : undefined,
+    pendingApprovalAction: isHeadlessToolCallAction(metadataRecord.pendingApprovalAction)
+      ? metadataRecord.pendingApprovalAction
+      : undefined,
+    userPlan: "userPlan" in record ? record.userPlan : null,
+  };
+}
+
+function isHeadlessToolCallAction(value: unknown): value is HeadlessToolCallAction {
+  return (
+    isRecord(value) &&
+    value.type === "tool_call" &&
+    typeof value.tool === "string" &&
+    "args" in value
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function collectTargetResources(args: unknown): string[] {

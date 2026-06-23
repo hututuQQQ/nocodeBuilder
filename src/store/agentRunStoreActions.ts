@@ -187,41 +187,24 @@ async function resolveCurrentAgentApproval(
       approval.id,
       decision,
     );
-    const transition =
-      decision === "approved"
-        ? stateMachine.transition(run, {
-            type: "approval_granted",
-            approvalId: resolved.id,
-          })
-        : stateMachine.transition(run, {
-            type: "approval_denied",
-            approvalId: resolved.id,
-            reason: "Approval denied by user.",
-          });
-    const { run: nextRun, event } = await agentRuntimeApi.transitionRun(
-      project.id,
-      run,
-      transition,
-    );
 
     set((state) => ({
-      agentEvents: [...state.agentEvents, event],
-      agentRuns: [nextRun, ...state.agentRuns.filter((item) => item.id !== nextRun.id)],
+      agentRuns: [run, ...state.agentRuns.filter((item) => item.id !== run.id)],
       currentAgentApproval: null,
-      currentAgentRun: nextRun,
+      currentAgentRun: run,
       terminalLogs: appendLogs(state.terminalLogs, [
         `[agent] Approval ${decision} for ${approval.toolName}`,
       ]),
     }));
 
     await modifyCurrentProjectRuntime(store, run.contract.objective, {
-      existingRun: nextRun,
+      existingRun: run,
       resumeObservation:
         decision === "denied"
           ? {
               content: [
                 `Approval denied for ${approval.toolName}.`,
-                `Reason: ${approval.exactSideEffect}`,
+                `Reason: ${resolved.exactSideEffect}`,
                 "Choose a non-destructive alternative, request a different approval, or explain why the task cannot continue.",
               ].join("\n"),
               ok: false,

@@ -260,6 +260,14 @@ export type PreviewDiagnostic = {
   timestamp: string;
 };
 
+export type PreviewVerificationSession = {
+  id: string;
+  runId: string;
+  previewUrl: string;
+  startedAt: string;
+  endedAt?: string;
+};
+
 export type SiteSpec = {
   version: 1;
   projectId: string;
