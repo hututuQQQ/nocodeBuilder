@@ -27,7 +27,7 @@ describe("project store actions", () => {
     fake.deleteUninitializedProject.mockReset();
   });
 
-  it("cleans up and returns null when Initial Spec creation fails", async () => {
+  it("cleans up and returns null when Initial Spec AI generation fails", async () => {
     const project = createProject();
     fake.createProject.mockResolvedValue(project);
     fake.deleteUninitializedProject.mockResolvedValue(undefined);
@@ -43,6 +43,75 @@ describe("project store actions", () => {
     expect(store.get().currentProject).toBeNull();
     expect(store.get().currentConversation).toBeNull();
     expect(store.get().currentSpec).toBeNull();
+  });
+
+  it("cleans up and preserves the error when Initial Spec persistence fails", async () => {
+    const project = createProject();
+    fake.createProject.mockResolvedValue(project);
+    fake.deleteUninitializedProject.mockResolvedValue(undefined);
+    const store = createStore({
+      createInitialSpec: vi.fn(async () => {
+        store.set({
+          projectError: "spec: failed to move spec into place",
+        });
+        return null;
+      }),
+      selectProject: vi.fn(async () => {
+        store.set({
+          currentProject: project,
+          projects: [project],
+        });
+      }),
+    });
+    const actions = createProjectActions(store as never);
+
+    await expect(actions.createProject("Project", "Brief")).resolves.toBeNull();
+
+    expect(fake.deleteUninitializedProject).toHaveBeenCalledWith(project.id);
+    expect(store.get().projectError).toBe("spec: failed to move spec into place");
+    expect(store.get().projects).toEqual([]);
+    expect(store.get().currentProject).toBeNull();
+    expect(store.get().currentConversation).toBeNull();
+    expect(store.get().currentSpec).toBeNull();
+  });
+
+  it("returns the project only after Initial Build conversation is created", async () => {
+    const project = createProject();
+    const initialConversation = {
+      id: "conversation-1",
+      kind: "initial_build",
+      mode: "spec",
+      projectId: project.id,
+    };
+    fake.createProject.mockResolvedValue(project);
+    const store = createStore({
+      createInitialSpec: vi.fn(async () => initialConversation),
+      selectProject: vi.fn(async () => {
+        store.set({
+          currentConversation: initialConversation,
+          currentProject: project,
+          currentSpec: { id: "spec-1" },
+          historicalSpecs: [{ id: "spec-1" }],
+        });
+      }),
+    });
+    const actions = createProjectActions(store as never);
+
+    await expect(actions.createProject("Project", "Brief")).resolves.toBe(project);
+
+    expect(fake.deleteUninitializedProject).not.toHaveBeenCalled();
+    expect(store.get().selectProject).toHaveBeenCalledWith(project.id, {
+      ensureConversation: false,
+      startDevServer: false,
+    });
+    expect(store.get().createInitialSpec).toHaveBeenCalledWith(
+      project.id,
+      "Brief",
+      "Initial build",
+    );
+    expect(store.get().currentProject).toBe(project);
+    expect(store.get().currentConversation).toBe(initialConversation);
+    expect(store.get().currentSpec).toEqual({ id: "spec-1" });
   });
 });
 
