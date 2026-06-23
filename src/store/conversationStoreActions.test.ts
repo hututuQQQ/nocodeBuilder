@@ -207,10 +207,11 @@ describe("conversation store actions", () => {
         specIds: ["spec-initial"],
         title: "Initial build",
       }),
-      currentSpec: {
+      currentSpec: createSpec({
+        conversationId: "conversation-initial",
         id: "spec-initial",
         status: "completed",
-      },
+      }),
     });
     const actions = createConversationActions(store as never);
 
@@ -268,7 +269,69 @@ describe("conversation store actions", () => {
     expect(fake.createProjectConversation).toHaveBeenCalledTimes(1);
   });
 
-  it("allows later iterations once the project already has an iteration", async () => {
+  it("does not let an existing iteration summary bypass the Initial Build gate", async () => {
+    const initialBuild = createSummary({
+      activeSpecId: "spec-initial",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      title: "Initial build",
+    });
+    fake.listProjectConversations.mockResolvedValue([initialBuild]);
+    fake.readSpec.mockResolvedValue(
+      createSpec({
+        conversationId: "conversation-initial",
+        id: "spec-initial",
+        status: "review",
+      }),
+    );
+    const store = createStore({
+      conversationSummaries: [
+        initialBuild,
+        createSummary({
+          id: "conversation-existing",
+          kind: "iteration",
+          mode: "chat",
+          title: "Existing iteration",
+        }),
+      ],
+    });
+    const actions = createConversationActions(store as never);
+
+    const conversation = await actions.createConversation("project-1", {
+      kind: "iteration",
+      mode: "chat",
+      title: "Next",
+    });
+
+    expect(conversation).toBeNull();
+    expect(fake.listProjectConversations).toHaveBeenCalledWith(
+      "project-1",
+      true,
+    );
+    expect(fake.readSpec).toHaveBeenCalledWith("project-1", "spec-initial");
+    expect(fake.createProjectConversation).not.toHaveBeenCalled();
+    expect(store.get().projectError).toBe(
+      "conversation: initial build must complete before creating iterations",
+    );
+  });
+
+  it("allows later iterations once Host confirms the Initial Build completed", async () => {
+    const initialBuild = createSummary({
+      activeSpecId: "spec-initial",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      title: "Initial build",
+    });
+    fake.listProjectConversations.mockResolvedValue([initialBuild]);
+    fake.readSpec.mockResolvedValue(
+      createSpec({
+        conversationId: "conversation-initial",
+        id: "spec-initial",
+        status: "completed",
+      }),
+    );
     const iteration = createConversation({
       id: "conversation-next",
       title: "Next",
@@ -301,6 +364,11 @@ describe("conversation store actions", () => {
       }),
     ).resolves.toEqual(iteration);
 
+    expect(fake.listProjectConversations).toHaveBeenCalledWith(
+      "project-1",
+      true,
+    );
+    expect(fake.readSpec).toHaveBeenCalledWith("project-1", "spec-initial");
     expect(fake.createProjectConversation).toHaveBeenCalledTimes(1);
   });
 });

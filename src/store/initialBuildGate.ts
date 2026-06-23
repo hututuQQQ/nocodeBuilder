@@ -26,22 +26,26 @@ export function hasCompletedInitialBuildEvidence(
   const summaries = state.conversationSummaries.filter(
     (summary) => summary.projectId === projectId,
   );
+  const initialBuild = findInitialBuildSummary(summaries);
 
-  if (summaries.some((summary) => summary.kind === "iteration")) {
+  if (hasCompletedInitialBuildSpecEvidence(state, projectId, initialBuild)) {
     return true;
   }
 
-  const initialBuild = findInitialBuildSummary(summaries);
-  const spec = findInitialBuildSpec(state, initialBuild);
-
-  return spec?.status === "completed";
+  return summaries.some((summary) => summary.kind === "iteration");
 }
 
 export async function ensureInitialBuildCompletedForIteration(
   projectId: string,
   state: InitialBuildGateState,
 ) {
-  if (hasCompletedInitialBuildEvidence(state, projectId)) {
+  const stateInitialBuild = findInitialBuildSummary(
+    state.conversationSummaries.filter(
+      (summary) => summary.projectId === projectId,
+    ),
+  );
+
+  if (hasCompletedInitialBuildSpecEvidence(state, projectId, stateInitialBuild)) {
     return;
   }
 
@@ -57,12 +61,7 @@ export async function ensureInitialBuildCompletedForIteration(
   const initialBuild = initialBuilds[0];
   const spec = await readInitialBuildSpecForGate(projectId, initialBuild);
 
-  if (
-    !spec ||
-    spec.status !== "completed" ||
-    spec.projectId !== projectId ||
-    spec.conversationId !== initialBuild.id
-  ) {
+  if (!hasCompletedInitialBuildSpec(projectId, initialBuild, spec)) {
     throw new Error(INITIAL_BUILD_ITERATION_GATE_ERROR);
   }
 }
@@ -98,5 +97,36 @@ function findInitialBuildSpec(
     [state.currentSpec, ...state.historicalSpecs].find(
       (spec) => spec?.id === summary.activeSpecId,
     ) ?? null
+  );
+}
+
+function hasCompletedInitialBuildSpecEvidence(
+  state: InitialBuildGateState,
+  projectId: string,
+  summary: ProjectConversationSummary | null,
+) {
+  if (state.currentProject?.id !== projectId) {
+    return false;
+  }
+
+  return hasCompletedInitialBuildSpec(
+    projectId,
+    summary,
+    findInitialBuildSpec(state, summary),
+  );
+}
+
+function hasCompletedInitialBuildSpec(
+  projectId: string,
+  summary: ProjectConversationSummary | null,
+  spec: DevelopmentSpec | null,
+) {
+  return Boolean(
+    summary?.activeSpecId &&
+      spec &&
+      spec.id === summary.activeSpecId &&
+      spec.status === "completed" &&
+      spec.projectId === projectId &&
+      spec.conversationId === summary.id,
   );
 }

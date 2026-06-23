@@ -243,6 +243,56 @@ describe("spec store actions", () => {
     );
   });
 
+  it("does not let an existing iteration summary bypass the Feature Spec gate", async () => {
+    const initialBuild = createConversationSummary({
+      activeSpecId: "spec-initial",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      title: "Initial build",
+    });
+    fake.listProjectConversations.mockResolvedValue([initialBuild]);
+    fake.readSpec.mockResolvedValue(
+      createSpec({
+        conversationId: "conversation-initial",
+        id: "spec-initial",
+        status: "review",
+      }),
+    );
+    const store = createStore({
+      conversationSummaries: [
+        initialBuild,
+        createConversationSummary({
+          id: "conversation-existing",
+          kind: "iteration",
+          mode: "chat",
+          title: "Existing iteration",
+        }),
+      ],
+    });
+    const actions = createSpecActions(store as never);
+
+    await expect(
+      actions.createFeatureSpecIteration(
+        "project-1",
+        "Checkout copy",
+        "Improve checkout copy",
+      ),
+    ).resolves.toBeNull();
+
+    expect(fake.listProjectConversations).toHaveBeenCalledWith(
+      "project-1",
+      true,
+    );
+    expect(fake.readSpec).toHaveBeenCalledWith("project-1", "spec-initial");
+    expect(fake.requestFeatureSpec).not.toHaveBeenCalled();
+    expect(fake.createSpec).not.toHaveBeenCalled();
+    expect(fake.createProjectConversation).not.toHaveBeenCalled();
+    expect(store.get().projectError).toBe(
+      "conversation: initial build must complete before creating iterations",
+    );
+  });
+
   it("does not create a Feature Spec iteration while a Spec operation is busy", async () => {
     const store = createStore({
       isRevisingSpec: true,
