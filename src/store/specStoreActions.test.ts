@@ -337,6 +337,119 @@ describe("spec store actions", () => {
     expect(store.get().projectError).toBe("host gate rejected");
   });
 
+  it("switches an existing Chat iteration to Spec without creating a new conversation", async () => {
+    const historicalSpec = createSpec({
+      id: "spec-history",
+      status: "completed",
+    });
+    const conversation = createConversation("project-1", {
+      activeSpecId: null,
+      conversationId: "conversation-1",
+      mode: "chat",
+      specIds: [historicalSpec.id],
+      title: "Chat iteration",
+    });
+    const store = createStore({
+      currentConversation: conversation,
+      currentSpec: null,
+      historicalSpecs: [historicalSpec],
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.switchCurrentIterationToSpec("Add saved searches");
+
+    const createdSpec = fake.createSpec.mock.calls[0][1] as DevelopmentSpec;
+    expect(fake.createProjectConversation).not.toHaveBeenCalled();
+    expect(fake.switchProjectConversationMode).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({
+        activeSpecId: createdSpec.id,
+        conversationId: conversation.id,
+        specIds: [historicalSpec.id, createdSpec.id],
+        targetMode: "spec",
+      }),
+    );
+    expect(store.get().currentConversation?.mode).toBe("spec");
+    expect(store.get().currentConversation?.activeSpecId).toBe(createdSpec.id);
+    expect(store.get().currentSpec?.id).toBe(createdSpec.id);
+    expect(store.get().historicalSpecs.map((spec) => spec.id)).toEqual(
+      expect.arrayContaining([historicalSpec.id, createdSpec.id]),
+    );
+  });
+
+  it("cleans up an unattached Spec and keeps Chat mode when Chat to Spec switch fails", async () => {
+    fake.switchProjectConversationMode.mockRejectedValue(new Error("mode switch rejected"));
+    const historicalSpec = createSpec({
+      id: "spec-history",
+      status: "completed",
+    });
+    const conversation = createConversation("project-1", {
+      activeSpecId: null,
+      conversationId: "conversation-1",
+      mode: "chat",
+      specIds: [historicalSpec.id],
+      title: "Chat iteration",
+    });
+    const store = createStore({
+      currentConversation: conversation,
+      currentSpec: null,
+      historicalSpecs: [historicalSpec],
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.switchCurrentIterationToSpec("Add saved searches");
+
+    const createdSpec = fake.createSpec.mock.calls[0][1] as DevelopmentSpec;
+    expect(fake.deleteUnattachedSpec).toHaveBeenCalledWith(
+      "project-1",
+      createdSpec.id,
+    );
+    expect(store.get().currentConversation).toBe(conversation);
+    expect(store.get().currentSpec).toBeNull();
+    expect(store.get().historicalSpecs).toEqual([historicalSpec]);
+    expect(store.get().projectError).toBe("mode switch rejected");
+    expect(store.get().isGeneratingSpec).toBe(false);
+    expect(store.get().isSwitchingIterationMode).toBe(false);
+  });
+
+  it("drops a stale Chat to Spec response when the conversation changes", async () => {
+    let store: ReturnType<typeof createStore>;
+    const conversation = createConversation("project-1", {
+      activeSpecId: null,
+      conversationId: "conversation-1",
+      mode: "chat",
+      specIds: [],
+      title: "Chat iteration",
+    });
+    fake.requestFeatureSpec.mockImplementation(async () => {
+      store.set({
+        currentConversation: createConversation("project-1", {
+          activeSpecId: null,
+          conversationId: "conversation-2",
+          mode: "chat",
+          specIds: [],
+          title: "Other iteration",
+        }),
+      });
+      return createGeneratedPayload();
+    });
+    store = createStore({
+      currentConversation: conversation,
+      currentSpec: null,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.switchCurrentIterationToSpec("Add saved searches");
+
+    expect(fake.createSpec).not.toHaveBeenCalled();
+    expect(fake.switchProjectConversationMode).not.toHaveBeenCalled();
+    expect(fake.deleteUnattachedSpec).not.toHaveBeenCalled();
+    expect(store.get().currentConversation?.id).toBe("conversation-2");
+    expect(store.get().currentSpec).toBeNull();
+    expect(store.get().isGeneratingSpec).toBe(false);
+    expect(store.get().isSwitchingIterationMode).toBe(false);
+  });
+
   it("returns null without creating a spec when Initial Spec generation fails", async () => {
     fake.requestInitialSpec.mockRejectedValue(new Error("initial model unavailable"));
     const store = createStore();
