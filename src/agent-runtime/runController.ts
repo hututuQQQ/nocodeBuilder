@@ -744,6 +744,26 @@ export async function modifyCurrentProjectRuntime(
         if (report.status === "passed") {
           buildVerified = true;
           updateAgentStatus(stream, statusLines, "Verification passed.");
+          if (previewNeedsFinalRefresh) {
+            await refreshPreviewAfterFinalAgentChange(store, project.id, stream, statusLines);
+          }
+          run = getCurrentRun(store, run.id) ?? run;
+          await commitTransition(
+            store,
+            project.id,
+            run,
+            stateMachine.transition(run, { type: "verification_passed", report }),
+          );
+          stream.completeWithTypewriter(
+            formatVerifiedToolCompletionMessage({
+              changedFiles: Array.from(changedFiles),
+              deletedFiles: Array.from(deletedFiles),
+              report,
+              userRequest,
+            }),
+          );
+          void persistCurrentConversation(store);
+          return;
         } else if (run.repairCycles < run.contract.budget.maxRepairCycles) {
           run = await commitTransition(
             store,
@@ -1284,22 +1304,7 @@ async function verifyRun(
       await store.get().startDevServer(project.id);
       return store.get().previewUrl;
     },
-    httpProbe: async (url) => {
-      try {
-        const response = await fetch(url, { method: "GET" });
-        return {
-          ok: response.ok,
-          status: response.status,
-          summary: response.ok ? "HTTP probe succeeded." : response.statusText,
-        };
-      } catch (error) {
-        return {
-          ok: false,
-          status: 0,
-          summary: getProjectErrorMessage(error),
-        };
-      }
-    },
+    httpProbe: (url) => projectApi.probePreviewUrl(url),
     waitForPreviewDiagnostics: async ({ runId, windowMs }) => {
       await delay(windowMs);
       return getPreviewDiagnosticsForRun(store, runId);
@@ -1958,5 +1963,35 @@ function formatAgentFinishMessage(
   }
 
   lines.push("", `Verifier: ${report.status}.`);
+  return lines.join("\n");
+}
+
+function formatVerifiedToolCompletionMessage({
+  changedFiles,
+  deletedFiles,
+  report,
+  userRequest,
+}: {
+  changedFiles: string[];
+  deletedFiles: string[];
+  report: VerificationReport;
+  userRequest: string;
+}) {
+  const uniqueChangedFiles = [...new Set(changedFiles)].sort();
+  const uniqueDeletedFiles = [...new Set(deletedFiles)].sort();
+  const lines = [
+    `Done: ${userRequest}`,
+    "",
+    `Verifier: ${report.status}.`,
+  ];
+
+  if (uniqueChangedFiles.length > 0) {
+    lines.push("", `Changed files: ${uniqueChangedFiles.join(", ")}`);
+  }
+
+  if (uniqueDeletedFiles.length > 0) {
+    lines.push("", `Deleted files: ${uniqueDeletedFiles.join(", ")}`);
+  }
+
   return lines.join("\n");
 }

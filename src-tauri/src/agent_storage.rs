@@ -6,7 +6,10 @@ use std::{
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    Row, SqlitePool,
+};
 
 use crate::projects::resolve_project_dir;
 
@@ -725,13 +728,12 @@ async fn open_project_agent_db(project_dir: &Path) -> Result<SqlitePool, String>
         )
     })?;
 
-    let database_url = format!(
-        "sqlite://{}?mode=rwc",
-        db_path.to_string_lossy().replace('\\', "/")
-    );
+    let database_options = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true);
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
-        .connect(&database_url)
+        .connect_with(database_options)
         .await
         .map_err(|error| format!("agent-storage: failed to open SQLite database: {error}"))?;
     init_database(&pool).await?;

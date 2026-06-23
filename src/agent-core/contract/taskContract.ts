@@ -143,7 +143,7 @@ function budgetForTaskType(taskType: TaskType): TaskContract["budget"] {
     case "style_edit":
     case "component_edit":
       return {
-        maxModelTurns: 10,
+        maxModelTurns: 14,
         maxToolCalls: 30,
         maxMutations: 8,
         maxRepairCycles: 2,

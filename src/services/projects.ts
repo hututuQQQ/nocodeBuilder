@@ -117,6 +117,12 @@ export type DevServerInfo = {
   url: string;
 };
 
+export type PreviewProbeResult = {
+  ok: boolean;
+  status: number;
+  summary: string;
+};
+
 export type VercelDeployTarget = "preview" | "production";
 
 export type VercelDeployOptions = {
@@ -277,6 +283,10 @@ export const projectApi = {
 
   openPreviewInBrowser(url: string) {
     return invoke<void>("open_preview_in_browser", { url });
+  },
+
+  probePreviewUrl(url: string) {
+    return invoke<PreviewProbeResult>("probe_preview_url", { url });
   },
 
   async subscribeCommandEvents({

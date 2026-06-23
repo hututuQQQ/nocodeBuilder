@@ -268,6 +268,7 @@ pub fn run() {
             commands::start_dev_server,
             commands::stop_dev_server,
             commands::open_preview_in_browser,
+            commands::probe_preview_url,
             commands::supabase_proxy_request,
             commands::test_supabase_database_url,
             commands::test_vercel_token,
