@@ -281,6 +281,35 @@ describe("spec store actions", () => {
     expect(store.get().currentSpec?.revisions[0].tasks[0].status).toBe("running");
   });
 
+  it("continues execution from an approved Spec after reload", async () => {
+    const revision = createExecutableRevision({
+      approvedAt: "2026-01-01T00:00:01.000Z",
+      tasks: [createExecutableTask("task-1")],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "approved",
+    });
+    const store = createStore({
+      currentSpec: spec,
+    });
+    fake.runSpecTaskRuntime.mockImplementation(async (input: RuntimeInput) => ({
+      run: createRun(input.runId, { status: "paused" }),
+      verificationReport: null,
+    }));
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    expect(fake.runSpecTaskRuntime).toHaveBeenCalledTimes(1);
+    expect(store.get().currentSpec?.status).toBe("building");
+    expect(store.get().currentSpec?.revisions[0].tasks[0]).toMatchObject({
+      runId: expect.stringMatching(/^run-/),
+      status: "running",
+    });
+  });
+
   it("marks a missing AgentRun as retryable blocked instead of leaving it running", async () => {
     const revision = createExecutableRevision({
       tasks: [

@@ -91,7 +91,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
 
         set({ currentSpec: spec });
         await get().loadConversationSpecHistory();
-        if (["building", "verifying"].includes(spec.status)) {
+        if (["approved", "building", "verifying"].includes(spec.status)) {
           void get().continueCurrentSpecExecution();
         }
       } catch (error) {
@@ -302,7 +302,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
       if (
         !spec ||
         get().isExecutingSpec ||
-        !["building", "verifying"].includes(spec.status)
+        !["approved", "building", "verifying"].includes(spec.status)
       ) {
         return;
       }
@@ -833,6 +833,11 @@ async function reconcileAndContinueSpecExecution(
 
   if (spec.status === "verifying") {
     await verifyCompletedTasks(store, spec);
+    return;
+  }
+
+  if (spec.status === "approved") {
+    await executeSpecTasks(store, spec.id);
     return;
   }
 
