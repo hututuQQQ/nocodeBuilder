@@ -712,6 +712,10 @@ describe("spec store actions", () => {
       command: "acceptance criteria",
       success: false,
     });
+    expect(store.get().currentSpec?.revisions[0].tasks[0]).toMatchObject({
+      error: expect.stringContaining("Verification report"),
+      status: "failed",
+    });
     expect(
       store.get().currentSpec
         ? computePersistedAcceptanceResults(store.get().currentSpec!)[0]
@@ -719,7 +723,7 @@ describe("spec store actions", () => {
     ).toMatchObject({
       criterionId: "criterion-1",
       status: "failed",
-      summary: expect.stringContaining("criterion-1"),
+      summary: expect.stringContaining("task-1"),
     });
     expect(store.get().runProjectCommand).not.toHaveBeenCalled();
   });
@@ -781,6 +785,17 @@ describe("spec store actions", () => {
       command: "task verification reports",
       success: false,
     });
+    expect(store.get().currentSpec?.revisions[0].tasks).toMatchObject([
+      {
+        id: "task-1",
+        status: "passed",
+      },
+      {
+        error: expect.stringContaining("Verification report"),
+        id: "task-2",
+        status: "failed",
+      },
+    ]);
     expect(store.get().runProjectCommand).not.toHaveBeenCalled();
   });
 

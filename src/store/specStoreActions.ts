@@ -1059,7 +1059,11 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
     await saveSpecToStore(
       store,
       markSpecBlocked(
-        markFinalVerificationFailed(spec, "acceptance criteria", output),
+        markFinalVerificationFailed(
+          markTasksWithIncompleteVerificationReports(spec, verificationReports),
+          "acceptance criteria",
+          output,
+        ),
         output,
       ),
     );
@@ -1081,7 +1085,11 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
     await saveSpecToStore(
       store,
       markSpecBlocked(
-        markFinalVerificationFailed(spec, "task verification reports", output),
+        markFinalVerificationFailed(
+          markTasksWithIncompleteVerificationReports(spec, verificationReports),
+          "task verification reports",
+          output,
+        ),
         output,
       ),
     );
@@ -1191,6 +1199,37 @@ function markFinalVerificationFailed(
       output,
       success: false,
     },
+  };
+}
+
+function markTasksWithIncompleteVerificationReports(
+  spec: DevelopmentSpec,
+  verificationReports: Map<string, "passed" | "failed" | "pending">,
+): DevelopmentSpec {
+  const revision = getCurrentSpecRevision(spec);
+  const nextRevision = {
+    ...revision,
+    tasks: revision.tasks.map((task) => {
+      if (task.runId && verificationReports.get(task.runId) === "passed") {
+        return task;
+      }
+
+      return {
+        ...task,
+        error: task.runId
+          ? `Verification report for AgentRun ${task.runId} did not pass.`
+          : "Task is missing its AgentRun id.",
+        status: "failed" as const,
+      };
+    }),
+  };
+
+  return {
+    ...spec,
+    revisions: spec.revisions.map((item) =>
+      item.id === nextRevision.id ? nextRevision : item,
+    ),
+    updatedAt: new Date().toISOString(),
   };
 }
 
