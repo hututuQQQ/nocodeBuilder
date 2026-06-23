@@ -75,6 +75,48 @@ describe("project store actions", () => {
     expect(store.get().currentSpec).toBeNull();
   });
 
+  it("surfaces cleanup failure after Initial Spec creation fails", async () => {
+    const project = createProject();
+    fake.createProject.mockResolvedValue(project);
+    fake.deleteUninitializedProject.mockRejectedValue(
+      new Error("project: cannot delete initialized project metadata"),
+    );
+    const store = createStore({
+      createInitialSpec: vi.fn(async () => {
+        store.set({
+          projectError: "spec: failed to create initial build",
+        });
+        return null;
+      }),
+      selectProject: vi.fn(async () => {
+        store.set({
+          currentProject: project,
+          projects: [project],
+        });
+      }),
+    });
+    const actions = createProjectActions(store as never);
+
+    await expect(actions.createProject("Project", "Brief")).resolves.toBeNull();
+
+    expect(fake.deleteUninitializedProject).toHaveBeenCalledWith(project.id);
+    expect(store.get().projectError).toContain(
+      "spec: failed to create initial build",
+    );
+    expect(store.get().projectError).toContain(
+      "Failed to clean up Project: project: cannot delete initialized project metadata",
+    );
+    expect(store.get().terminalLogs).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "Failed to clean up Project: project: cannot delete initialized project metadata",
+        ),
+      ]),
+    );
+    expect(store.get().projects).toEqual([]);
+    expect(store.get().currentProject).toBeNull();
+  });
+
   it("returns the project only after Initial Build conversation is created", async () => {
     const project = createProject();
     const initialConversation = {

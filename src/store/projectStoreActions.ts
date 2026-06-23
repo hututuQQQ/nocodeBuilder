@@ -85,9 +85,14 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
 
         if (!initialConversation) {
           await projectApi.deleteUninitializedProject(project.id).catch((error) => {
+            const cleanupMessage = getProjectErrorMessage(error);
+
             set((state) => ({
+              projectError: state.projectError
+                ? `${state.projectError}\nFailed to clean up ${project.name}: ${cleanupMessage}`
+                : `Failed to clean up ${project.name}: ${cleanupMessage}`,
               terminalLogs: appendLogs(state.terminalLogs, [
-                `[project:error] Failed to clean up ${project.name}: ${getProjectErrorMessage(error)}`,
+                `[project:error] Failed to clean up ${project.name}: ${cleanupMessage}`,
               ]),
             }));
           });
