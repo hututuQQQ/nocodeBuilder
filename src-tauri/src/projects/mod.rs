@@ -7,8 +7,8 @@ mod types;
 mod workspace;
 
 use types::{
-    FileTree, ProjectChangeRecord, ProjectConversation, ProjectConversationSummary,
-    ProjectFileInput, ProjectInfo,
+    CreateProjectConversationInput, FileTree, ProjectChangeRecord, ProjectConversation,
+    ProjectConversationSummary, ProjectFileInput, ProjectInfo, SwitchProjectConversationModeInput,
 };
 
 pub(crate) use workspace::resolve_project_dir;
@@ -77,9 +77,9 @@ pub fn list_project_conversations(
 #[tauri::command]
 pub fn create_project_conversation(
     project_id: String,
-    title: Option<String>,
+    input: CreateProjectConversationInput,
 ) -> Result<ProjectConversation, String> {
-    conversation_commands::create_project_conversation(project_id, title)
+    conversation_commands::create_project_conversation(project_id, input)
 }
 
 #[tauri::command]
@@ -96,6 +96,14 @@ pub fn save_project_conversation(
     conversation: ProjectConversation,
 ) -> Result<ProjectConversation, String> {
     conversation_commands::save_project_conversation(project_id, conversation)
+}
+
+#[tauri::command]
+pub fn switch_project_conversation_mode(
+    project_id: String,
+    input: SwitchProjectConversationModeInput,
+) -> Result<ProjectConversation, String> {
+    conversation_commands::switch_project_conversation_mode(project_id, input)
 }
 
 #[tauri::command]

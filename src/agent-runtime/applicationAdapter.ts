@@ -14,6 +14,7 @@ import {
 import { buildDynamicAgentContext } from "../agent/project/memory";
 import { AgentVerifier, type BaselineCommandResults } from "../agent-core/verifier/verifier";
 import { compileTaskContract } from "../agent-core/contract/taskContract";
+import type { TaskContract } from "../agent-core/types";
 import {
   RunController,
   type HeadlessModelAction,
@@ -65,6 +66,8 @@ import {
 type ApplicationRuntimeMode = "generate" | "modify";
 
 type RunApplicationRuntimeInput = {
+  contract?: TaskContract;
+  conversationId?: string;
   existingRun?: AgentRun;
   mode: ApplicationRuntimeMode;
   project: ProjectInfo;
@@ -121,6 +124,31 @@ export async function modifyCurrentProjectRuntime(
   });
 }
 
+export async function runSpecTaskRuntime({
+  contract,
+  conversationId,
+  executionMode,
+  project,
+  store,
+  taskObjective,
+}: {
+  contract: TaskContract;
+  conversationId: string;
+  executionMode: ApplicationRuntimeMode;
+  project: ProjectInfo;
+  store: StoreAccess;
+  taskObjective: string;
+}) {
+  return runApplicationRuntime({
+    contract,
+    conversationId,
+    mode: executionMode,
+    project,
+    store,
+    userRequest: taskObjective,
+  });
+}
+
 async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
   const { existingRun, mode, project, store, userRequest } = input;
   const stream = startStreamingAgentMessage(
@@ -140,7 +168,7 @@ async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
   let finalRun: AgentRun | null = null;
   const contract = existingRun
     ? existingRun.contract
-    : compileTaskContract({
+    : input.contract ?? compileTaskContract({
         objective: userRequest,
         selectedSiteNodeId: store.get().selectedSiteNodeId,
         taskType: mode === "generate" ? "full_site" : undefined,
@@ -193,7 +221,10 @@ async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
             baselineCommandResults: session.baselineCommandResults,
             baselinePackageJson: session.baselinePackageJson,
             contract,
-            conversationId: store.get().currentConversation?.id ?? "conversation-default",
+            conversationId:
+              input.conversationId ??
+              store.get().currentConversation?.id ??
+              "conversation-default",
             projectId: project.id,
             runId: controllerRunId,
           },

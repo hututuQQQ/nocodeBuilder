@@ -3,14 +3,8 @@ import {
   getProjectErrorMessage,
   projectApi,
 } from "../services/projects";
-import { generateInitialProject } from "./agentWorkflow";
 import type { AppState } from "./appStore";
-import { createChatMessage } from "./chatMessages";
 import { appendLogs } from "./commandLogs";
-import {
-  appendConversationMessage,
-  persistConversation,
-} from "./conversationState";
 import type { StoreAccess } from "./storeAccess";
 
 type ProjectActions = Pick<
@@ -80,23 +74,15 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
         }));
 
         await get().selectProject(project.id, {
-          conversationTitle: "Initial build",
+          ensureConversation: false,
           startDevServer: false,
         });
 
-        const userMessage = createChatMessage("user", projectPrompt);
-        const conversation = appendConversationMessage({ get, set }, userMessage);
-        void persistConversation({ get, set }, conversation);
-
-        const didGenerateProject = await generateInitialProject(
-          { get, set },
-          project,
+        await get().createInitialSpec(
+          project.id,
           projectPrompt,
+          "Initial build",
         );
-
-        if (didGenerateProject) {
-          void get().bootstrapProject(project.id);
-        }
 
         return project;
       } catch (error) {
@@ -143,9 +129,11 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
             currentAgentRun: null,
             currentConversation: null,
             currentProject: null,
+            currentSpec: null,
             currentVerificationReport: null,
             devServerStatus: "stopped",
             fileTree: null,
+            historicalSpecs: [],
             lastDeploymentUrl: null,
             previewUrl: null,
             selectedChangeFilePath: null,
@@ -236,10 +224,12 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
         currentAgentApproval: null,
         currentAgentRun: null,
         currentProject: project,
+        currentSpec: null,
         currentVerificationReport: null,
         currentConversation: null,
         devServerStatus: "stopped",
         fileTree: null,
+        historicalSpecs: [],
         isLoadingFiles: true,
         isStartingDevServer: false,
         lastDeploymentUrl: null,

@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     metadata::METADATA_DIR,
-    types::{ProjectConversation, ProjectConversationSummary},
+    types::{
+        CreateProjectConversationInput, ProjectConversation, ProjectConversationSummary,
+        SwitchProjectConversationModeInput,
+    },
     workspace::{current_timestamp, resolve_project_dir},
 };
 
@@ -46,15 +49,36 @@ pub fn list_project_conversations(
 
 pub fn create_project_conversation(
     project_id: String,
-    title: Option<String>,
+    input: CreateProjectConversationInput,
 ) -> Result<ProjectConversation, String> {
     let project_dir = resolve_project_dir(&project_id)?;
-    let id = unique_conversation_id(&project_dir)?;
+    let id = match input.conversation_id {
+        Some(id) => {
+            validate_conversation_id(&id)?;
+            if conversation_file_path(&project_dir, &id).exists() {
+                return Err("conversation: conversation already exists".to_string());
+            }
+            id
+        }
+        None => unique_conversation_id(&project_dir)?,
+    };
     let now = current_timestamp();
+    let spec_ids = input.spec_ids.unwrap_or_default();
+    validate_conversation_shape(
+        &input.kind,
+        &input.mode,
+        input.active_spec_id.as_deref(),
+        &spec_ids,
+    )?;
     let conversation = ProjectConversation {
         id,
         project_id,
-        title: normalize_title(title.as_deref()),
+        title: normalize_title(input.title.as_deref()),
+        kind: input.kind,
+        mode: input.mode,
+        active_spec_id: input.active_spec_id,
+        spec_ids,
+        mode_changed_at: now.clone(),
         created_at: now.clone(),
         updated_at: now.clone(),
         last_message_at: now,
@@ -88,10 +112,35 @@ pub fn save_project_conversation(
 ) -> Result<ProjectConversation, String> {
     let project_dir = resolve_project_dir(&project_id)?;
     validate_conversation_id(&conversation.id)?;
+    validate_conversation_shape(
+        &conversation.kind,
+        &conversation.mode,
+        conversation.active_spec_id.as_deref(),
+        &conversation.spec_ids,
+    )?;
 
     if conversation.project_id != project_id {
         return Err("conversation: conversation does not belong to project".to_string());
     }
+
+    let existing = read_conversation_file(&project_dir, &conversation.id)?;
+
+    if existing.project_id != project_id {
+        return Err("conversation: conversation does not belong to project".to_string());
+    }
+
+    if existing.kind != conversation.kind
+        || existing.mode != conversation.mode
+        || existing.active_spec_id != conversation.active_spec_id
+        || existing.spec_ids != conversation.spec_ids
+    {
+        return Err(
+            "conversation: mode metadata must be changed with switch_project_conversation_mode"
+                .to_string(),
+        );
+    }
+
+    conversation.mode_changed_at = existing.mode_changed_at;
 
     if conversation.title.trim().is_empty() {
         conversation.title = title_from_messages(&conversation)
@@ -99,6 +148,50 @@ pub fn save_project_conversation(
     } else {
         conversation.title = conversation.title.trim().to_string();
     }
+
+    write_project_conversation(&project_dir, &conversation)?;
+    upsert_conversation_summary(&project_dir, summary_from_conversation(&conversation))?;
+
+    Ok(conversation)
+}
+
+pub fn switch_project_conversation_mode(
+    project_id: String,
+    input: SwitchProjectConversationModeInput,
+) -> Result<ProjectConversation, String> {
+    let project_dir = resolve_project_dir(&project_id)?;
+    let mut conversation = read_conversation_file(&project_dir, &input.conversation_id)?;
+
+    if conversation.project_id != project_id {
+        return Err("conversation: conversation does not belong to project".to_string());
+    }
+
+    if conversation.kind == "initial_build" {
+        return Err("conversation: initial build mode is locked".to_string());
+    }
+
+    if conversation.kind != "iteration" {
+        return Err("conversation: invalid conversation kind".to_string());
+    }
+
+    if conversation.mode == input.target_mode {
+        return Err("conversation: target mode is already active".to_string());
+    }
+
+    validate_conversation_shape(
+        &conversation.kind,
+        &input.target_mode,
+        input.active_spec_id.as_deref(),
+        &input.spec_ids,
+    )?;
+    validate_historical_specs_preserved(&conversation.spec_ids, &input.spec_ids)?;
+
+    let now = current_timestamp();
+    conversation.mode = input.target_mode;
+    conversation.active_spec_id = input.active_spec_id;
+    conversation.spec_ids = input.spec_ids;
+    conversation.mode_changed_at = now.clone();
+    conversation.updated_at = now;
 
     write_project_conversation(&project_dir, &conversation)?;
     upsert_conversation_summary(&project_dir, summary_from_conversation(&conversation))?;
@@ -320,6 +413,9 @@ fn summary_from_conversation(conversation: &ProjectConversation) -> ProjectConve
         id: conversation.id.clone(),
         project_id: conversation.project_id.clone(),
         title: conversation.title.clone(),
+        kind: conversation.kind.clone(),
+        mode: conversation.mode.clone(),
+        active_spec_id: conversation.active_spec_id.clone(),
         created_at: conversation.created_at.clone(),
         updated_at: conversation.updated_at.clone(),
         last_message_at: conversation.last_message_at.clone(),
@@ -371,6 +467,81 @@ fn validate_conversation_id(conversation_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_spec_id(spec_id: &str) -> Result<(), String> {
+    if spec_id.is_empty()
+        || !spec_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err("conversation: invalid spec id".to_string());
+    }
+
+    Ok(())
+}
+
+fn validate_conversation_shape(
+    kind: &str,
+    mode: &str,
+    active_spec_id: Option<&str>,
+    spec_ids: &[String],
+) -> Result<(), String> {
+    match kind {
+        "initial_build" | "iteration" => {}
+        _ => return Err("conversation: invalid conversation kind".to_string()),
+    }
+
+    match mode {
+        "chat" | "spec" => {}
+        _ => return Err("conversation: invalid conversation mode".to_string()),
+    }
+
+    if kind == "initial_build" && mode != "spec" {
+        return Err("conversation: initial build must use spec mode".to_string());
+    }
+
+    validate_unique_spec_ids(spec_ids)?;
+
+    if mode == "chat" {
+        if active_spec_id.is_some() {
+            return Err("conversation: chat mode cannot have an active spec".to_string());
+        }
+        return Ok(());
+    }
+
+    let active_spec_id = active_spec_id
+        .ok_or_else(|| "conversation: spec mode requires an active spec".to_string())?;
+    validate_spec_id(active_spec_id)?;
+
+    if !spec_ids.iter().any(|spec_id| spec_id == active_spec_id) {
+        return Err("conversation: active spec must be included in specIds".to_string());
+    }
+
+    Ok(())
+}
+
+fn validate_unique_spec_ids(spec_ids: &[String]) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+
+    for spec_id in spec_ids {
+        validate_spec_id(spec_id)?;
+        if !seen.insert(spec_id) {
+            return Err("conversation: duplicate spec id".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_historical_specs_preserved(previous: &[String], next: &[String]) -> Result<(), String> {
+    for spec_id in previous {
+        if !next.iter().any(|item| item == spec_id) {
+            return Err("conversation: historical specs cannot be removed".to_string());
+        }
+    }
+
+    Ok(())
+}
+
 fn conversations_dir(project_dir: &Path) -> PathBuf {
     project_dir.join(METADATA_DIR).join(CONVERSATIONS_DIR)
 }
@@ -381,4 +552,61 @@ fn index_path(project_dir: &Path) -> PathBuf {
 
 fn conversation_file_path(project_dir: &Path, conversation_id: &str) -> PathBuf {
     conversations_dir(project_dir).join(format!("{conversation_id}.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_build_requires_spec_mode_and_active_spec() {
+        assert!(validate_conversation_shape("initial_build", "chat", None, &Vec::new(),).is_err());
+        assert!(validate_conversation_shape("initial_build", "spec", None, &Vec::new(),).is_err());
+        assert!(validate_conversation_shape(
+            "initial_build",
+            "spec",
+            Some("spec-1"),
+            &vec!["spec-1".to_string()],
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn chat_mode_rejects_active_spec() {
+        assert!(validate_conversation_shape(
+            "iteration",
+            "chat",
+            Some("spec-1"),
+            &vec!["spec-1".to_string()],
+        )
+        .is_err());
+        assert!(validate_conversation_shape(
+            "iteration",
+            "chat",
+            None,
+            &vec!["spec-1".to_string()],
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn spec_ids_must_be_unique_and_preserved() {
+        assert!(validate_conversation_shape(
+            "iteration",
+            "spec",
+            Some("spec-1"),
+            &vec!["spec-1".to_string(), "spec-1".to_string()],
+        )
+        .is_err());
+        assert!(validate_historical_specs_preserved(
+            &vec!["spec-1".to_string(), "spec-2".to_string()],
+            &vec!["spec-2".to_string()],
+        )
+        .is_err());
+        assert!(validate_historical_specs_preserved(
+            &vec!["spec-1".to_string()],
+            &vec!["spec-1".to_string(), "spec-2".to_string()],
+        )
+        .is_ok());
+    }
 }

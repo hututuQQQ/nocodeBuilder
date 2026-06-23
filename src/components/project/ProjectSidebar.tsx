@@ -1,6 +1,7 @@
 import { FormEvent, MouseEvent, useState } from "react";
 import {
   Archive,
+  FileText,
   FolderKanban,
   FolderOpen,
   Loader2,
@@ -20,6 +21,9 @@ type ProjectSidebarProps = {
 
 export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [newIterationProjectId, setNewIterationProjectId] = useState<string | null>(null);
+  const [newIterationMode, setNewIterationMode] = useState<"chat" | "spec">("chat");
+  const [newIterationBrief, setNewIterationBrief] = useState("");
   const [projectName, setProjectName] = useState("");
   const [projectPrompt, setProjectPrompt] = useState("");
   const archiveConversation = useAppStore((state) => state.archiveConversation);
@@ -40,6 +44,10 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
     (state) => state.isLoadingConversations,
   );
   const isLoadingProjects = useAppStore((state) => state.isLoadingProjects);
+  const isGeneratingSpec = useAppStore((state) => state.isGeneratingSpec);
+  const isSwitchingIterationMode = useAppStore(
+    (state) => state.isSwitchingIterationMode,
+  );
   const openProjectFolder = useAppStore((state) => state.openProjectFolder);
   const projectError = useAppStore((state) => state.projectError);
   const projects = useAppStore((state) => state.projects);
@@ -47,6 +55,9 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
   const selectProject = useAppStore((state) => state.selectProject);
   const setShowArchivedConversations = useAppStore(
     (state) => state.setShowArchivedConversations,
+  );
+  const switchCurrentIterationToSpec = useAppStore(
+    (state) => state.switchCurrentIterationToSpec,
   );
   const showArchivedConversations = useAppStore(
     (state) => state.showArchivedConversations,
@@ -83,12 +94,35 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
     projectId: string,
   ) {
     event.stopPropagation();
+    setNewIterationProjectId(projectId);
+    setNewIterationMode("chat");
+    setNewIterationBrief("");
+  }
+
+  async function handleCreateIteration(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const projectId = newIterationProjectId;
+
+    if (!projectId) {
+      return;
+    }
 
     if (currentProject?.id !== projectId) {
       await selectProject(projectId, { ensureConversation: false });
     }
 
-    await createConversation(projectId);
+    const conversation = await createConversation(projectId, {
+      kind: "iteration",
+      mode: "chat",
+      title: newIterationMode === "spec" ? "Spec iteration" : undefined,
+    });
+
+    if (conversation && newIterationMode === "spec") {
+      await switchCurrentIterationToSpec(newIterationBrief);
+    }
+
+    setNewIterationProjectId(null);
+    setNewIterationBrief("");
   }
 
   async function handleToggleArchivedConversations(
@@ -452,6 +486,105 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                 type="submit"
               >
                 {isCreatingProject ? (
+                  <Loader2 size={15} className="animate-spin" aria-hidden="true" />
+                ) : (
+                  <Plus size={15} aria-hidden="true" />
+                )}
+                Create
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {newIterationProjectId ? (
+        <div className="absolute inset-0 z-10 grid place-items-center bg-black/60 px-4">
+          <form
+            className="w-full max-w-[360px] rounded-md border border-zinc-800 bg-zinc-950 p-4 shadow-2xl"
+            onSubmit={handleCreateIteration}
+          >
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold text-zinc-100">
+                  New Iteration
+                </h2>
+                <p className="mt-1 text-xs text-zinc-500">
+                  Choose Chat or Spec
+                </p>
+              </div>
+              <button
+                className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200"
+                onClick={() => setNewIterationProjectId(null)}
+                type="button"
+              >
+                <X size={15} aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 overflow-hidden rounded-md border border-zinc-800 bg-zinc-950">
+              <button
+                className={`flex h-10 items-center justify-center gap-2 text-sm ${
+                  newIterationMode === "chat"
+                    ? "bg-teal-400/15 text-teal-100"
+                    : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200"
+                }`}
+                onClick={() => setNewIterationMode("chat")}
+                type="button"
+              >
+                <MessageSquare size={15} aria-hidden="true" />
+                Chat
+              </button>
+              <button
+                className={`flex h-10 items-center justify-center gap-2 border-l border-zinc-800 text-sm ${
+                  newIterationMode === "spec"
+                    ? "bg-blue-400/15 text-blue-100"
+                    : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200"
+                }`}
+                onClick={() => setNewIterationMode("spec")}
+                type="button"
+              >
+                <FileText size={15} aria-hidden="true" />
+                Spec
+              </button>
+            </div>
+
+            {newIterationMode === "spec" ? (
+              <>
+                <label
+                  className="mb-2 mt-4 block text-xs font-medium text-zinc-400"
+                  htmlFor="iteration-brief"
+                >
+                  Spec brief
+                </label>
+                <textarea
+                  className="h-28 min-h-28 w-full resize-none rounded-md border border-zinc-800 bg-zinc-900 px-3 py-3 text-sm leading-5 text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-blue-400/60 focus:ring-2 focus:ring-blue-400/10"
+                  id="iteration-brief"
+                  onChange={(event) => setNewIterationBrief(event.currentTarget.value)}
+                  placeholder="Describe the next feature or change"
+                  value={newIterationBrief}
+                />
+              </>
+            ) : null}
+
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                className="h-9 rounded-md border border-zinc-800 px-3 text-sm text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-200"
+                onClick={() => setNewIterationProjectId(null)}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="flex h-9 items-center gap-2 rounded-md border border-teal-400/30 bg-teal-400/10 px-3 text-sm font-medium text-teal-100 transition hover:border-teal-300/60 hover:bg-teal-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
+                disabled={
+                  isCreatingConversation ||
+                  isGeneratingSpec ||
+                  isSwitchingIterationMode ||
+                  (newIterationMode === "spec" && !newIterationBrief.trim())
+                }
+                type="submit"
+              >
+                {isCreatingConversation || isGeneratingSpec || isSwitchingIterationMode ? (
                   <Loader2 size={15} className="animate-spin" aria-hidden="true" />
                 ) : (
                   <Plus size={15} aria-hidden="true" />

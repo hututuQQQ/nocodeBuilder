@@ -1,4 +1,5 @@
 import {
+  type CreateProjectConversationInput,
   getProjectErrorMessage,
   projectApi,
   type ProjectConversation,
@@ -73,6 +74,8 @@ export function createConversationActions({
         set({
           chatMessages: [],
           currentConversation: null,
+          currentSpec: null,
+          historicalSpecs: [],
         });
       } catch (error) {
         const message = getProjectErrorMessage(error);
@@ -88,7 +91,7 @@ export function createConversationActions({
       }
     },
 
-    createConversation: async (projectId, title) => {
+    createConversation: async (projectId, input) => {
       const targetProjectId = projectId ?? get().currentProject?.id;
 
       if (!targetProjectId) {
@@ -98,9 +101,17 @@ export function createConversationActions({
       set({ isCreatingConversation: true, projectError: null });
 
       try {
+        const conversationInput: CreateProjectConversationInput =
+          typeof input === "object" && input
+            ? input
+            : {
+                kind: "iteration",
+                mode: "chat",
+                title: input,
+              };
         const conversation = await projectApi.createProjectConversation(
           targetProjectId,
-          title,
+          conversationInput,
         );
 
         set((state) => ({
@@ -112,8 +123,12 @@ export function createConversationActions({
             conversationToSummary(conversation),
           ),
           currentConversation: conversation,
+          currentSpec: null,
+          historicalSpecs: [],
           showArchivedConversations: false,
         }));
+
+        await get().loadCurrentSpec();
 
         return conversation;
       } catch (error) {
@@ -155,6 +170,7 @@ export function createConversationActions({
           ),
           currentConversation: conversation,
         }));
+        await get().loadCurrentSpec();
       } catch (error) {
         const message = getProjectErrorMessage(error);
 
@@ -209,6 +225,8 @@ export function createConversationActions({
             (summary) => !summary.archivedAt,
           ),
           currentConversation: null,
+          currentSpec: null,
+          historicalSpecs: [],
           showArchivedConversations: false,
         });
 
@@ -263,6 +281,7 @@ export function createConversationActions({
           currentConversation: conversation,
           showArchivedConversations: false,
         }));
+        await get().loadCurrentSpec();
       } catch (error) {
         const message = getProjectErrorMessage(error);
 

@@ -7,6 +7,7 @@ import type {
   ProjectConversation,
   ProjectConversationSummary,
   ProjectInfo,
+  CreateProjectConversationInput,
   VercelDeploymentInfo,
   VercelDeployOptions,
 } from "../services/projects";
@@ -25,6 +26,8 @@ import { createDeploymentActions } from "./deploymentStoreActions";
 import { createPreviewActions } from "./previewStoreActions";
 import { createProjectActions } from "./projectStoreActions";
 import { createReviewActions } from "./reviewStoreActions";
+import { createSpecActions } from "./specStoreActions";
+import type { DevelopmentSpec } from "../spec-core/types";
 import type {
   AgentApproval,
   AgentEvent,
@@ -58,6 +61,8 @@ export type AppState = {
   selectedSiteNodeId: string | null;
   conversationSummaries: ProjectConversationSummary[];
   currentConversation: ProjectConversation | null;
+  currentSpec: DevelopmentSpec | null;
+  historicalSpecs: DevelopmentSpec[];
   chatMessages: ChatMessage[];
   changeHistory: ChangeRecord[];
   terminalLogs: string[];
@@ -80,6 +85,12 @@ export type AppState = {
   isStartingDevServer: boolean;
   isDeploying: boolean;
   isModifyingProject: boolean;
+  isLoadingSpec: boolean;
+  isGeneratingSpec: boolean;
+  isRevisingSpec: boolean;
+  isExecutingSpec: boolean;
+  isVerifyingSpec: boolean;
+  isSwitchingIterationMode: boolean;
   projectError: string | null;
   showArchivedConversations: boolean;
   archiveConversation: (conversationId: string) => Promise<void>;
@@ -90,7 +101,7 @@ export type AppState = {
   clearSelectedSiteNode: () => void;
   createConversation: (
     projectId?: string,
-    title?: string,
+    input?: string | CreateProjectConversationInput,
   ) => Promise<ProjectConversation | null>;
   createProject: (
     projectName: string,
@@ -109,6 +120,8 @@ export type AppState = {
   loadProjectChangeHistory: (projectId: string) => Promise<void>;
   loadAgentRuns: (projectId: string) => Promise<void>;
   loadProjects: () => Promise<void>;
+  loadCurrentSpec: () => Promise<void>;
+  loadConversationSpecHistory: () => Promise<void>;
   openProjectFolder: (projectId: string) => Promise<void>;
   openPreviewInBrowser: (url?: string) => Promise<void>;
   readProjectFile: (path: string) => Promise<void>;
@@ -145,6 +158,19 @@ export type AppState = {
   ) => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
   sendAgentSteering: (content: string) => Promise<void>;
+  createInitialSpec: (
+    projectId: string,
+    projectBrief: string,
+    conversationTitle?: string,
+  ) => Promise<ProjectConversation | null>;
+  reviseCurrentSpec: (feedback: string) => Promise<void>;
+  approveAndExecuteCurrentSpec: () => Promise<void>;
+  retrySpecTask: (taskId: string) => Promise<void>;
+  retrySpecVerification: () => Promise<void>;
+  switchCurrentIterationToSpec: (brief: string) => Promise<void>;
+  switchCurrentIterationToChat: (options?: {
+    cancelActiveSpec?: boolean;
+  }) => Promise<void>;
   setSelectedSiteNode: (nodeId: string | null) => void;
   setShowArchivedConversations: (showArchived: boolean) => Promise<void>;
   startDevServer: (projectId: string) => Promise<void>;
@@ -171,6 +197,8 @@ const initialState = {
   selectedSiteNodeId: null,
   conversationSummaries: [],
   currentConversation: null,
+  currentSpec: null,
+  historicalSpecs: [],
   chatMessages: [],
   changeHistory: [],
   terminalLogs: [],
@@ -193,6 +221,12 @@ const initialState = {
   isStartingDevServer: false,
   isDeploying: false,
   isModifyingProject: false,
+  isLoadingSpec: false,
+  isGeneratingSpec: false,
+  isRevisingSpec: false,
+  isExecutingSpec: false,
+  isVerifyingSpec: false,
+  isSwitchingIterationMode: false,
   projectError: null,
   showArchivedConversations: false,
 } satisfies Omit<
@@ -204,6 +238,7 @@ const initialState = {
   | "cancelCurrentAgentRun"
   | "clearSelectedSiteNode"
   | "createConversation"
+  | "createInitialSpec"
   | "createProject"
   | "deployCurrentProject"
   | "denyCurrentAgentApproval"
@@ -213,6 +248,8 @@ const initialState = {
   | "loadProjectChangeHistory"
   | "loadAgentRuns"
   | "loadProjects"
+  | "loadCurrentSpec"
+  | "loadConversationSpecHistory"
   | "openProjectFolder"
   | "openPreviewInBrowser"
   | "readProjectFile"
@@ -233,6 +270,12 @@ const initialState = {
   | "selectProject"
   | "sendMessage"
   | "sendAgentSteering"
+  | "reviseCurrentSpec"
+  | "approveAndExecuteCurrentSpec"
+  | "retrySpecTask"
+  | "retrySpecVerification"
+  | "switchCurrentIterationToSpec"
+  | "switchCurrentIterationToChat"
   | "setSelectedSiteNode"
   | "setShowArchivedConversations"
   | "startDevServer"
@@ -252,6 +295,7 @@ export const useAppStore = create<AppState>((set, get) => {
     ...createPreviewActions(store),
     ...createProjectActions(store),
     ...createReviewActions(store),
+    ...createSpecActions(store),
     ...createChatActions(store),
   };
 });

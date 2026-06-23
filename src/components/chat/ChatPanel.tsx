@@ -23,6 +23,7 @@ import {
   getAiProviderDefinition,
   type AiProviderId,
 } from "../../services/aiProviders";
+import { IterationModeSwitch } from "../iteration/IterationModeSwitch";
 import { AgentRunPanel } from "./AgentRunPanel";
 
 type ChatPanelProps = {
@@ -59,13 +60,17 @@ export function ChatPanel({
     (state) => state.isLoadingConversations,
   );
   const isModifyingProject = useAppStore((state) => state.isModifyingProject);
+  const isSwitchingIterationMode = useAppStore(
+    (state) => state.isSwitchingIterationMode,
+  );
   const currentAgentRun = useAppStore((state) => state.currentAgentRun);
   const sendMessage = useAppStore((state) => state.sendMessage);
   const isBusy =
     isGeneratingProject ||
     isModifyingProject ||
     isCreatingConversation ||
-    isLoadingConversations;
+    isLoadingConversations ||
+    isSwitchingIterationMode;
   const canSteerActiveRun = Boolean(
     currentAgentRun && !isTerminalAgentRun(currentAgentRun.status),
   );
@@ -171,6 +176,7 @@ export function ChatPanel({
             {provider.label} model
           </label>
           <div className="flex items-center gap-2">
+            <IterationModeSwitch />
             {isSavingModel ? (
               <Loader2
                 size={14}

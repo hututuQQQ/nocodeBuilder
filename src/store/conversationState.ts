@@ -16,10 +16,13 @@ export function conversationToSummary(
 ): ProjectConversationSummary {
   return {
     archivedAt: conversation.archivedAt,
+    activeSpecId: conversation.activeSpecId,
     createdAt: conversation.createdAt,
     id: conversation.id,
+    kind: conversation.kind,
     lastMessageAt: conversation.lastMessageAt,
     messageCount: conversation.messages.length,
+    mode: conversation.mode,
     projectId: conversation.projectId,
     title: conversation.title,
     updatedAt: conversation.updatedAt,

@@ -1,6 +1,7 @@
 import { PointerEvent, useEffect, useRef, useState } from "react";
 import { ChatPanel } from "../chat/ChatPanel";
 import { LogsPanel } from "../logs/LogsPanel";
+import { SpecPanel } from "../spec/SpecPanel";
 import { WorkspacePanel } from "../workspace/WorkspacePanel";
 import { ProjectSidebar } from "../project/ProjectSidebar";
 import { initializeCommandEvents, useAppStore } from "../../store/appStore";
@@ -40,6 +41,7 @@ export function AppShell({
   onOpenSettings,
 }: AppShellProps) {
   const loadProjects = useAppStore((state) => state.loadProjects);
+  const currentConversation = useAppStore((state) => state.currentConversation);
   const [dragMode, setDragMode] = useState<DragMode>(null);
   const [layout, setLayout] = useState<ShellLayout>({
     sidebarWidth: 260,
@@ -163,13 +165,23 @@ export function AppShell({
         onPointerDown={startDrag("sidebar")}
         orientation="vertical"
       />
-      <ChatPanel
-        activeProvider={activeProvider}
-        activeModel={activeModel}
-        configuredModelOptions={configuredModelOptions}
-        isSavingModel={isSavingModel}
-        onChangeModel={onChangeModel}
-      />
+      {currentConversation?.mode === "spec" ? (
+        <SpecPanel
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          configuredModelOptions={configuredModelOptions}
+          isSavingModel={isSavingModel}
+          onChangeModel={onChangeModel}
+        />
+      ) : (
+        <ChatPanel
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          configuredModelOptions={configuredModelOptions}
+          isSavingModel={isSavingModel}
+          onChangeModel={onChangeModel}
+        />
+      )}
       <ResizeHandle
         ariaLabel="Resize preview workspace"
         dragging={dragMode === "right"}

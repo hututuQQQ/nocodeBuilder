@@ -10,6 +10,7 @@ mod app_storage;
 mod commands;
 mod credentials;
 mod projects;
+mod spec_storage;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -259,6 +260,10 @@ pub fn run() {
             agent_storage::write_site_spec,
             credentials::has_ai_provider_secret,
             credentials::save_ai_provider_secret,
+            spec_storage::create_development_spec,
+            spec_storage::delete_development_spec,
+            spec_storage::read_development_spec,
+            spec_storage::save_development_spec,
             llm_chat_completion,
             llm_chat_completion_stream,
             commands::deploy_to_vercel,
@@ -285,6 +290,7 @@ pub fn run() {
             projects::read_file,
             projects::save_project_conversation,
             projects::save_project_change_history,
+            projects::switch_project_conversation_mode,
             projects::unarchive_project_conversation,
             projects::write_file,
             projects::write_files,

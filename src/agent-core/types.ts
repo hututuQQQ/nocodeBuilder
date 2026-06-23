@@ -45,6 +45,14 @@ export type TaskType =
 export type TaskContract = {
   objective: string;
   taskType: TaskType;
+  source?: {
+    mode: "spec";
+    specId: string;
+    revisionId: string;
+    taskId: string;
+    requirementIds: string[];
+    acceptanceCriteriaIds: string[];
+  };
   scope: {
     pages?: string[];
     componentIds?: string[];
