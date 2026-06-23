@@ -176,7 +176,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
             title: conversationTitle ?? "Initial build",
           });
         } catch (error) {
-          await specApi.deleteUnattachedSpec(project.id, spec.id);
+          await cleanupUnattachedSpec(store, project.id, spec.id);
           throw error;
         }
 
@@ -262,7 +262,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
             title: trimmedTitle || spec.revisions[0]?.brief || "Spec iteration",
           });
         } catch (error) {
-          await specApi.deleteUnattachedSpec(project.id, spec.id);
+          await cleanupUnattachedSpec(store, project.id, spec.id);
           throw error;
         }
 
@@ -573,7 +573,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
 
           applyConversationAndSpec(store, updatedConversation, spec);
         } catch (error) {
-          await specApi.deleteUnattachedSpec(project.id, spec.id);
+          await cleanupUnattachedSpec(store, project.id, spec.id);
           throw error;
         }
       } catch (error) {
@@ -1088,6 +1088,24 @@ async function saveSpecToStore(store: StoreAccess, spec: DevelopmentSpec) {
   }));
 
   return saved;
+}
+
+async function cleanupUnattachedSpec(
+  store: StoreAccess,
+  projectId: string,
+  specId: string,
+) {
+  try {
+    await specApi.deleteUnattachedSpec(projectId, specId);
+  } catch (error) {
+    const message = getProjectErrorMessage(error);
+
+    store.set((state) => ({
+      terminalLogs: appendLogs(state.terminalLogs, [
+        `[spec:error] Failed to clean up unattached Spec ${specId}: ${message}`,
+      ]),
+    }));
+  }
 }
 
 function markFinalVerificationFailed(

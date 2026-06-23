@@ -15,6 +15,7 @@ const fake = vi.hoisted(() => ({
   deleteUnattachedSpec: vi.fn(),
   readSpec: vi.fn(),
   requestFeatureSpec: vi.fn(),
+  requestInitialSpec: vi.fn(),
   requestSpecRevision: vi.fn(),
   runSpecTaskRuntime: vi.fn(),
   saveSpec: vi.fn(),
@@ -91,7 +92,7 @@ vi.mock("../services/specs", () => ({
 
 vi.mock("../spec-runtime/requests", () => ({
   requestFeatureSpec: (...args: unknown[]) => fake.requestFeatureSpec(...args),
-  requestInitialSpec: vi.fn(),
+  requestInitialSpec: (...args: unknown[]) => fake.requestInitialSpec(...args),
   requestSpecRevision: (...args: unknown[]) => fake.requestSpecRevision(...args),
 }));
 
@@ -104,6 +105,7 @@ describe("spec store actions", () => {
     fake.deleteUnattachedSpec.mockReset();
     fake.readSpec.mockReset();
     fake.requestFeatureSpec.mockReset();
+    fake.requestInitialSpec.mockReset();
     fake.requestSpecRevision.mockReset();
     fake.runSpecTaskRuntime.mockReset();
     fake.saveSpec.mockReset();
@@ -116,6 +118,7 @@ describe("spec store actions", () => {
       createSpec({ id: specId, status: "completed" }),
     );
     fake.requestFeatureSpec.mockResolvedValue(createGeneratedPayload());
+    fake.requestInitialSpec.mockResolvedValue(createGeneratedPayload());
     fake.requestSpecRevision.mockResolvedValue(createGeneratedPayload());
     fake.runSpecTaskRuntime.mockResolvedValue({
       run: null,
@@ -211,6 +214,113 @@ describe("spec store actions", () => {
     expect(store.get().currentConversation).toBeNull();
     expect(store.get().currentSpec).toBeNull();
     expect(store.get().projectError).toBe("host gate rejected");
+  });
+
+  it("returns null without creating a spec when Initial Spec generation fails", async () => {
+    fake.requestInitialSpec.mockRejectedValue(new Error("initial model unavailable"));
+    const store = createStore();
+    const actions = createSpecActions(store as never);
+
+    await expect(
+      actions.createInitialSpec("project-1", "Build a storefront"),
+    ).resolves.toBeNull();
+
+    expect(fake.createSpec).not.toHaveBeenCalled();
+    expect(fake.createProjectConversation).not.toHaveBeenCalled();
+    expect(store.get().currentConversation).toBeNull();
+    expect(store.get().currentSpec).toBeNull();
+    expect(store.get().projectError).toBe("initial model unavailable");
+  });
+
+  it("returns null without creating an Initial Build conversation when Initial Spec persistence fails", async () => {
+    fake.createSpec.mockRejectedValue(new Error("spec persistence failed"));
+    const store = createStore();
+    const actions = createSpecActions(store as never);
+
+    await expect(
+      actions.createInitialSpec("project-1", "Build a storefront"),
+    ).resolves.toBeNull();
+
+    expect(fake.createProjectConversation).not.toHaveBeenCalled();
+    expect(fake.deleteUnattachedSpec).not.toHaveBeenCalled();
+    expect(store.get().currentConversation).toBeNull();
+    expect(store.get().currentSpec).toBeNull();
+    expect(store.get().projectError).toBe("spec persistence failed");
+  });
+
+  it("deletes the unattached Initial Spec when Initial Build conversation creation fails", async () => {
+    fake.createProjectConversation.mockRejectedValue(new Error("host gate rejected"));
+    const store = createStore();
+    const actions = createSpecActions(store as never);
+
+    await expect(
+      actions.createInitialSpec("project-1", "Build a storefront"),
+    ).resolves.toBeNull();
+
+    const createdSpec = fake.createSpec.mock.calls[0][1] as DevelopmentSpec;
+    expect(createdSpec.kind).toBe("initial_build");
+    expect(fake.deleteUnattachedSpec).toHaveBeenCalledWith(
+      "project-1",
+      createdSpec.id,
+    );
+    expect(store.get().currentConversation).toBeNull();
+    expect(store.get().currentSpec).toBeNull();
+    expect(store.get().projectError).toBe("host gate rejected");
+  });
+
+  it("preserves the Initial Build conversation error when unattached Spec cleanup fails", async () => {
+    fake.createProjectConversation.mockRejectedValue(new Error("host gate rejected"));
+    fake.deleteUnattachedSpec.mockRejectedValue(new Error("cleanup failed"));
+    const store = createStore();
+    const actions = createSpecActions(store as never);
+
+    await expect(
+      actions.createInitialSpec("project-1", "Build a storefront"),
+    ).resolves.toBeNull();
+
+    expect(store.get().projectError).toBe("host gate rejected");
+    expect(store.get().terminalLogs).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Failed to clean up unattached Spec"),
+        expect.stringContaining("host gate rejected"),
+      ]),
+    );
+  });
+
+  it("creates the Initial Build conversation and Spec together", async () => {
+    fake.createProjectConversation.mockImplementation(
+      async (projectId: string, input: Record<string, unknown>) =>
+        createConversation(projectId, input),
+    );
+    const store = createStore();
+    const actions = createSpecActions(store as never);
+
+    const conversation = await actions.createInitialSpec(
+      "project-1",
+      "Build a storefront",
+      "Initial build",
+    );
+
+    const createdSpec = fake.createSpec.mock.calls[0][1] as DevelopmentSpec;
+    expect(createdSpec.kind).toBe("initial_build");
+    expect(conversation?.kind).toBe("initial_build");
+    expect(conversation?.mode).toBe("spec");
+    expect(fake.createProjectConversation).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({
+        activeSpecId: createdSpec.id,
+        kind: "initial_build",
+        mode: "spec",
+        specIds: [createdSpec.id],
+        title: "Initial build",
+      }),
+    );
+    expect(store.get().currentConversation?.activeSpecId).toBe(createdSpec.id);
+    expect(store.get().currentSpec?.id).toBe(createdSpec.id);
+    expect(store.get().historicalSpecs.map((spec) => spec.id)).toEqual([
+      createdSpec.id,
+    ]);
+    expect(store.get().chatMessages).toHaveLength(1);
   });
 
   it("loads historical specs in Chat mode without activating them", async () => {
