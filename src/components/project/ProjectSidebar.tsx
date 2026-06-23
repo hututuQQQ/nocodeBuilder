@@ -12,6 +12,8 @@ import {
   SquarePen,
   X,
 } from "lucide-react";
+import type { ProjectConversation, ProjectConversationSummary } from "../../services/projects";
+import type { DevelopmentSpec } from "../../spec-core/types";
 import { useAppStore } from "../../store/appStore";
 import { selectConversationList } from "../../store/conversationStoreActions";
 
@@ -23,6 +25,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [newIterationProjectId, setNewIterationProjectId] = useState<string | null>(null);
   const [newIterationMode, setNewIterationMode] = useState<"chat" | "spec">("chat");
+  const [newIterationTitle, setNewIterationTitle] = useState("");
   const [newIterationBrief, setNewIterationBrief] = useState("");
   const [projectName, setProjectName] = useState("");
   const [projectPrompt, setProjectPrompt] = useState("");
@@ -35,19 +38,26 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
   const currentConversation = useAppStore(
     (state) => state.currentConversation,
   );
+  const currentSpec = useAppStore((state) => state.currentSpec);
+  const createFeatureSpecIteration = useAppStore(
+    (state) => state.createFeatureSpecIteration,
+  );
   const createProject = useAppStore((state) => state.createProject);
   const isCreatingConversation = useAppStore(
     (state) => state.isCreatingConversation,
   );
   const isCreatingProject = useAppStore((state) => state.isCreatingProject);
+  const isExecutingSpec = useAppStore((state) => state.isExecutingSpec);
   const isLoadingConversations = useAppStore(
     (state) => state.isLoadingConversations,
   );
   const isLoadingProjects = useAppStore((state) => state.isLoadingProjects);
   const isGeneratingSpec = useAppStore((state) => state.isGeneratingSpec);
+  const isRevisingSpec = useAppStore((state) => state.isRevisingSpec);
   const isSwitchingIterationMode = useAppStore(
     (state) => state.isSwitchingIterationMode,
   );
+  const isVerifyingSpec = useAppStore((state) => state.isVerifyingSpec);
   const openProjectFolder = useAppStore((state) => state.openProjectFolder);
   const projectError = useAppStore((state) => state.projectError);
   const projects = useAppStore((state) => state.projects);
@@ -55,9 +65,6 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
   const selectProject = useAppStore((state) => state.selectProject);
   const setShowArchivedConversations = useAppStore(
     (state) => state.setShowArchivedConversations,
-  );
-  const switchCurrentIterationToSpec = useAppStore(
-    (state) => state.switchCurrentIterationToSpec,
   );
   const showArchivedConversations = useAppStore(
     (state) => state.showArchivedConversations,
@@ -69,6 +76,13 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
     conversationSummaries,
     showArchivedConversations,
   );
+  const iterationBusy =
+    isCreatingConversation ||
+    isGeneratingSpec ||
+    isRevisingSpec ||
+    isExecutingSpec ||
+    isVerifyingSpec ||
+    isSwitchingIterationMode;
 
   async function handleCreateProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -96,6 +110,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
     event.stopPropagation();
     setNewIterationProjectId(projectId);
     setNewIterationMode("chat");
+    setNewIterationTitle("");
     setNewIterationBrief("");
   }
 
@@ -111,17 +126,22 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
       await selectProject(projectId, { ensureConversation: false });
     }
 
-    const conversation = await createConversation(projectId, {
-      kind: "iteration",
-      mode: "chat",
-      title: newIterationMode === "spec" ? "Spec iteration" : undefined,
-    });
+    const title = newIterationTitle.trim();
+    const conversation =
+      newIterationMode === "spec"
+        ? await createFeatureSpecIteration(projectId, title, newIterationBrief)
+        : await createConversation(projectId, {
+            kind: "iteration",
+            mode: "chat",
+            title,
+          });
 
-    if (conversation && newIterationMode === "spec") {
-      await switchCurrentIterationToSpec(newIterationBrief);
+    if (!conversation) {
+      return;
     }
 
     setNewIterationProjectId(null);
+    setNewIterationTitle("");
     setNewIterationBrief("");
   }
 
@@ -214,6 +234,13 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
           <div className="space-y-2">
             {projects.map((project) => {
               const isCurrent = currentProject?.id === project.id;
+              const canCreateIteration =
+                !isCurrent ||
+                canCreateIterationForCurrentProject(
+                  conversationSummaries,
+                  currentConversation,
+                  currentSpec,
+                );
 
               return (
                 <div key={project.id}>
@@ -283,13 +310,13 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                         <Archive size={14} aria-hidden="true" />
                       </button>
                       <button
-                        aria-label={`New chat in ${project.name}`}
+                        aria-label={`New iteration in ${project.name}`}
                         className="grid size-7 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-teal-400/40 hover:text-teal-100 disabled:cursor-not-allowed disabled:text-zinc-700"
-                        disabled={isCreatingConversation}
+                        disabled={iterationBusy || !canCreateIteration}
                         onClick={(event) =>
                           void handleCreateConversation(event, project.id)
                         }
-                        title="New chat"
+                        title="New iteration"
                         type="button"
                       >
                         <SquarePen size={14} aria-hidden="true" />
@@ -350,6 +377,9 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                               />
                               <span className="min-w-0 flex-1 truncate">
                                 {conversation.title}
+                              </span>
+                              <span className="shrink-0 rounded border border-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500">
+                                {formatConversationMarker(conversation)}
                               </span>
                               <span className="shrink-0 text-[10px] text-zinc-600">
                                 {formatRelativeTime(conversation.lastMessageAt)}
@@ -421,7 +451,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                   New Project
                 </h2>
                 <p className="mt-1 text-xs text-zinc-500">
-                  AI generated Next.js App Router project
+                  Development mode / Spec Coding
                 </p>
               </div>
               <button
@@ -461,6 +491,9 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
               placeholder="Build a polished Chinese landing page for a boutique coffee brand with menu, story, and reservation sections."
               value={projectPrompt}
             />
+            <p className="mt-2 text-xs leading-5 text-zinc-500">
+              New projects begin with a specification review. Code is generated only after approval.
+            </p>
 
             {projectError ? (
               <p className="mt-3 rounded border border-red-400/30 bg-red-400/10 px-3 py-2 text-xs leading-5 text-red-200">
@@ -490,7 +523,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                 ) : (
                   <Plus size={15} aria-hidden="true" />
                 )}
-                Create
+                Create specification
               </button>
             </div>
           </form>
@@ -548,6 +581,24 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
               </button>
             </div>
 
+            <label
+              className="mb-2 mt-4 block text-xs font-medium text-zinc-400"
+              htmlFor="iteration-title"
+            >
+              Title
+            </label>
+            <input
+              className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/10"
+              id="iteration-title"
+              onChange={(event) => setNewIterationTitle(event.currentTarget.value)}
+              placeholder={
+                newIterationMode === "spec"
+                  ? "Checkout refinement"
+                  : "Follow-up changes"
+              }
+              value={newIterationTitle}
+            />
+
             {newIterationMode === "spec" ? (
               <>
                 <label
@@ -566,6 +617,12 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
               </>
             ) : null}
 
+            {projectError ? (
+              <p className="mt-3 rounded border border-red-400/30 bg-red-400/10 px-3 py-2 text-xs leading-5 text-red-200">
+                {projectError}
+              </p>
+            ) : null}
+
             <div className="mt-4 flex justify-end gap-2">
               <button
                 className="h-9 rounded-md border border-zinc-800 px-3 text-sm text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-200"
@@ -579,17 +636,21 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                 disabled={
                   isCreatingConversation ||
                   isGeneratingSpec ||
+                  isRevisingSpec ||
+                  isExecutingSpec ||
+                  isVerifyingSpec ||
                   isSwitchingIterationMode ||
+                  !newIterationTitle.trim() ||
                   (newIterationMode === "spec" && !newIterationBrief.trim())
                 }
                 type="submit"
               >
-                {isCreatingConversation || isGeneratingSpec || isSwitchingIterationMode ? (
+                {iterationBusy ? (
                   <Loader2 size={15} className="animate-spin" aria-hidden="true" />
                 ) : (
                   <Plus size={15} aria-hidden="true" />
                 )}
-                Create
+                Create iteration
               </button>
             </div>
           </form>
@@ -597,6 +658,34 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
       ) : null}
     </aside>
   );
+}
+
+function canCreateIterationForCurrentProject(
+  summaries: ProjectConversationSummary[],
+  currentConversation: ProjectConversation | null,
+  currentSpec: DevelopmentSpec | null,
+) {
+  if (summaries.some((summary) => summary.kind === "iteration")) {
+    return true;
+  }
+
+  const initialBuild = summaries.find(
+    (summary) => summary.kind === "initial_build",
+  );
+
+  if (!initialBuild || currentConversation?.id !== initialBuild.id) {
+    return false;
+  }
+
+  return currentSpec?.status === "completed";
+}
+
+function formatConversationMarker(conversation: ProjectConversationSummary) {
+  if (conversation.kind === "initial_build") {
+    return "Spec · Locked";
+  }
+
+  return conversation.mode === "spec" ? "Spec" : "Chat";
 }
 
 function formatRelativeTime(value: string) {

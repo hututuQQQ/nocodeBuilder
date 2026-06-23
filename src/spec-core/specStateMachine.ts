@@ -8,14 +8,15 @@ const TERMINAL_STATUSES = new Set<SpecStatus>([
 
 const TRANSITIONS: Record<SpecStatus, SpecStatus[]> = {
   approved: ["building", "cancelled"],
-  building: ["verifying", "failed", "cancelled"],
+  blocked: ["building", "verifying", "cancelled"],
+  building: ["verifying", "blocked", "failed", "cancelled"],
   cancelled: [],
   completed: [],
   drafting: ["review", "failed", "cancelled"],
   failed: [],
   review: ["approved", "revising", "cancelled"],
   revising: ["review", "failed", "cancelled"],
-  verifying: ["completed", "failed", "cancelled"],
+  verifying: ["completed", "blocked", "failed", "cancelled"],
 };
 
 export function isTerminalSpecStatus(status: SpecStatus) {
@@ -49,7 +50,7 @@ export function transitionSpecStatus(
     cancelledAt: nextStatus === "cancelled" ? now : spec.cancelledAt,
     completedAt: nextStatus === "completed" ? now : spec.completedAt,
     failureMessage:
-      nextStatus === "failed"
+      nextStatus === "failed" || nextStatus === "blocked"
         ? options.failureMessage ?? spec.failureMessage ?? "Spec failed."
         : spec.failureMessage,
     status: nextStatus,
@@ -63,6 +64,14 @@ export function markSpecFailed(
   now = new Date().toISOString(),
 ): DevelopmentSpec {
   return transitionSpecStatus(spec, "failed", { failureMessage, now });
+}
+
+export function markSpecBlocked(
+  spec: DevelopmentSpec,
+  failureMessage: string,
+  now = new Date().toISOString(),
+): DevelopmentSpec {
+  return transitionSpecStatus(spec, "blocked", { failureMessage, now });
 }
 
 export function markSpecCancelled(

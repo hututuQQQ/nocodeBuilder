@@ -280,6 +280,7 @@ pub fn run() {
             commands::test_vercel_token,
             projects::create_project,
             projects::create_project_conversation,
+            projects::delete_uninitialized_project,
             projects::delete_files,
             projects::archive_project_conversation,
             projects::list_project_change_history,

@@ -9,6 +9,28 @@ import type {
   SpecTask,
 } from "./types";
 
+const SPEC_STATUSES = new Set([
+  "drafting",
+  "review",
+  "revising",
+  "approved",
+  "building",
+  "verifying",
+  "blocked",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
+const TASK_STATUSES = new Set([
+  "pending",
+  "running",
+  "passed",
+  "failed",
+  "blocked",
+  "cancelled",
+]);
+
 export function getCurrentSpecRevision(spec: DevelopmentSpec): SpecRevision {
   const revision = spec.revisions.find(
     (item) => item.id === spec.currentRevisionId,
@@ -65,6 +87,37 @@ export function validateDevelopmentSpec(spec: DevelopmentSpec): DevelopmentSpec 
     throw new Error("Spec kind is invalid.");
   }
 
+  if (!SPEC_STATUSES.has(spec.status)) {
+    throw new Error("Spec status is invalid.");
+  }
+
+  assertIsoTimestamp(spec.createdAt, "Spec createdAt");
+  assertIsoTimestamp(spec.updatedAt, "Spec updatedAt");
+
+  if (new Date(spec.updatedAt).getTime() < new Date(spec.createdAt).getTime()) {
+    throw new Error("Spec updatedAt cannot be before createdAt.");
+  }
+
+  if (spec.completedAt !== undefined) {
+    assertIsoTimestamp(spec.completedAt, "Spec completedAt");
+  }
+
+  if (spec.cancelledAt !== undefined) {
+    assertIsoTimestamp(spec.cancelledAt, "Spec cancelledAt");
+  }
+
+  if (spec.failureMessage !== undefined && typeof spec.failureMessage !== "string") {
+    throw new Error("Spec failureMessage must be a string.");
+  }
+
+  if (spec.finalVerification) {
+    validateFinalVerification(spec.finalVerification);
+  }
+
+  if (spec.status === "completed" && (!spec.completedAt || !spec.finalVerification?.success)) {
+    throw new Error("Completed Spec requires completedAt and successful finalVerification.");
+  }
+
   if (spec.revisions.length === 0) {
     throw new Error("Spec must include at least one revision.");
   }
@@ -78,9 +131,13 @@ export function validateDevelopmentSpec(spec: DevelopmentSpec): DevelopmentSpec 
     throw new Error("Spec currentRevisionId must reference a revision.");
   }
 
-  for (const revision of spec.revisions) {
+  spec.revisions.forEach((revision, index) => {
+    if (revision.version !== index + 1) {
+      throw new Error("Spec revision versions must be consecutive.");
+    }
+
     validateRevision(revision, spec.kind);
-  }
+  });
 
   return spec;
 }
@@ -161,6 +218,16 @@ function validateRevision(revision: SpecRevision, kind: DevelopmentSpec["kind"])
     throw new Error("Spec revision version must be a positive integer.");
   }
 
+  assertIsoTimestamp(revision.createdAt, "Spec revision createdAt");
+
+  if (revision.approvedAt !== undefined) {
+    assertIsoTimestamp(revision.approvedAt, "Spec revision approvedAt");
+  }
+
+  for (const task of revision.tasks) {
+    validateTaskRuntimeFields(task);
+  }
+
   validateRevisionParts(revision.requirements, revision.tasks);
 
   if (kind === "initial_build") {
@@ -176,6 +243,55 @@ function validateRevision(revision: SpecRevision, kind: DevelopmentSpec["kind"])
       );
     }
   }
+}
+
+function validateTaskRuntimeFields(task: SpecTask) {
+  if (!TASK_STATUSES.has(task.status)) {
+    throw new Error(`Task ${task.id} has invalid status.`);
+  }
+
+  if (task.runId !== undefined && (typeof task.runId !== "string" || !task.runId.trim())) {
+    throw new Error(`Task ${task.id} runId must be a non-empty string.`);
+  }
+
+  if (task.error !== undefined && typeof task.error !== "string") {
+    throw new Error(`Task ${task.id} error must be a string.`);
+  }
+
+  if (
+    task.blockedByTaskId !== undefined &&
+    (typeof task.blockedByTaskId !== "string" || !task.blockedByTaskId.trim())
+  ) {
+    throw new Error(`Task ${task.id} blockedByTaskId must be a non-empty string.`);
+  }
+}
+
+function validateFinalVerification(
+  finalVerification: DevelopmentSpec["finalVerification"],
+) {
+  if (!finalVerification) {
+    return;
+  }
+
+  if (
+    typeof finalVerification.command !== "string" ||
+    !finalVerification.command.trim()
+  ) {
+    throw new Error("Spec finalVerification.command is required.");
+  }
+
+  if (typeof finalVerification.output !== "string") {
+    throw new Error("Spec finalVerification.output must be a string.");
+  }
+
+  if (typeof finalVerification.success !== "boolean") {
+    throw new Error("Spec finalVerification.success must be a boolean.");
+  }
+
+  assertIsoTimestamp(
+    finalVerification.checkedAt,
+    "Spec finalVerification.checkedAt",
+  );
 }
 
 function validateRevisionParts(
@@ -402,6 +518,18 @@ function assertUnique(values: string[], label: string) {
   }
 
   return seen;
+}
+
+function assertIsoTimestamp(value: string, label: string) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${label} is required.`);
+  }
+
+  const timestamp = Date.parse(value);
+
+  if (!Number.isFinite(timestamp)) {
+    throw new Error(`${label} must be a valid timestamp.`);
+  }
 }
 
 function assertAcyclic(

@@ -19,6 +19,11 @@ pub fn create_project(project_name: String) -> Result<ProjectInfo, String> {
 }
 
 #[tauri::command]
+pub fn delete_uninitialized_project(project_id: String) -> Result<(), String> {
+    project_commands::delete_uninitialized_project(project_id)
+}
+
+#[tauri::command]
 pub fn list_projects() -> Result<Vec<ProjectInfo>, String> {
     project_commands::list_projects()
 }

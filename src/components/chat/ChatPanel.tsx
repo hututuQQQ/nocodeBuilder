@@ -52,23 +52,32 @@ export function ChatPanel({
     (state) => state.currentConversation,
   );
   const currentProject = useAppStore((state) => state.currentProject);
+  const historicalSpecs = useAppStore((state) => state.historicalSpecs);
   const isCreatingConversation = useAppStore(
     (state) => state.isCreatingConversation,
   );
   const isGeneratingProject = useAppStore((state) => state.isGeneratingProject);
+  const isGeneratingSpec = useAppStore((state) => state.isGeneratingSpec);
+  const isExecutingSpec = useAppStore((state) => state.isExecutingSpec);
   const isLoadingConversations = useAppStore(
     (state) => state.isLoadingConversations,
   );
   const isModifyingProject = useAppStore((state) => state.isModifyingProject);
+  const isRevisingSpec = useAppStore((state) => state.isRevisingSpec);
   const isSwitchingIterationMode = useAppStore(
     (state) => state.isSwitchingIterationMode,
   );
+  const isVerifyingSpec = useAppStore((state) => state.isVerifyingSpec);
   const currentAgentRun = useAppStore((state) => state.currentAgentRun);
   const sendMessage = useAppStore((state) => state.sendMessage);
   const isBusy =
     isGeneratingProject ||
     isModifyingProject ||
     isCreatingConversation ||
+    isGeneratingSpec ||
+    isRevisingSpec ||
+    isExecutingSpec ||
+    isVerifyingSpec ||
     isLoadingConversations ||
     isSwitchingIterationMode;
   const canSteerActiveRun = Boolean(
@@ -229,6 +238,29 @@ export function ChatPanel({
         ref={scrollContainerRef}
       >
         <AgentRunPanel />
+        {currentConversation?.mode === "chat" && historicalSpecs.length > 0 ? (
+          <section className="rounded-md border border-zinc-800 bg-zinc-950/70 p-3">
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">
+              <FileText size={14} aria-hidden="true" />
+              Spec History
+            </div>
+            <div className="mt-2 space-y-1">
+              {historicalSpecs.map((spec) => (
+                <div
+                  className="flex min-w-0 items-center gap-2 rounded border border-zinc-800 bg-zinc-900/40 px-2 py-1.5 text-xs"
+                  key={spec.id}
+                >
+                  <span className="min-w-0 flex-1 truncate text-zinc-300">
+                    {spec.revisions.find((revision) => revision.id === spec.currentRevisionId)?.brief ?? spec.id}
+                  </span>
+                  <span className="shrink-0 rounded border border-zinc-800 px-2 py-0.5 text-zinc-500">
+                    {spec.status}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
         {!currentProject ? (
           <div className="grid h-full place-items-center">
             <div className="max-w-[320px] rounded-md border border-dashed border-zinc-800 bg-zinc-900/30 px-4 py-6 text-center text-sm leading-6 text-zinc-500">

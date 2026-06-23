@@ -70,6 +70,14 @@ pub fn create_project_conversation(
         input.active_spec_id.as_deref(),
         &spec_ids,
     )?;
+    validate_create_conversation_rules(
+        &project_dir,
+        &project_id,
+        &id,
+        &input.kind,
+        &input.mode,
+        &spec_ids,
+    )?;
     let conversation = ProjectConversation {
         id,
         project_id,
@@ -185,6 +193,13 @@ pub fn switch_project_conversation_mode(
         &input.spec_ids,
     )?;
     validate_historical_specs_preserved(&conversation.spec_ids, &input.spec_ids)?;
+    if !input.spec_ids.is_empty() {
+        crate::spec_storage::validate_specs_belong_to_conversation(
+            &project_id,
+            &conversation.id,
+            &input.spec_ids,
+        )?;
+    }
 
     let now = current_timestamp();
     conversation.mode = input.target_mode;
@@ -223,6 +238,10 @@ fn update_archive_state(
 
     if conversation.project_id != project_id {
         return Err("conversation: conversation does not belong to project".to_string());
+    }
+
+    if archived && conversation.kind == "initial_build" {
+        validate_initial_build_conversation_completed(&project_id, &conversation, "archiving")?;
     }
 
     let now = current_timestamp();
@@ -325,6 +344,51 @@ fn read_conversation_file(
 
     serde_json::from_str::<ProjectConversation>(&content)
         .map_err(|error| format!("conversation: failed to parse conversation: {error}"))
+}
+
+fn read_project_conversation_files(
+    project_dir: &Path,
+    project_id: &str,
+) -> Result<Vec<ProjectConversation>, String> {
+    let dir = conversations_dir(project_dir);
+
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut conversations = Vec::new();
+
+    for entry in fs::read_dir(&dir).map_err(|error| {
+        format!(
+            "conversation: failed to read conversations directory '{}': {error}",
+            dir.display()
+        )
+    })? {
+        let entry =
+            entry.map_err(|error| format!("conversation: failed to read entry: {error}"))?;
+        let path = entry.path();
+
+        if path.file_name().and_then(|name| name.to_str()) == Some(INDEX_FILE)
+            || path.extension().and_then(|extension| extension.to_str()) != Some("json")
+        {
+            continue;
+        }
+
+        let content = fs::read_to_string(&path).map_err(|error| {
+            format!(
+                "conversation: failed to read conversation '{}': {error}",
+                path.display()
+            )
+        })?;
+        let conversation = serde_json::from_str::<ProjectConversation>(&content)
+            .map_err(|error| format!("conversation: failed to parse conversation: {error}"))?;
+
+        if conversation.project_id == project_id {
+            conversations.push(conversation);
+        }
+    }
+
+    Ok(conversations)
 }
 
 fn write_project_conversation(
@@ -537,6 +601,93 @@ fn validate_historical_specs_preserved(previous: &[String], next: &[String]) -> 
         if !next.iter().any(|item| item == spec_id) {
             return Err("conversation: historical specs cannot be removed".to_string());
         }
+    }
+
+    Ok(())
+}
+
+fn validate_create_conversation_rules(
+    project_dir: &Path,
+    project_id: &str,
+    conversation_id: &str,
+    kind: &str,
+    mode: &str,
+    spec_ids: &[String],
+) -> Result<(), String> {
+    let conversations = read_project_conversation_files(project_dir, project_id)?;
+
+    if kind == "initial_build"
+        && conversations
+            .iter()
+            .any(|conversation| conversation.kind == "initial_build")
+    {
+        return Err("conversation: initial build already exists".to_string());
+    }
+
+    if kind == "iteration" {
+        validate_initial_build_completed_for_iterations(project_id, &conversations)?;
+    }
+
+    if mode == "spec" || !spec_ids.is_empty() {
+        crate::spec_storage::validate_specs_belong_to_conversation(
+            project_id,
+            conversation_id,
+            spec_ids,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_initial_build_completed_for_iterations(
+    project_id: &str,
+    conversations: &[ProjectConversation],
+) -> Result<(), String> {
+    let initial_builds = conversations
+        .iter()
+        .filter(|conversation| conversation.kind == "initial_build")
+        .collect::<Vec<_>>();
+
+    if initial_builds.len() != 1 {
+        return Err(
+            "conversation: initial build must complete before creating iterations".to_string(),
+        );
+    }
+
+    validate_initial_build_conversation_completed(
+        project_id,
+        initial_builds[0],
+        "creating iterations",
+    )
+}
+
+fn validate_initial_build_conversation_completed(
+    project_id: &str,
+    conversation: &ProjectConversation,
+    action: &str,
+) -> Result<(), String> {
+    let Some(active_spec_id) = conversation.active_spec_id.as_deref() else {
+        return Err(format!(
+            "conversation: initial build must complete before {action}"
+        ));
+    };
+
+    if !conversation
+        .spec_ids
+        .iter()
+        .any(|spec_id| spec_id == active_spec_id)
+    {
+        return Err(format!(
+            "conversation: initial build must complete before {action}"
+        ));
+    }
+
+    let status = crate::spec_storage::read_development_spec_status(project_id, active_spec_id)?;
+
+    if status != "completed" {
+        return Err(format!(
+            "conversation: initial build must complete before {action}"
+        ));
     }
 
     Ok(())

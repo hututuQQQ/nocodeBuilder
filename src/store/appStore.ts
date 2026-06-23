@@ -98,6 +98,7 @@ export type AppState = {
   approveCurrentAgentApproval: () => Promise<void>;
   bootstrapProject: (projectId: string) => Promise<void>;
   cancelCurrentAgentRun: () => Promise<void>;
+  cancelCurrentAgentRunAndWait: () => Promise<AgentRun | null>;
   clearSelectedSiteNode: () => void;
   createConversation: (
     projectId?: string,
@@ -163,6 +164,12 @@ export type AppState = {
     projectBrief: string,
     conversationTitle?: string,
   ) => Promise<ProjectConversation | null>;
+  createFeatureSpecIteration: (
+    projectId: string,
+    title: string,
+    brief: string,
+  ) => Promise<ProjectConversation | null>;
+  continueCurrentSpecExecution: () => Promise<void>;
   reviseCurrentSpec: (feedback: string) => Promise<void>;
   approveAndExecuteCurrentSpec: () => Promise<void>;
   retrySpecTask: (taskId: string) => Promise<void>;
@@ -236,9 +243,12 @@ const initialState = {
   | "approveCurrentAgentApproval"
   | "bootstrapProject"
   | "cancelCurrentAgentRun"
+  | "cancelCurrentAgentRunAndWait"
   | "clearSelectedSiteNode"
   | "createConversation"
+  | "createFeatureSpecIteration"
   | "createInitialSpec"
+  | "continueCurrentSpecExecution"
   | "createProject"
   | "deployCurrentProject"
   | "denyCurrentAgentApproval"

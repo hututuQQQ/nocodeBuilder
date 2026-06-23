@@ -7,10 +7,13 @@ export function IterationModeSwitch() {
   const [brief, setBrief] = useState("");
   const currentConversation = useAppStore((state) => state.currentConversation);
   const currentSpec = useAppStore((state) => state.currentSpec);
+  const isExecutingSpecAction = useAppStore((state) => state.isExecutingSpec);
   const isGeneratingSpec = useAppStore((state) => state.isGeneratingSpec);
+  const isRevisingSpec = useAppStore((state) => state.isRevisingSpec);
   const isSwitchingIterationMode = useAppStore(
     (state) => state.isSwitchingIterationMode,
   );
+  const isVerifyingSpec = useAppStore((state) => state.isVerifyingSpec);
   const switchCurrentIterationToChat = useAppStore(
     (state) => state.switchCurrentIterationToChat,
   );
@@ -31,7 +34,12 @@ export function IterationModeSwitch() {
     );
   }
 
-  const busy = isGeneratingSpec || isSwitchingIterationMode;
+  const busy =
+    isGeneratingSpec ||
+    isRevisingSpec ||
+    isExecutingSpecAction ||
+    isVerifyingSpec ||
+    isSwitchingIterationMode;
 
   async function submitSwitchToSpec(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

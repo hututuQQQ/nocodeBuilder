@@ -197,6 +197,10 @@ export const projectApi = {
     return invoke<ProjectInfo>("create_project", { projectName });
   },
 
+  deleteUninitializedProject(projectId: string) {
+    return invoke<void>("delete_uninitialized_project", { projectId });
+  },
+
   listProjects() {
     return invoke<ProjectInfo[]>("list_projects");
   },

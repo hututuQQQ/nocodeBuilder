@@ -72,8 +72,14 @@ type RunApplicationRuntimeInput = {
   mode: ApplicationRuntimeMode;
   project: ProjectInfo;
   resumeObservation?: AgentObservation;
+  runId?: string;
   store: StoreAccess;
   userRequest: string;
+};
+
+export type ApplicationRunResult = {
+  run: AgentRun | null;
+  verificationReport: VerificationReport | null;
 };
 
 type RuntimeSessionState = {
@@ -91,12 +97,14 @@ export async function generateInitialProjectRuntime(
   project: ProjectInfo,
   projectPrompt: string,
 ) {
-  return runApplicationRuntime({
+  const result = await runApplicationRuntime({
     mode: "generate",
     project,
     store,
     userRequest: projectPrompt,
   });
+
+  return result.run?.status === "completed";
 }
 
 export async function modifyCurrentProjectRuntime(
@@ -114,7 +122,7 @@ export async function modifyCurrentProjectRuntime(
     return false;
   }
 
-  return runApplicationRuntime({
+  const result = await runApplicationRuntime({
     existingRun: options.existingRun,
     mode: "modify",
     project,
@@ -122,34 +130,47 @@ export async function modifyCurrentProjectRuntime(
     store,
     userRequest,
   });
+
+  return result.run?.status === "completed";
 }
 
 export async function runSpecTaskRuntime({
   contract,
   conversationId,
   executionMode,
+  existingRun,
   project,
+  resumeObservation,
+  runId,
   store,
   taskObjective,
 }: {
   contract: TaskContract;
   conversationId: string;
   executionMode: ApplicationRuntimeMode;
+  existingRun?: AgentRun;
   project: ProjectInfo;
+  resumeObservation?: AgentObservation;
+  runId?: string;
   store: StoreAccess;
   taskObjective: string;
-}) {
+}): Promise<ApplicationRunResult> {
   return runApplicationRuntime({
     contract,
     conversationId,
+    existingRun,
     mode: executionMode,
     project,
+    resumeObservation,
+    runId,
     store,
     userRequest: taskObjective,
   });
 }
 
-async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
+async function runApplicationRuntime(
+  input: RunApplicationRuntimeInput,
+): Promise<ApplicationRunResult> {
   const { existingRun, mode, project, store, userRequest } = input;
   const stream = startStreamingAgentMessage(
     store,
@@ -157,7 +178,7 @@ async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
       ? `Generating ${project.name} with the headless runtime`
       : "Working with the headless runtime",
   );
-  const controllerRunId = existingRun?.id ?? createRuntimeId("run");
+  const controllerRunId = input.runId ?? existingRun?.id ?? createRuntimeId("run");
   const runAbortController = createRunAbortController(controllerRunId);
   const session: RuntimeSessionState = {
     generationActionQueued: false,
@@ -233,7 +254,10 @@ async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
 
     await completeStreamForRun(project.id, store, stream, finalRun);
     void persistCurrentConversation(store);
-    return finalRun.status === "completed";
+    return {
+      run: finalRun,
+      verificationReport: await getRunVerificationReport(project.id, finalRun),
+    };
   } catch (error) {
     const message = getProjectErrorMessage(error);
     const cleanupResult = await cleanupRunAfterRuntimeError({
@@ -253,7 +277,13 @@ async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
           `[agent] Run ${cleanupResult.run?.id ?? controllerRunId} cancelled.`,
         ]),
       }));
-      return false;
+      return {
+        run: cleanupResult.run,
+        verificationReport: await getRunVerificationReport(
+          project.id,
+          cleanupResult.run,
+        ),
+      };
     }
 
     stream.failWithTypewriter(`Agent run failed: ${cleanupMessage}`);
@@ -262,7 +292,13 @@ async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
       projectError: cleanupMessage,
       terminalLogs: appendLogs(state.terminalLogs, [`[agent:error] ${cleanupMessage}`]),
     }));
-    return false;
+    return {
+      run: cleanupResult.run,
+      verificationReport: await getRunVerificationReport(
+        project.id,
+        cleanupResult.run,
+      ),
+    };
   } finally {
     if (finalRun) {
       releaseRunAbortController(finalRun.id);
@@ -275,6 +311,21 @@ async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
       isModifyingProject: false,
       previewVerificationSession: null,
     });
+  }
+}
+
+async function getRunVerificationReport(
+  projectId: string,
+  run: AgentRun | null,
+) {
+  if (!run) {
+    return null;
+  }
+
+  try {
+    return await agentRuntimeApi.getLatestVerificationReport(projectId, run.id);
+  } catch {
+    return null;
   }
 }
 

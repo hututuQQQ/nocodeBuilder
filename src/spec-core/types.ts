@@ -8,6 +8,7 @@ export type SpecStatus =
   | "approved"
   | "building"
   | "verifying"
+  | "blocked"
   | "completed"
   | "failed"
   | "cancelled";

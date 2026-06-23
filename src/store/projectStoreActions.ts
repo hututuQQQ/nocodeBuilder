@@ -78,11 +78,34 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
           startDevServer: false,
         });
 
-        await get().createInitialSpec(
+        const initialConversation = await get().createInitialSpec(
           project.id,
           projectPrompt,
           "Initial build",
         );
+
+        if (!initialConversation) {
+          await projectApi.deleteUninitializedProject(project.id).catch((error) => {
+            set((state) => ({
+              terminalLogs: appendLogs(state.terminalLogs, [
+                `[project:error] Failed to clean up ${project.name}: ${getProjectErrorMessage(error)}`,
+              ]),
+            }));
+          });
+
+          set((state) => ({
+            chatMessages: [],
+            conversationSummaries: [],
+            currentConversation: null,
+            currentProject:
+              state.currentProject?.id === project.id ? null : state.currentProject,
+            currentSpec: null,
+            historicalSpecs: [],
+            projects: state.projects.filter((item) => item.id !== project.id),
+          }));
+
+          return null;
+        }
 
         return project;
       } catch (error) {

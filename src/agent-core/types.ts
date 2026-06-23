@@ -52,6 +52,7 @@ export type TaskContract = {
     taskId: string;
     requirementIds: string[];
     acceptanceCriteriaIds: string[];
+    executionMode?: "generate" | "modify";
   };
   scope: {
     pages?: string[];

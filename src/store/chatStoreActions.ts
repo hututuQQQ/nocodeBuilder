@@ -30,13 +30,13 @@ export function createChatActions({ get, set }: StoreAccess): ChatActions {
       }
 
       if (!get().currentConversation) {
-        const conversation = await get().createConversation();
-
-        if (!conversation) {
-          return;
-        }
-
-        return get().sendMessage(message);
+        set((state) => ({
+          projectError: "Create a new iteration before sending chat messages.",
+          terminalLogs: appendLogs(state.terminalLogs, [
+            "[chat] No active iteration is available for this message.",
+          ]),
+        }));
+        return;
       }
 
       if (get().currentConversation?.mode === "spec") {

@@ -34,7 +34,7 @@ export function createConversationActions({
   set,
 }: StoreAccess): ConversationActions {
   return {
-    loadProjectConversations: async (projectId, options = {}) => {
+    loadProjectConversations: async (projectId) => {
       set({ isLoadingConversations: true, projectError: null });
 
       try {
@@ -63,11 +63,6 @@ export function createConversationActions({
 
         if (summaryToOpen) {
           await get().selectConversation(summaryToOpen.id);
-          return;
-        }
-
-        if (options.ensureConversation) {
-          await get().createConversation(projectId, options.initialTitle);
           return;
         }
 
@@ -232,8 +227,6 @@ export function createConversationActions({
 
         if (nextActiveConversation) {
           await get().selectConversation(nextActiveConversation.id);
-        } else {
-          await get().createConversation(project.id);
         }
       } catch (error) {
         const message = getProjectErrorMessage(error);

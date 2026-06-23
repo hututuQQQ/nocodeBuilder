@@ -6,10 +6,12 @@ import {
 import type { DevelopmentSpec, SpecRevision, SpecTask } from "./types";
 
 export function compileSpecTaskContract({
+  executionMode,
   revision,
   spec,
   task,
 }: {
+  executionMode?: "generate" | "modify";
   revision: SpecRevision;
   spec: DevelopmentSpec;
   task: SpecTask;
@@ -44,6 +46,7 @@ export function compileSpecTaskContract({
     },
     source: {
       acceptanceCriteriaIds: task.acceptanceCriteriaIds,
+      executionMode,
       mode: "spec",
       requirementIds: task.requirementIds,
       revisionId: revision.id,

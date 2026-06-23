@@ -10,7 +10,10 @@ import {
 } from "../agent-core/runtime/runStateMachine";
 import { agentRuntimeApi } from "../services/agentRuntime";
 import { getProjectErrorMessage } from "../services/projects";
-import { modifyCurrentProjectRuntime } from "../agent-runtime/runController";
+import {
+  modifyCurrentProjectRuntime,
+  runSpecTaskRuntime,
+} from "../agent-runtime/runController";
 import {
   isRunControllerActive,
   requestRunAbort,
@@ -22,6 +25,7 @@ import type { StoreAccess } from "./storeAccess";
 type AgentRunActions = Pick<
   AppState,
   | "cancelCurrentAgentRun"
+  | "cancelCurrentAgentRunAndWait"
   | "approveCurrentAgentApproval"
   | "clearSelectedSiteNode"
   | "denyCurrentAgentApproval"
@@ -93,6 +97,22 @@ export function createAgentRunActions({ get, set }: StoreAccess): AgentRunAction
       } catch (error) {
         recordAgentActionError(set, error);
       }
+    },
+
+    cancelCurrentAgentRunAndWait: async () => {
+      const project = get().currentProject;
+      const run = get().currentAgentRun;
+
+      if (!project || !run) {
+        return null;
+      }
+
+      if (isTerminalRun(run)) {
+        return run;
+      }
+
+      await get().cancelCurrentAgentRun();
+      return waitForTerminalRun(store, project.id, run.id);
     },
 
     clearSelectedSiteNode: () => {
@@ -205,9 +225,24 @@ export function createAgentRunActions({ get, set }: StoreAccess): AgentRunAction
 
 async function recoverCurrentAgentRun(store: StoreAccess) {
   const { get } = store;
+  const project = get().currentProject;
   const run = get().currentAgentRun;
 
-  if (!run || isTerminalRun(run) || isRunControllerActive(run.id)) {
+  if (!project || !run || isTerminalRun(run) || isRunControllerActive(run.id)) {
+    return;
+  }
+
+  if (run.contract.source?.mode === "spec") {
+    await runSpecTaskRuntime({
+      contract: run.contract,
+      conversationId: run.conversationId,
+      executionMode: run.contract.source.executionMode ?? "modify",
+      existingRun: run,
+      project,
+      store,
+      taskObjective: run.contract.objective,
+    });
+    await get().continueCurrentSpecExecution();
     return;
   }
 
@@ -246,22 +281,39 @@ async function resolveCurrentAgentApproval(
       ]),
     }));
 
+    const resumeObservation =
+      decision === "denied"
+        ? {
+            content: [
+              `Approval denied for ${approval.toolName}.`,
+              `Reason: ${resolved.exactSideEffect}`,
+              "Choose a non-destructive alternative, request a different approval, or explain why the task cannot continue.",
+            ].join("\n"),
+            ok: false,
+            step: 1,
+            summary: `Approval denied for ${approval.toolName}.`,
+            tool: approval.toolName,
+          }
+        : undefined;
+
+    if (run.contract.source?.mode === "spec") {
+      await runSpecTaskRuntime({
+        contract: run.contract,
+        conversationId: run.conversationId,
+        executionMode: run.contract.source.executionMode ?? "modify",
+        existingRun: run,
+        project,
+        resumeObservation,
+        store,
+        taskObjective: run.contract.objective,
+      });
+      await get().continueCurrentSpecExecution();
+      return;
+    }
+
     await modifyCurrentProjectRuntime(store, run.contract.objective, {
       existingRun: run,
-      resumeObservation:
-        decision === "denied"
-          ? {
-              content: [
-                `Approval denied for ${approval.toolName}.`,
-                `Reason: ${resolved.exactSideEffect}`,
-                "Choose a non-destructive alternative, request a different approval, or explain why the task cannot continue.",
-              ].join("\n"),
-              ok: false,
-              step: 1,
-              summary: `Approval denied for ${approval.toolName}.`,
-              tool: approval.toolName,
-            }
-          : undefined,
+      resumeObservation,
     });
   } catch (error) {
     recordAgentActionError(set, error);
@@ -270,6 +322,40 @@ async function resolveCurrentAgentApproval(
 
 function isTerminalRun(run: AgentRun) {
   return ["completed", "failed", "cancelled", "budget_exceeded"].includes(run.status);
+}
+
+async function waitForTerminalRun(
+  store: StoreAccess,
+  projectId: string,
+  runId: string,
+  timeoutMs = 15_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const run = await agentRuntimeApi.getRun(projectId, runId);
+
+    if (!run) {
+      return null;
+    }
+
+    store.set((state) => ({
+      agentRuns: [run, ...state.agentRuns.filter((item) => item.id !== run.id)],
+      currentAgentRun: run,
+    }));
+
+    if (isTerminalRun(run)) {
+      return run;
+    }
+
+    await delay(300);
+  }
+
+  throw new Error(`AgentRun ${runId} did not reach a terminal state after cancellation.`);
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
 }
 
 function selectApprovalForRun(
