@@ -328,6 +328,34 @@ describe("Spec validators", () => {
     })).toBe(false);
     expect(canRetrySpecVerification({
       ...retryable,
+      finalVerification: {
+        ...retryable.finalVerification,
+        command: "acceptance criteria",
+      },
+    })).toBe(false);
+    expect(canRetrySpecVerification({
+      ...retryable,
+      finalVerification: {
+        ...retryable.finalVerification,
+        command: "task verification reports",
+      },
+    })).toBe(false);
+    expect(canRetrySpecVerification({
+      ...retryable,
+      finalVerification: {
+        ...retryable.finalVerification,
+        command: "npm install",
+      },
+    })).toBe(true);
+    expect(canRetrySpecVerification({
+      ...retryable,
+      finalVerification: {
+        ...retryable.finalVerification,
+        command: "npm install && npm run build",
+      },
+    })).toBe(true);
+    expect(canRetrySpecVerification({
+      ...retryable,
       revisions: [
         {
           ...retryable.revisions[0],

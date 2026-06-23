@@ -48,6 +48,14 @@ export function canRetrySpecVerification(spec: DevelopmentSpec): boolean {
     return false;
   }
 
+  if (
+    spec.finalVerification.command !== "npm install" &&
+    spec.finalVerification.command !== "npm run build" &&
+    spec.finalVerification.command !== "npm install && npm run build"
+  ) {
+    return false;
+  }
+
   return getCurrentSpecRevision(spec).tasks.every(
     (task) => task.status === "passed" && Boolean(task.runId),
   );
