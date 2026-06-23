@@ -342,6 +342,8 @@ fn validate_approved_revision_immutability(existing: &Value, next: &Value) -> Re
         .and_then(Value::as_array)
         .ok_or_else(|| "spec: revisions is required".to_string())?;
 
+    validate_unique_revision_ids(next_revisions)?;
+
     for existing_revision in existing_revisions {
         let revision_id = read_required_string(existing_revision, "id")?;
         let next_revision = find_revision_by_id(next_revisions, revision_id)
@@ -357,6 +359,20 @@ fn validate_approved_revision_immutability(existing: &Value, next: &Value) -> Re
 
         if approved_revision_plan(existing_revision)? != approved_revision_plan(next_revision)? {
             return Err("spec: approved revision plan fields are immutable".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_unique_revision_ids(revisions: &[Value]) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+
+    for revision in revisions {
+        let revision_id = read_required_string(revision, "id")?;
+
+        if !seen.insert(revision_id) {
+            return Err(format!("spec: duplicate revision id '{revision_id}'"));
         }
     }
 
@@ -631,6 +647,47 @@ mod tests {
         });
 
         assert!(validate_approved_revision_immutability(&existing, &next).is_err());
+    }
+
+    #[test]
+    fn approved_revision_rejects_duplicate_revision_ids() {
+        let existing = json!({
+            "revisions": [{
+                "id": "rev-1",
+                "version": 1,
+                "brief": "Build it",
+                "approvedAt": "2026-01-01T00:00:00Z",
+                "requirements": {"goal": "A"},
+                "design": {"summary": "B"},
+                "tasks": [{"id": "task-1", "title": "Task", "status": "pending"}]
+            }]
+        });
+        let next = json!({
+            "revisions": [
+                {
+                    "id": "rev-1",
+                    "version": 1,
+                    "brief": "Build it",
+                    "approvedAt": "2026-01-01T00:00:00Z",
+                    "requirements": {"goal": "A"},
+                    "design": {"summary": "B"},
+                    "tasks": [{"id": "task-1", "title": "Task", "status": "passed"}]
+                },
+                {
+                    "id": "rev-1",
+                    "version": 2,
+                    "brief": "Hidden replacement",
+                    "requirements": {"goal": "Changed"},
+                    "design": {"summary": "Changed"},
+                    "tasks": [{"id": "task-2", "title": "Changed"}]
+                }
+            ]
+        });
+
+        let error = validate_approved_revision_immutability(&existing, &next)
+            .expect_err("duplicate revision ids must be rejected");
+
+        assert!(error.contains("duplicate revision id"));
     }
 
     #[test]
