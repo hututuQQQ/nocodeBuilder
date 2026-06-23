@@ -1534,6 +1534,37 @@ describe("spec store actions", () => {
     expect(store.get().currentSpec?.status).toBe("review");
   });
 
+  it("does not approve a stale Spec from another conversation", async () => {
+    const revision = createExecutableRevision();
+    const staleSpec = createSpec({
+      conversationId: "conversation-stale",
+      currentRevisionId: revision.id,
+      id: "spec-stale",
+      revisions: [revision],
+      status: "review",
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: staleSpec.id,
+        conversationId: "conversation-1",
+        mode: "spec",
+        specIds: [staleSpec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: staleSpec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.approveAndExecuteCurrentSpec();
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(fake.runSpecTaskRuntime).not.toHaveBeenCalled();
+    expect(store.get().currentSpec).toBe(staleSpec);
+    expect(store.get().projectError).toBe(
+      "Active Spec does not belong to the current conversation.",
+    );
+  });
+
   it("does not request another revision while the revision action is busy", async () => {
     const revision = createExecutableRevision();
     const spec = createSpec({
@@ -1559,6 +1590,37 @@ describe("spec store actions", () => {
     expect(fake.saveSpec).not.toHaveBeenCalled();
     expect(fake.requestSpecRevision).not.toHaveBeenCalled();
     expect(store.get().currentSpec?.status).toBe("review");
+  });
+
+  it("does not request a revision for a stale Spec from another conversation", async () => {
+    const revision = createExecutableRevision();
+    const staleSpec = createSpec({
+      conversationId: "conversation-stale",
+      currentRevisionId: revision.id,
+      id: "spec-stale",
+      revisions: [revision],
+      status: "review",
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: staleSpec.id,
+        conversationId: "conversation-1",
+        mode: "spec",
+        specIds: [staleSpec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: staleSpec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.reviseCurrentSpec("Tighten the requirements");
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(fake.requestSpecRevision).not.toHaveBeenCalled();
+    expect(store.get().currentSpec).toBe(staleSpec);
+    expect(store.get().projectError).toBe(
+      "Active Spec does not belong to the current conversation.",
+    );
   });
 
   it("restores review state when a revision request fails", async () => {

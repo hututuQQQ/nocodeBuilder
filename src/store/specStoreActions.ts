@@ -405,6 +405,13 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         return;
       }
 
+      if (!isActiveConversationSpec(conversation, spec)) {
+        set({
+          projectError: "Active Spec does not belong to the current conversation.",
+        });
+        return;
+      }
+
       const config = await keyStore.getAiProviderConfig();
 
       if (!config) {
@@ -474,6 +481,13 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         get().isExecutingSpec ||
         get().isRevisingSpec
       ) {
+        return;
+      }
+
+      if (!isActiveConversationSpec(conversation, spec)) {
+        set({
+          projectError: "Active Spec does not belong to the current conversation.",
+        });
         return;
       }
 
