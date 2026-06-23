@@ -37,9 +37,11 @@ pub fn read_development_spec(project_id: String, spec_id: String) -> Result<Valu
 pub fn save_development_spec(project_id: String, spec: Value) -> Result<Value, String> {
     let spec_id = read_required_string(&spec, "id")?.to_string();
     let project_dir = projects::resolve_project_dir(&project_id)?;
+    let path = spec_file_path(&project_dir, &spec_id)?;
 
     validate_spec_envelope(&project_id, &spec)?;
-    if let Ok(existing) = read_spec_value(&project_dir, &spec_id) {
+    if path.exists() {
+        let existing = read_spec_value(&project_dir, &spec_id)?;
         validate_approved_revision_immutability(&existing, &spec)?;
     }
     write_spec_value(&project_dir, &spec_id, &spec)?;
@@ -422,6 +424,7 @@ fn normalize_task_plan(task: &Value) -> Result<Value, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::{Mutex, OnceLock};
 
     #[test]
     fn read_spec_value_rejects_file_identity_mismatch() {
@@ -447,6 +450,75 @@ mod tests {
         assert!(error.contains("spec file id does not match requested spec id"));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn save_existing_unreadable_spec_is_rejected_and_preserved() {
+        with_temp_home(|| {
+            let project = crate::projects::create_project("Spec Save Safety Test".to_string())
+                .expect("create project");
+            let conversation_id = "conv-1".to_string();
+            let spec_id = "spec-1".to_string();
+            let spec = json!({
+                "id": spec_id,
+                "projectId": project.id,
+                "conversationId": conversation_id,
+                "kind": "initial_build",
+                "status": "review",
+                "currentRevisionId": "rev-1",
+                "revisions": [],
+                "createdAt": "2026-01-01T00:00:00Z",
+                "updatedAt": "2026-01-01T00:00:00Z"
+            });
+
+            create_development_spec(project.id.clone(), spec).expect("create spec");
+            let project_dir = projects::resolve_project_dir(&project.id).expect("project dir");
+            let conversations_dir = project_dir.join(".aibuilder").join("conversations");
+            fs::create_dir_all(&conversations_dir).expect("create conversations dir");
+            fs::write(
+                conversations_dir.join(format!("{conversation_id}.json")),
+                serde_json::to_string_pretty(&json!({
+                    "id": conversation_id.clone(),
+                    "projectId": project.id,
+                    "title": "Initial build",
+                    "kind": "initial_build",
+                    "mode": "spec",
+                    "activeSpecId": spec_id.clone(),
+                    "specIds": [spec_id.clone()],
+                    "modeChangedAt": "2026-01-01T00:00:00Z",
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": "2026-01-01T00:00:00Z",
+                    "lastMessageAt": "2026-01-01T00:00:00Z",
+                    "archivedAt": null,
+                    "messages": []
+                }))
+                .expect("serialize conversation"),
+            )
+            .expect("write conversation");
+
+            let path = spec_file_path(&project_dir, &spec_id).expect("spec path");
+            fs::write(&path, "{not valid json").expect("corrupt spec file");
+
+            let replacement = json!({
+                "id": spec_id,
+                "projectId": project.id,
+                "conversationId": conversation_id,
+                "kind": "initial_build",
+                "status": "completed",
+                "currentRevisionId": "rev-1",
+                "revisions": [],
+                "createdAt": "2026-01-01T00:00:00Z",
+                "updatedAt": "2026-01-01T00:00:01Z"
+            });
+            let error = save_development_spec(project.id.clone(), replacement)
+                .expect_err("existing unreadable spec must block save");
+
+            assert!(error.contains("failed to parse spec JSON"));
+            assert_eq!(
+                fs::read_to_string(&path).expect("read preserved file"),
+                "{not valid json"
+            );
+        });
     }
 
     #[test]
@@ -705,5 +777,23 @@ mod tests {
         ));
         fs::create_dir_all(&root).expect("create temp root");
         root
+    }
+
+    fn with_temp_home(run: impl FnOnce()) {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let old_home = std::env::var_os("HOME");
+        let root = create_temp_root();
+
+        std::env::set_var("HOME", &root);
+        run();
+
+        if let Some(home) = old_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        let _ = fs::remove_dir_all(root);
     }
 }
