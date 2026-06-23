@@ -99,6 +99,62 @@ describe("Spec validators", () => {
     expect(() => validateDevelopmentSpec(selfBlocked)).toThrow(
       /cannot be blocked by itself/i,
     );
+
+    const pendingWithBlocker = createSpec({
+      tasks: [
+        {
+          ...createGeneratedPayload().tasks[0],
+          blockedByTaskId: "task-2",
+          status: "pending",
+        },
+        {
+          ...createGeneratedPayload().tasks[0],
+          id: "task-2",
+          status: "failed",
+        },
+      ],
+    });
+
+    expect(() => validateDevelopmentSpec(pendingWithBlocker)).toThrow(
+      /only valid for blocked tasks/i,
+    );
+
+    const nonDependencyBlocker = createSpec({
+      tasks: [
+        {
+          ...createGeneratedPayload().tasks[0],
+          blockedByTaskId: "task-2",
+          status: "blocked",
+        },
+        {
+          ...createGeneratedPayload().tasks[0],
+          id: "task-2",
+          status: "failed",
+        },
+      ],
+    });
+
+    expect(() => validateDevelopmentSpec(nonDependencyBlocker)).toThrow(
+      /must be one of its dependencies/i,
+    );
+
+    const validDependencyBlocker = createSpec({
+      tasks: [
+        {
+          ...createGeneratedPayload().tasks[0],
+          status: "failed",
+        },
+        {
+          ...createGeneratedPayload().tasks[0],
+          blockedByTaskId: "task-1",
+          dependencyIds: ["task-1"],
+          id: "task-2",
+          status: "blocked",
+        },
+      ],
+    });
+
+    expect(validateDevelopmentSpec(validDependencyBlocker)).toBeDefined();
   });
 
   it("rejects uncovered required criteria before approval", () => {

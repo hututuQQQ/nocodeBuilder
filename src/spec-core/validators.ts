@@ -619,7 +619,7 @@ function validateRevisionParts(
       | "dependencyIds"
       | "allowedPaths"
     >
-    & Pick<Partial<SpecTask>, "blockedByTaskId">
+    & Pick<Partial<SpecTask>, "blockedByTaskId" | "status">
   >,
 ) {
   if (!requirements.goal.trim()) {
@@ -674,6 +674,10 @@ function validateRevisionParts(
     }
 
     if (task.blockedByTaskId !== undefined) {
+      if (task.status !== undefined && task.status !== "blocked") {
+        throw new Error(`Task ${task.id} blockedByTaskId is only valid for blocked tasks.`);
+      }
+
       if (task.blockedByTaskId === task.id) {
         throw new Error(`Task ${task.id} cannot be blocked by itself.`);
       }
@@ -681,6 +685,12 @@ function validateRevisionParts(
       if (!taskIds.has(task.blockedByTaskId)) {
         throw new Error(
           `Task ${task.id} references unknown blockedByTaskId ${task.blockedByTaskId}.`,
+        );
+      }
+
+      if (!task.dependencyIds.includes(task.blockedByTaskId)) {
+        throw new Error(
+          `Task ${task.id} blockedByTaskId ${task.blockedByTaskId} must be one of its dependencies.`,
         );
       }
     }
