@@ -101,6 +101,14 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
           void get().continueCurrentSpecExecution();
         }
       } catch (error) {
+        if (
+          get().currentProject?.id !== project.id ||
+          get().currentConversation?.id !== conversation.id
+        ) {
+          return;
+        }
+
+        set({ currentSpec: null, historicalSpecs: [] });
         recordSpecError(set, error);
       } finally {
         set({ isLoadingSpec: false });
