@@ -692,7 +692,15 @@ fn validate_initial_build_conversation_completed(
         ));
     }
 
-    let status = crate::spec_storage::read_development_spec_status(project_id, active_spec_id)?;
+    crate::spec_storage::validate_spec_belongs_to_conversation(
+        project_id,
+        &conversation.id,
+        active_spec_id,
+    )
+    .map_err(|_| format!("conversation: initial build must complete before {action}"))?;
+
+    let status = crate::spec_storage::read_development_spec_status(project_id, active_spec_id)
+        .map_err(|_| format!("conversation: initial build must complete before {action}"))?;
 
     if status != "completed" {
         return Err(format!(
@@ -870,6 +878,83 @@ mod tests {
                 },
             )
             .expect("completed initial build allows iteration");
+        });
+    }
+
+    #[test]
+    fn initial_build_gate_rejects_spec_from_another_conversation() {
+        with_temp_home(|| {
+            let project = crate::projects::project_commands::create_project(
+                "Initial Gate Ownership Test".to_string(),
+            )
+            .expect("create project");
+            let conversation_id = "conv-initial".to_string();
+            let spec_id = "spec-initial".to_string();
+
+            crate::spec_storage::create_development_spec(
+                project.id.clone(),
+                json!({
+                    "id": spec_id,
+                    "projectId": project.id,
+                    "conversationId": conversation_id,
+                    "kind": "initial_build",
+                    "status": "completed",
+                    "currentRevisionId": "rev-1",
+                    "revisions": [],
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": "2026-01-01T00:00:00Z"
+                }),
+            )
+            .expect("create completed initial spec");
+            create_project_conversation(
+                project.id.clone(),
+                CreateProjectConversationInput {
+                    active_spec_id: Some(spec_id.clone()),
+                    conversation_id: Some(conversation_id.clone()),
+                    kind: "initial_build".to_string(),
+                    mode: "spec".to_string(),
+                    spec_ids: Some(vec![spec_id.clone()]),
+                    title: Some("Initial build".to_string()),
+                },
+            )
+            .expect("create initial conversation");
+
+            let project_dir = resolve_project_dir(&project.id).expect("project dir");
+            let specs_dir = project_dir.join(METADATA_DIR).join("specs");
+            fs::write(
+                specs_dir.join(format!("{spec_id}.json")),
+                serde_json::to_string_pretty(&json!({
+                    "id": spec_id,
+                    "projectId": project.id,
+                    "conversationId": "conv-other",
+                    "kind": "initial_build",
+                    "status": "completed",
+                    "currentRevisionId": "rev-1",
+                    "revisions": [],
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": "2026-01-01T00:00:01Z"
+                }))
+                .expect("serialize mismatched spec"),
+            )
+            .expect("overwrite mismatched spec");
+
+            let error = create_project_conversation(
+                project.id.clone(),
+                CreateProjectConversationInput {
+                    active_spec_id: None,
+                    conversation_id: Some("conv-iteration".to_string()),
+                    kind: "iteration".to_string(),
+                    mode: "chat".to_string(),
+                    spec_ids: None,
+                    title: Some("Follow up".to_string()),
+                },
+            )
+            .expect_err("mismatched initial spec must block iteration");
+
+            assert_eq!(
+                error,
+                "conversation: initial build must complete before creating iterations"
+            );
         });
     }
 
