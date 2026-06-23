@@ -366,6 +366,17 @@ describe("Spec validators", () => {
     const [pending] = computeAcceptanceResults(spec.revisions[0], new Map());
     expect(pending.status).toBe("pending");
 
+    const [reportFailed] = computeAcceptanceResults(spec.revisions[0], new Map([
+      ["run-1", "failed"],
+    ]));
+    expect(reportFailed).toMatchObject({
+      criterionId: "criterion-1",
+      runIds: ["run-1"],
+      status: "failed",
+      summary: "Verification report failed for run(s): run-1.",
+      taskIds: ["task-1"],
+    });
+
     const failedSpec = createSpec({
       tasks: [
         {

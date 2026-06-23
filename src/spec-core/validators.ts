@@ -237,6 +237,20 @@ export function computeAcceptanceResults(
       };
     }
 
+    const failedRunIds = runIds.filter(
+      (runId) => verificationReportsByRunId.get(runId) === "failed",
+    );
+
+    if (failedRunIds.length > 0) {
+      return {
+        criterionId: criterion.id,
+        runIds,
+        status: "failed" as const,
+        summary: `Verification report failed for run(s): ${failedRunIds.join(", ")}.`,
+        taskIds: linkedTasks.map((task) => task.id),
+      };
+    }
+
     const allPassed = linkedTasks.length > 0 && linkedTasks.every((task) => {
       if (task.status !== "passed" || !task.runId) {
         return false;

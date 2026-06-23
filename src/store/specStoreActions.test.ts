@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentRun, VerificationReport } from "../agent-core/types";
 import type { ProjectConversation, ProjectConversationSummary, ProjectInfo } from "../services/projects";
 import type { DevelopmentSpec, GeneratedSpecRevisionPayload, SpecRevision } from "../spec-core/types";
+import { computePersistedAcceptanceResults } from "../spec-core/validators";
 import {
   __specStoreActionsTestUtils,
   createSpecActions,
@@ -660,6 +661,15 @@ describe("spec store actions", () => {
     expect(store.get().currentSpec?.finalVerification).toMatchObject({
       command: "acceptance criteria",
       success: false,
+    });
+    expect(
+      store.get().currentSpec
+        ? computePersistedAcceptanceResults(store.get().currentSpec!)[0]
+        : null,
+    ).toMatchObject({
+      criterionId: "criterion-1",
+      status: "failed",
+      summary: expect.stringContaining("criterion-1"),
     });
     expect(store.get().runProjectCommand).not.toHaveBeenCalled();
   });
