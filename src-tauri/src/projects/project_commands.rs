@@ -223,3 +223,86 @@ fn is_allowed_uninitialized_file(parts: &[String]) -> bool {
                         || (child == "conversations" && file == "index.json"))
         )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn delete_uninitialized_project_removes_empty_project() {
+        with_temp_home(|| {
+            let project =
+                create_project("Cleanup Empty Project".to_string()).expect("create project");
+            let project_path = project.path.clone();
+
+            delete_uninitialized_project(project.id).expect("delete uninitialized project");
+
+            assert!(!Path::new(&project_path).exists());
+        });
+    }
+
+    #[test]
+    fn delete_uninitialized_project_allows_temporary_spec_metadata() {
+        with_temp_home(|| {
+            let project =
+                create_project("Cleanup Temporary Spec".to_string()).expect("create project");
+            let project_dir = Path::new(&project.path);
+            let specs_dir = project_dir.join(METADATA_DIR).join("specs");
+            let conversations_dir = project_dir.join(METADATA_DIR).join("conversations");
+            fs::create_dir_all(&specs_dir).expect("create specs dir");
+            fs::create_dir_all(&conversations_dir).expect("create conversations dir");
+            fs::write(specs_dir.join("spec-1.json"), "{}").expect("write temporary spec");
+            fs::write(
+                conversations_dir.join("index.json"),
+                r#"{"conversations":[]}"#,
+            )
+            .expect("write empty index");
+            let project_path = project.path.clone();
+
+            delete_uninitialized_project(project.id)
+                .expect("temporary metadata should not block cleanup");
+
+            assert!(!Path::new(&project_path).exists());
+        });
+    }
+
+    #[test]
+    fn delete_uninitialized_project_rejects_business_files() {
+        with_temp_home(|| {
+            let project =
+                create_project("Reject Business Files".to_string()).expect("create project");
+            let project_dir = Path::new(&project.path);
+            fs::write(project_dir.join("package.json"), "{}").expect("write business file");
+
+            let error = delete_uninitialized_project(project.id)
+                .expect_err("business files should block cleanup");
+
+            assert!(error.contains("cannot delete initialized project with project files"));
+            assert!(project_dir.exists());
+        });
+    }
+
+    #[test]
+    fn delete_uninitialized_project_rejects_conversation_files() {
+        with_temp_home(|| {
+            let project =
+                create_project("Reject Conversation Metadata".to_string()).expect("create project");
+            let project_dir = Path::new(&project.path);
+            let conversations_dir = project_dir.join(METADATA_DIR).join("conversations");
+            fs::create_dir_all(&conversations_dir).expect("create conversations dir");
+            fs::write(conversations_dir.join("conv-1.json"), r#"{"id":"conv-1"}"#)
+                .expect("write attached conversation");
+
+            let error = delete_uninitialized_project(project.id)
+                .expect_err("conversation files should block cleanup");
+
+            assert!(error.contains("cannot delete initialized project metadata"));
+            assert!(project_dir.exists());
+        });
+    }
+
+    fn with_temp_home(run: impl FnOnce()) {
+        crate::test_support::with_temp_home("project-command-test", run);
+    }
+}
