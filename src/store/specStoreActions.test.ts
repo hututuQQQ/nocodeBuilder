@@ -1097,6 +1097,34 @@ describe("spec store actions", () => {
     );
   });
 
+  it("does not retry a failed task while another Spec workflow is busy", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          error: "failed",
+          runId: "run-1",
+          status: "failed",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "blocked",
+    });
+    const store = createStore({
+      currentSpec: spec,
+      isSwitchingIterationMode: true,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.retrySpecTask("task-1");
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(fake.runSpecTaskRuntime).not.toHaveBeenCalled();
+    expect(store.get().currentSpec).toBe(spec);
+  });
+
   it("does not retry verification without a failed final verification marker", async () => {
     const revision = createExecutableRevision({
       tasks: [
@@ -1114,6 +1142,40 @@ describe("spec store actions", () => {
     });
     const store = createStore({
       currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.retrySpecVerification();
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(store.get().runProjectCommand).not.toHaveBeenCalled();
+    expect(store.get().currentSpec).toBe(spec);
+  });
+
+  it("does not retry verification while another Spec workflow is busy", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-1",
+          status: "passed",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      failureMessage: "Final npm run build failed:\nbuild failed",
+      finalVerification: {
+        checkedAt: "2026-01-01T00:03:00.000Z",
+        command: "npm run build",
+        output: "build failed",
+        success: false,
+      },
+      revisions: [revision],
+      status: "blocked",
+    });
+    const store = createStore({
+      currentSpec: spec,
+      isGeneratingSpec: true,
     });
     const actions = createSpecActions(store as never);
 

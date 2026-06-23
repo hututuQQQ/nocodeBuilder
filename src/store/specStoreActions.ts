@@ -527,7 +527,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
       if (
         !spec ||
         !conversation ||
-        get().isExecutingSpec ||
+        isSpecWorkflowBusy(get()) ||
         spec.status !== "blocked"
       ) {
         return;
@@ -582,7 +582,12 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
       const spec = get().currentSpec;
       const conversation = get().currentConversation;
 
-      if (!spec || !conversation || !canRetrySpecVerification(spec)) {
+      if (
+        !spec ||
+        !conversation ||
+        isSpecWorkflowBusy(get()) ||
+        !canRetrySpecVerification(spec)
+      ) {
         return;
       }
 
