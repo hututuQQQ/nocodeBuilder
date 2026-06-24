@@ -185,6 +185,14 @@ export function validateDevelopmentSpec(value: unknown): DevelopmentSpec {
     );
   }
 
+  if (
+    spec.status === "blocked" &&
+    spec.finalVerification !== undefined &&
+    !isSupportedFailedFinalVerificationCommand(spec.finalVerification.command)
+  ) {
+    throw new Error("Blocked Spec finalVerification.command is unsupported.");
+  }
+
   if (spec.status !== "completed" && spec.finalVerification?.success === true) {
     throw new Error("Successful finalVerification is only valid for completed Specs.");
   }
@@ -685,6 +693,15 @@ function isSuccessfulFinalBuildCommand(command: unknown) {
   return (
     command === "npm run build" ||
     command === "npm install && npm run build"
+  );
+}
+
+function isSupportedFailedFinalVerificationCommand(command: unknown) {
+  return (
+    command === "acceptance criteria" ||
+    command === "task verification reports" ||
+    command === "npm install" ||
+    isSuccessfulFinalBuildCommand(command)
   );
 }
 

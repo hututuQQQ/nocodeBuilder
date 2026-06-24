@@ -354,6 +354,27 @@ describe("Spec validators", () => {
         status: "blocked",
       }),
     ).toBeDefined();
+
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec({
+          approvedAt: "2026-06-24T00:01:00Z",
+          tasks: [
+            {
+              ...createGeneratedPayload().tasks[0],
+              runId: "run-1",
+              status: "passed",
+            },
+          ],
+        }),
+        failureMessage: "Unknown final verification failed.",
+        finalVerification: {
+          ...finalVerification,
+          command: "manual note",
+        },
+        status: "blocked",
+      }),
+    ).toThrow(/finalVerification\.command is unsupported/i);
   });
 
   it("requires completed specs to use final build verification commands", () => {
