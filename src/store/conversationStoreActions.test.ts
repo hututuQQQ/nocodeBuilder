@@ -171,6 +171,79 @@ describe("conversation store actions", () => {
     expect(store.get().historicalSpecs).toEqual([completedSpec]);
   });
 
+  it("blocks incomplete Initial Build archive before calling Host", async () => {
+    const initialBuild = createSummary({
+      activeSpecId: "spec-initial",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      title: "Initial build",
+    });
+    fake.readSpec.mockResolvedValue(
+      createSpec({
+        conversationId: "conversation-initial",
+        id: "spec-initial",
+        status: "review",
+      }),
+    );
+    const store = createStore({
+      conversationSummaries: [initialBuild],
+    });
+    const actions = createConversationActions(store as never);
+    store.set(actions as unknown as Partial<StoreState>);
+
+    await actions.archiveConversation("conversation-initial");
+
+    expect(fake.readSpec).toHaveBeenCalledWith("project-1", "spec-initial");
+    expect(fake.archiveProjectConversation).not.toHaveBeenCalled();
+    expect(store.get().projectError).toBe(
+      "conversation: initial build must complete before archiving",
+    );
+  });
+
+  it("allows completed Initial Build archive through the action gate", async () => {
+    const initialBuild = createSummary({
+      activeSpecId: "spec-initial",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      title: "Initial build",
+    });
+    const archivedConversation = createConversation({
+      activeSpecId: "spec-initial",
+      archivedAt: "2026-01-01T00:02:00.000Z",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      specIds: ["spec-initial"],
+      title: "Initial build",
+    });
+    fake.readSpec.mockResolvedValue(
+      createSpec({
+        conversationId: "conversation-initial",
+        id: "spec-initial",
+        status: "completed",
+      }),
+    );
+    fake.archiveProjectConversation.mockResolvedValue(archivedConversation);
+    const store = createStore({
+      conversationSummaries: [initialBuild],
+    });
+    const actions = createConversationActions(store as never);
+    store.set(actions as unknown as Partial<StoreState>);
+
+    await actions.archiveConversation("conversation-initial");
+
+    expect(fake.archiveProjectConversation).toHaveBeenCalledWith(
+      "project-1",
+      "conversation-initial",
+    );
+    expect(store.get().conversationSummaries[0]).toMatchObject({
+      archivedAt: "2026-01-01T00:02:00.000Z",
+      id: "conversation-initial",
+    });
+  });
+
   it("opens Initial Build instead of an existing iteration while Initial Spec is incomplete", async () => {
     const initialBuild = createSummary({
       activeSpecId: "spec-initial",

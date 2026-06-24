@@ -19,6 +19,9 @@ import {
 } from "./initialBuildGate";
 import type { StoreAccess } from "./storeAccess";
 
+const INITIAL_BUILD_ARCHIVE_GATE_ERROR =
+  "conversation: initial build must complete before archiving";
+
 type ConversationActions = Pick<
   AppState,
   | "archiveConversation"
@@ -255,6 +258,29 @@ export function createConversationActions({
 
       if (!project) {
         return;
+      }
+
+      const summary = get().conversationSummaries.find(
+        (item) => item.id === conversationId,
+      ) ?? (
+        currentConversation?.id === conversationId
+          ? conversationToSummary(currentConversation)
+          : null
+      );
+      const isInitialBuildArchive = summary?.kind === "initial_build";
+
+      if (isInitialBuildArchive) {
+        const spec = await readInitialBuildSpecForGate(project.id, summary);
+
+        if (!hasCompletedInitialBuildSpecForSummary(project.id, summary, spec)) {
+          set((state) => ({
+            projectError: INITIAL_BUILD_ARCHIVE_GATE_ERROR,
+            terminalLogs: appendLogs(state.terminalLogs, [
+              `[conversation:error] ${INITIAL_BUILD_ARCHIVE_GATE_ERROR}`,
+            ]),
+          }));
+          return;
+        }
       }
 
       set({ projectError: null });
