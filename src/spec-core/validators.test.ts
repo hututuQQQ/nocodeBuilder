@@ -373,6 +373,17 @@ describe("Spec validators", () => {
       validateDevelopmentSpec({
         ...createSpec({
           approvedAt: "2026-06-24T00:01:00Z",
+        }),
+        failureMessage: "Final npm run build failed.",
+        finalVerification,
+        status: "blocked",
+      }),
+    ).toThrow(/blocked spec finalVerification requires all current revision tasks/i);
+
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec({
+          approvedAt: "2026-06-24T00:01:00Z",
           tasks: [
             {
               ...createGeneratedPayload().tasks[0],
