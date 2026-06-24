@@ -801,6 +801,9 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
           });
 
         applyConversationAndSpec(store, updatedConversation, null);
+        store.set((state) => ({
+          historicalSpecs: upsertSpec(state.historicalSpecs, nextSpec),
+        }));
       } catch (error) {
         recordSpecError(set, error);
       } finally {

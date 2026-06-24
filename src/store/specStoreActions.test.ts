@@ -1384,6 +1384,42 @@ describe("spec store actions", () => {
     );
   });
 
+  it("keeps a terminal Spec visible in history when switching to Chat", async () => {
+    const spec = createSpec({
+      completedAt: "2026-01-01T00:01:00.000Z",
+      status: "completed",
+    });
+    const conversation = createConversation("project-1", {
+      activeSpecId: spec.id,
+      conversationId: spec.conversationId,
+      mode: "spec",
+      specIds: [spec.id],
+      title: "Spec iteration",
+    });
+    const store = createStore({
+      currentConversation: conversation,
+      currentSpec: spec,
+      historicalSpecs: [],
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.switchCurrentIterationToChat();
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(fake.switchProjectConversationMode).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({
+        activeSpecId: null,
+        conversationId: conversation.id,
+        specIds: [spec.id],
+        targetMode: "chat",
+      }),
+    );
+    expect(store.get().currentConversation?.mode).toBe("chat");
+    expect(store.get().currentSpec).toBeNull();
+    expect(store.get().historicalSpecs).toEqual([spec]);
+  });
+
   it("cancels the running Spec before switching to Chat", async () => {
     const revision = createExecutableRevision({
       tasks: [
