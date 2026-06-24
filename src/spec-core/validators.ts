@@ -589,6 +589,20 @@ function validatePersistedTask(value: unknown): SpecTask {
   }
 
   if (
+    ["failed", "blocked", "cancelled"].includes(status) &&
+    (typeof value.error !== "string" || !value.error.trim())
+  ) {
+    throw new Error(`Task ${id} with status ${status} requires error.`);
+  }
+
+  if (
+    ["pending", "running", "passed"].includes(status) &&
+    value.error !== undefined
+  ) {
+    throw new Error(`Task ${id} with status ${status} cannot include error.`);
+  }
+
+  if (
     value.blockedByTaskId !== undefined &&
     (typeof value.blockedByTaskId !== "string" || !value.blockedByTaskId.trim())
   ) {

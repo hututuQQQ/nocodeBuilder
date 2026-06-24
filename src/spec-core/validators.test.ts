@@ -77,6 +77,7 @@ describe("Spec validators", () => {
         {
           ...createGeneratedPayload().tasks[0],
           blockedByTaskId: "task-missing",
+          error: "Blocked by a missing dependency.",
           status: "blocked",
         },
       ],
@@ -91,6 +92,7 @@ describe("Spec validators", () => {
         {
           ...createGeneratedPayload().tasks[0],
           blockedByTaskId: "task-1",
+          error: "Blocked by itself.",
           status: "blocked",
         },
       ],
@@ -109,6 +111,7 @@ describe("Spec validators", () => {
         },
         {
           ...createGeneratedPayload().tasks[0],
+          error: "Task failed.",
           id: "task-2",
           status: "failed",
         },
@@ -124,10 +127,12 @@ describe("Spec validators", () => {
         {
           ...createGeneratedPayload().tasks[0],
           blockedByTaskId: "task-2",
+          error: "Blocked by task-2.",
           status: "blocked",
         },
         {
           ...createGeneratedPayload().tasks[0],
+          error: "Task failed.",
           id: "task-2",
           status: "failed",
         },
@@ -142,12 +147,14 @@ describe("Spec validators", () => {
       tasks: [
         {
           ...createGeneratedPayload().tasks[0],
+          error: "Task failed.",
           status: "failed",
         },
         {
           ...createGeneratedPayload().tasks[0],
           blockedByTaskId: "task-1",
           dependencyIds: ["task-1"],
+          error: "Blocked because task-1 failed.",
           id: "task-2",
           status: "blocked",
         },
@@ -482,6 +489,54 @@ describe("Spec validators", () => {
         }),
       ),
     ).toBeDefined();
+  });
+
+  it("requires terminal task errors and rejects stale task errors", () => {
+    for (const status of ["failed", "blocked", "cancelled"] as const) {
+      expect(() =>
+        validateDevelopmentSpec(
+          createSpec({
+            tasks: [
+              {
+                ...createGeneratedPayload().tasks[0],
+                status,
+              },
+            ],
+          }),
+        ),
+      ).toThrow(/requires error/i);
+
+      expect(
+        validateDevelopmentSpec(
+          createSpec({
+            tasks: [
+              {
+                ...createGeneratedPayload().tasks[0],
+                error: "Task stopped.",
+                status,
+              },
+            ],
+          }),
+        ),
+      ).toBeDefined();
+    }
+
+    for (const status of ["pending", "running", "passed"] as const) {
+      expect(() =>
+        validateDevelopmentSpec(
+          createSpec({
+            tasks: [
+              {
+                ...createGeneratedPayload().tasks[0],
+                error: "Stale task error.",
+                ...(status === "pending" ? {} : { runId: "run-1" }),
+                status,
+              },
+            ],
+          }),
+        ),
+      ).toThrow(/cannot include error/i);
+    }
   });
 
   it("requires verifying specs to have passed task run evidence", () => {
