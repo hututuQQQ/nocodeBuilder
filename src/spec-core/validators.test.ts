@@ -263,6 +263,19 @@ describe("Spec validators", () => {
   });
 
   it("allows failure messages only on failed, blocked, or cancelled specs", () => {
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec({ approvedAt: "2026-06-24T00:01:00Z" }),
+        status: "blocked",
+      }),
+    ).toThrow(/requires failureMessage/i);
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec(),
+        status: "failed",
+      }),
+    ).toThrow(/requires failureMessage/i);
+
     for (const status of ["review", "approved", "building", "verifying"] as const) {
       expect(() =>
         validateDevelopmentSpec({

@@ -142,6 +142,10 @@ export function validateDevelopmentSpec(value: unknown): DevelopmentSpec {
     throw new Error("Spec failureMessage must be a string.");
   }
 
+  if (["blocked", "failed"].includes(status) && !spec.failureMessage?.trim()) {
+    throw new Error("Blocked or failed Spec requires failureMessage.");
+  }
+
   if (spec.finalVerification !== undefined) {
     validateFinalVerification(spec.finalVerification);
   }
