@@ -154,6 +154,15 @@ export function validateDevelopmentSpec(value: unknown): DevelopmentSpec {
     throw new Error("Completed Spec cannot include failureMessage.");
   }
 
+  if (
+    spec.status === "completed" &&
+    !isSuccessfulFinalBuildCommand(spec.finalVerification?.command)
+  ) {
+    throw new Error(
+      "Completed Spec finalVerification.command must run the final build.",
+    );
+  }
+
   if (spec.status !== "completed" && spec.finalVerification?.success === true) {
     throw new Error("Successful finalVerification is only valid for completed Specs.");
   }
@@ -588,6 +597,13 @@ function validateSpecTaskStateConsistency(
   ) {
     throw new Error("Terminal Spec cannot include running tasks.");
   }
+}
+
+function isSuccessfulFinalBuildCommand(command: unknown) {
+  return (
+    command === "npm run build" ||
+    command === "npm install && npm run build"
+  );
 }
 
 function validateCurrentRevisionApproval(

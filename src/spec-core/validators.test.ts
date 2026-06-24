@@ -262,6 +262,32 @@ describe("Spec validators", () => {
     ).toThrow(/successful finalVerification/i);
   });
 
+  it("requires completed specs to use final build verification commands", () => {
+    expect(() =>
+      validateDevelopmentSpec(
+        createCompletedSpec({
+          finalVerificationCommand: "acceptance criteria",
+        }),
+      ),
+    ).toThrow(/must run the final build/i);
+
+    expect(() =>
+      validateDevelopmentSpec(
+        createCompletedSpec({
+          finalVerificationCommand: "npm install",
+        }),
+      ),
+    ).toThrow(/must run the final build/i);
+
+    expect(
+      validateDevelopmentSpec(
+        createCompletedSpec({
+          finalVerificationCommand: "npm install && npm run build",
+        }),
+      ),
+    ).toBeDefined();
+  });
+
   it("requires executable specs to have an approved current revision", () => {
     expect(() =>
       validateDevelopmentSpec({
@@ -720,8 +746,11 @@ function createSpec(
 }
 
 function createCompletedSpec(
-  overrides: Partial<DevelopmentSpec["revisions"][number]> = {},
+  overrides: Partial<DevelopmentSpec["revisions"][number]> & {
+    finalVerificationCommand?: string;
+  } = {},
 ): DevelopmentSpec {
+  const { finalVerificationCommand, ...revisionOverrides } = overrides;
   return {
     ...createSpec({
       approvedAt: "2026-06-24T00:01:00Z",
@@ -732,12 +761,12 @@ function createCompletedSpec(
           status: "passed",
         },
       ],
-      ...overrides,
+      ...revisionOverrides,
     }),
     completedAt: "2026-06-24T00:01:00Z",
     finalVerification: {
       checkedAt: "2026-06-24T00:01:00Z",
-      command: "npm run build",
+      command: finalVerificationCommand ?? "npm run build",
       output: "ok",
       success: true,
     },
