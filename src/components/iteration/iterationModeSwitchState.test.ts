@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { getIterationModeSwitchControlState } from "./iterationModeSwitchState";
+import {
+  getIterationModeSwitchControlState,
+  getSwitchToChatDialogDescription,
+} from "./iterationModeSwitchState";
 
 describe("iteration mode switch state", () => {
   it("keeps the cancel-and-switch entrypoint enabled while a Spec task is executing", () => {
@@ -59,6 +62,24 @@ describe("iteration mode switch state", () => {
       expect(state.chatButtonDisabled).toBe(true);
       expect(state.switchToChatDisabled).toBe(true);
     }
+  });
+
+  it("describes terminal Spec switches without implying cancellation", () => {
+    expect(getSwitchToChatDialogDescription("completed")).toBe(
+      "The current Spec result will stay unchanged and remain available in history.",
+    );
+    expect(getSwitchToChatDialogDescription("failed")).toBe(
+      "The current Spec result will stay unchanged and remain available in history.",
+    );
+  });
+
+  it("describes execution and review Spec switches distinctly", () => {
+    expect(getSwitchToChatDialogDescription("building")).toBe(
+      "The current AgentRun will be cancelled. Files already written will not be rolled back.",
+    );
+    expect(getSwitchToChatDialogDescription("review")).toBe(
+      "The current unexecuted Spec will be cancelled and kept in history.",
+    );
   });
 
   it("keeps chat to spec disabled while any Spec workflow is busy", () => {

@@ -56,3 +56,19 @@ export function getIterationModeSwitchControlState({
 export function isSpecExecutionStatus(status: string | null) {
   return status === "approved" || status === "building" || status === "verifying";
 }
+
+export function getSwitchToChatDialogDescription(specStatus: string | null) {
+  if (isSpecExecutionStatus(specStatus)) {
+    return "The current AgentRun will be cancelled. Files already written will not be rolled back.";
+  }
+
+  if (isTerminalSpecStatus(specStatus)) {
+    return "The current Spec result will stay unchanged and remain available in history.";
+  }
+
+  return "The current unexecuted Spec will be cancelled and kept in history.";
+}
+
+export function isTerminalSpecStatus(status: string | null) {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}

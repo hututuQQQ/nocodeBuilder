@@ -1,7 +1,10 @@
 import { FormEvent, useState } from "react";
 import { FileText, Loader2, MessageSquare, X } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
-import { getIterationModeSwitchControlState } from "./iterationModeSwitchState";
+import {
+  getIterationModeSwitchControlState,
+  getSwitchToChatDialogDescription,
+} from "./iterationModeSwitchState";
 
 export function IterationModeSwitch() {
   const [dialog, setDialog] = useState<"to-spec" | "to-chat" | null>(null);
@@ -22,6 +25,9 @@ export function IterationModeSwitch() {
     (state) => state.switchCurrentIterationToSpec,
   );
   const switchingExecutingSpec = isExecutingSpec(currentSpec);
+  const switchToChatDescription = getSwitchToChatDialogDescription(
+    currentSpec?.status ?? null,
+  );
 
   if (!currentConversation) {
     return null;
@@ -154,9 +160,7 @@ export function IterationModeSwitch() {
               {switchingExecutingSpec ? "Cancel Spec and switch to Chat" : "Switch to Chat"}
             </DialogTitle>
             <p className="mt-2 text-xs leading-5 text-zinc-500">
-              {switchingExecutingSpec
-                ? "The current AgentRun will be cancelled. Files already written will not be rolled back."
-                : "The current unexecuted Spec will be cancelled and kept in history."}
+              {switchToChatDescription}
             </p>
             <div className="mt-4 flex justify-end gap-2">
               <button
