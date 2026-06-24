@@ -744,8 +744,11 @@ function validateFinalVerification(finalVerification: unknown) {
     throw new Error("Spec finalVerification.command is required.");
   }
 
-  if (typeof finalVerification.output !== "string") {
-    throw new Error("Spec finalVerification.output must be a string.");
+  if (
+    typeof finalVerification.output !== "string" ||
+    !finalVerification.output.trim()
+  ) {
+    throw new Error("Spec finalVerification.output is required.");
   }
 
   if (typeof finalVerification.success !== "boolean") {

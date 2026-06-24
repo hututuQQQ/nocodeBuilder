@@ -218,6 +218,20 @@ describe("Spec validators", () => {
         finalVerification: "",
       } as unknown),
     ).toThrow(/finalVerification must be an object/i);
+
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec({ approvedAt: "2026-06-24T00:01:00Z" }),
+        failureMessage: "Final verification failed without output.",
+        finalVerification: {
+          checkedAt: "2026-06-24T00:01:00Z",
+          command: "npm run build",
+          output: " ",
+          success: false,
+        },
+        status: "blocked",
+      }),
+    ).toThrow(/finalVerification\.output is required/i);
   });
 
   it("requires persisted acceptance criteria to keep explicit required flags", () => {
