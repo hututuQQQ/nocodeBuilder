@@ -2368,6 +2368,34 @@ describe("spec store actions", () => {
     );
   });
 
+  it("does not cancel a persisted verifying Spec when switching to Chat", async () => {
+    const spec = createSpec({
+      status: "verifying",
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: spec.id,
+        conversationId: spec.conversationId,
+        mode: "spec",
+        specIds: [spec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: spec,
+      isVerifyingSpec: false,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.switchCurrentIterationToChat({ cancelActiveSpec: true });
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(fake.switchProjectConversationMode).not.toHaveBeenCalled();
+    expect(store.get().currentConversation?.mode).toBe("spec");
+    expect(store.get().currentSpec?.status).toBe("verifying");
+    expect(store.get().projectError).toBe(
+      "Wait for the active Spec operation to finish before switching modes.",
+    );
+  });
+
   it("does not approve while the revision action is busy", async () => {
     const revision = createExecutableRevision();
     const spec = createSpec({

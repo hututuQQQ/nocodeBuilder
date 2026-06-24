@@ -752,6 +752,14 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         return;
       }
 
+      if (spec.status === "verifying") {
+        set({
+          projectError:
+            "Wait for the active Spec operation to finish before switching modes.",
+        });
+        return;
+      }
+
       if (isNonCancellableSpecModeSwitchBusy(get())) {
         set({
           projectError:
