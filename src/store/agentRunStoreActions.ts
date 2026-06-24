@@ -54,47 +54,7 @@ export function createAgentRunActions({ get, set }: StoreAccess): AgentRunAction
       }
 
       try {
-        assertCurrentSpecRunControl(get(), run);
-        const persistedRun = await agentRuntimeApi.getRun(project.id, run.id) ?? run;
-        const result = stateMachine.transition(persistedRun, { type: "request_cancel" });
-        const { run: nextRun, event } = await agentRuntimeApi.transitionRun(
-          project.id,
-          persistedRun,
-          result,
-        );
-        const hasActiveController = requestRunAbort(run.id);
-
-        if (hasActiveController) {
-          set((state) => ({
-            agentEvents: [...state.agentEvents, event],
-            agentRuns: [
-              nextRun,
-              ...state.agentRuns.filter((item) => item.id !== nextRun.id),
-            ],
-            currentAgentRun: nextRun,
-            terminalLogs: appendLogs(state.terminalLogs, [
-              `[agent] Cancel requested for run ${run.id}`,
-            ]),
-          }));
-          return;
-        }
-
-        const cancelResult = stateMachine.transition(nextRun, { type: "cancel" });
-        const { run: cancelledRun, event: cancelEvent } =
-          await agentRuntimeApi.transitionRun(project.id, nextRun, cancelResult);
-
-        set((state) => ({
-          agentEvents: [...state.agentEvents, event, cancelEvent],
-          agentRuns: [
-            cancelledRun,
-            ...state.agentRuns.filter((item) => item.id !== cancelledRun.id),
-          ],
-          currentAgentApproval: null,
-          currentAgentRun: cancelledRun,
-          terminalLogs: appendLogs(state.terminalLogs, [
-            `[agent] Run ${run.id} cancelled.`,
-          ]),
-        }));
+        await requestCurrentRunCancellation(store, project, run);
       } catch (error) {
         recordAgentActionError(set, error);
       }
@@ -120,7 +80,7 @@ export function createAgentRunActions({ get, set }: StoreAccess): AgentRunAction
         );
       }
 
-      await get().cancelCurrentAgentRun();
+      await requestCurrentRunCancellation(store, project, run);
       return waitForCancelledRun(store, project.id, run.id);
     },
 
@@ -408,6 +368,59 @@ function isCurrentSpecRun(state: AppState, run: AgentRun) {
     runningTask?.runId === run.id &&
     source.taskId === runningTask?.id
   );
+}
+
+async function requestCurrentRunCancellation(
+  store: StoreAccess,
+  project: NonNullable<AppState["currentProject"]>,
+  run: AgentRun,
+) {
+  const { get, set } = store;
+
+  assertCurrentSpecRunControl(get(), run);
+
+  const persistedRun = await agentRuntimeApi.getRun(project.id, run.id) ?? run;
+  const result = stateMachine.transition(persistedRun, { type: "request_cancel" });
+  const { run: nextRun, event } = await agentRuntimeApi.transitionRun(
+    project.id,
+    persistedRun,
+    result,
+  );
+  const hasActiveController = requestRunAbort(run.id);
+
+  if (hasActiveController) {
+    set((state) => ({
+      agentEvents: [...state.agentEvents, event],
+      agentRuns: [
+        nextRun,
+        ...state.agentRuns.filter((item) => item.id !== nextRun.id),
+      ],
+      currentAgentRun: nextRun,
+      terminalLogs: appendLogs(state.terminalLogs, [
+        `[agent] Cancel requested for run ${run.id}`,
+      ]),
+    }));
+    return nextRun;
+  }
+
+  const cancelResult = stateMachine.transition(nextRun, { type: "cancel" });
+  const { run: cancelledRun, event: cancelEvent } =
+    await agentRuntimeApi.transitionRun(project.id, nextRun, cancelResult);
+
+  set((state) => ({
+    agentEvents: [...state.agentEvents, event, cancelEvent],
+    agentRuns: [
+      cancelledRun,
+      ...state.agentRuns.filter((item) => item.id !== cancelledRun.id),
+    ],
+    currentAgentApproval: null,
+    currentAgentRun: cancelledRun,
+    terminalLogs: appendLogs(state.terminalLogs, [
+      `[agent] Run ${run.id} cancelled.`,
+    ]),
+  }));
+
+  return cancelledRun;
 }
 
 async function waitForCancelledRun(

@@ -12,6 +12,7 @@ const fake = vi.hoisted(() => ({
   specCalls: [] as unknown[],
   runs: new Map<string, AgentRun>(),
   approvals: [] as AgentApproval[],
+  transitionError: null as Error | null,
 }));
 
 vi.mock("../agent-runtime/agentRunControl", () => ({
@@ -73,6 +74,10 @@ vi.mock("../services/agentRuntime", () => ({
       _previousRun: AgentRun,
       result: { event: Omit<AgentEvent, "id" | "sequence">; run: AgentRun },
     ) => {
+      if (fake.transitionError) {
+        throw fake.transitionError;
+      }
+
       fake.runs.set(result.run.id, result.run);
       return {
         event: appendEvent(result.event),
@@ -90,6 +95,7 @@ describe("agent run store actions", () => {
     fake.specCalls = [];
     fake.runs = new Map();
     fake.approvals = [];
+    fake.transitionError = null;
   });
 
   it("cancels an inactive paused run immediately", async () => {
@@ -129,6 +135,28 @@ describe("agent run store actions", () => {
     expect(fake.events.map((event) => event.type)).toEqual(["run.cancel_requested"]);
   });
 
+  it("records cancellation request failures for the normal cancel action", async () => {
+    const run = createRun("run-cancel-transition-error", {
+      contract: createSpecContract("modify"),
+      conversationId: "conversation-1",
+      phase: "planning",
+      status: "planning",
+    });
+    fake.runs.set(run.id, run);
+    fake.transitionError = new Error("agent storage is unavailable");
+    const store = createStore({
+      currentAgentRun: run,
+      currentConversation: createSpecConversation(),
+      currentSpec: createSpec({ runId: run.id }),
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await actions.cancelCurrentAgentRun();
+
+    expect(store.get().projectError).toBe("agent storage is unavailable");
+    expect(fake.events).toHaveLength(0);
+  });
+
   it("waits for active cancellation to reach a terminal cancelled run", async () => {
     fake.activeController = true;
     const run = createRun("run-active-wait", {
@@ -163,6 +191,31 @@ describe("agent run store actions", () => {
     expect(result?.status).toBe("cancelled");
     expect(store.get().currentAgentRun?.status).toBe("cancelled");
     expect(fake.events.map((event) => event.type)).toEqual(["run.cancel_requested"]);
+  });
+
+  it("throws cancellation request failures before waiting for cancel completion", async () => {
+    fake.activeController = true;
+    const run = createRun("run-cancel-wait-transition-error", {
+      contract: createSpecContract("modify"),
+      conversationId: "conversation-1",
+      phase: "planning",
+      status: "planning",
+    });
+    fake.runs.set(run.id, run);
+    fake.transitionError = new Error("agent storage is unavailable");
+    const store = createStore({
+      currentAgentRun: run,
+      currentConversation: createSpecConversation(),
+      currentSpec: createSpec({ runId: run.id }),
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await expect(actions.cancelCurrentAgentRunAndWait()).rejects.toThrow(
+      "agent storage is unavailable",
+    );
+
+    expect(store.get().projectError).toBeNull();
+    expect(fake.events).toHaveLength(0);
   });
 
   it("returns an already cancelled Spec run as a successful cancel wait", async () => {
