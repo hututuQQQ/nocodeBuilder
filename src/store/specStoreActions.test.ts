@@ -1224,6 +1224,107 @@ describe("spec store actions", () => {
     expect(store.get().currentAgentApproval).toBeNull();
   });
 
+  it("reconciles a completed run as passed and continues the next task", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-completed",
+          status: "running",
+        }),
+        createExecutableTask("task-2", {
+          dependencyIds: ["task-1"],
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    fake.agentRuns.set("run-completed", createRun("run-completed", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "completed",
+      status: "completed",
+    }));
+    fake.verificationReports.set(
+      "run-completed",
+      createVerificationReport("run-completed", "passed"),
+    );
+    fake.runSpecTaskRuntime.mockImplementation(async (input: RuntimeInput) => ({
+      run: createRun(input.runId, {
+        phase: "paused",
+        status: "paused",
+      }),
+      verificationReport: null,
+    }));
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    const tasks = store.get().currentSpec?.revisions[0].tasks ?? [];
+    expect(tasks[0]).toMatchObject({
+      error: undefined,
+      runId: "run-completed",
+      status: "passed",
+    });
+    expect(tasks[1]).toMatchObject({
+      runId: expect.stringMatching(/^run-/),
+      status: "running",
+    });
+    expect(fake.runSpecTaskRuntime).toHaveBeenCalledTimes(1);
+    expect(fake.runSpecTaskRuntime.mock.calls[0][0]).toMatchObject({
+      runId: tasks[1].runId,
+      taskObjective: tasks[1].objective,
+    });
+    expect(store.get().currentSpec?.status).toBe("building");
+  });
+
+  it("maps a budget-exceeded run to a retryable failed task during reconcile", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-budget",
+          status: "running",
+        }),
+        createExecutableTask("task-2", {
+          dependencyIds: ["task-1"],
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    fake.agentRuns.set("run-budget", createRun("run-budget", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "budget_exceeded",
+      status: "budget_exceeded",
+    }));
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    const tasks = store.get().currentSpec?.revisions[0].tasks ?? [];
+    expect(store.get().currentSpec?.status).toBe("blocked");
+    expect(store.get().currentSpec?.failureMessage).toBe("Task Task task-1 failed.");
+    expect(tasks[0]).toMatchObject({
+      error: "AgentRun ended with status budget_exceeded.",
+      runId: "run-budget",
+      status: "failed",
+    });
+    expect(tasks[1]).toMatchObject({
+      blockedByTaskId: "task-1",
+      status: "blocked",
+    });
+  });
+
   it("blocks completion when a required acceptance criterion is pending", async () => {
     const revision = createExecutableRevision({
       tasks: [
