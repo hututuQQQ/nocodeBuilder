@@ -1053,6 +1053,7 @@ async function reconcileAndContinueSpecExecution(
   }
 
   if (!isTerminalRunStatus(run.status)) {
+    await syncCurrentAgentRunState(store, project.id, run);
     return;
   }
 
@@ -1332,6 +1333,47 @@ function formatSuccessfulFinalVerificationOutput(
   return installRequired
     ? "npm install and npm run build completed successfully without command output."
     : "npm run build completed successfully without command output.";
+}
+
+async function syncCurrentAgentRunState(
+  store: StoreAccess,
+  projectId: string,
+  run: NonNullable<AppState["currentAgentRun"]>,
+) {
+  const [report, approvals] = await Promise.all([
+    agentRuntimeApi
+      .getLatestVerificationReport(projectId, run.id)
+      .catch(() => null),
+    run.status === "waiting_approval"
+      ? agentRuntimeApi.listApprovals(projectId, run.id).catch(() => [])
+      : Promise.resolve([]),
+  ]);
+
+  store.set((state) => ({
+    agentRuns: [run, ...state.agentRuns.filter((item) => item.id !== run.id)],
+    currentAgentApproval: selectPendingApproval(approvals),
+    currentAgentRun: run,
+    currentVerificationReport: report,
+  }));
+}
+
+function selectPendingApproval(
+  approvals: Array<NonNullable<AppState["currentAgentApproval"]>>,
+) {
+  return (
+    approvals
+      .filter((approval) => !approval.consumedAt)
+      .sort((left, right) => {
+        const leftTime = new Date(left.createdAt).getTime();
+        const rightTime = new Date(right.createdAt).getTime();
+
+        if (leftTime !== rightTime) {
+          return rightTime - leftTime;
+        }
+
+        return right.id.localeCompare(left.id);
+      })[0] ?? null
+  );
 }
 
 function markTasksWithIncompleteVerificationReports(

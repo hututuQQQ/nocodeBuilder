@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentRun, VerificationReport } from "../agent-core/types";
+import type { AgentApproval, AgentRun, VerificationReport } from "../agent-core/types";
 import type { ProjectConversation, ProjectConversationSummary, ProjectInfo } from "../services/projects";
 import type { DevelopmentSpec, GeneratedSpecRevisionPayload, SpecRevision } from "../spec-core/types";
 import { computePersistedAcceptanceResults } from "../spec-core/validators";
@@ -10,6 +10,7 @@ import {
 
 const fake = vi.hoisted(() => ({
   agentRuns: new Map<string, unknown>(),
+  approvals: [] as AgentApproval[],
   checkpoints: new Map<string, unknown>(),
   createProjectConversation: vi.fn(),
   createSpec: vi.fn(),
@@ -45,6 +46,9 @@ vi.mock("../services/agentRuntime", () => ({
     ),
     getRun: vi.fn(async (_projectId: string, runId: string) =>
       fake.agentRuns.get(runId) ?? null,
+    ),
+    listApprovals: vi.fn(async (_projectId: string, runId: string) =>
+      fake.approvals.filter((approval) => approval.runId === runId),
     ),
     readSiteSourceMap: vi.fn(async () => null),
     readSiteSpec: vi.fn(async () => null),
@@ -103,6 +107,7 @@ vi.mock("../spec-runtime/requests", () => ({
 describe("spec store actions", () => {
   beforeEach(() => {
     fake.agentRuns = new Map();
+    fake.approvals = [];
     fake.checkpoints = new Map();
     fake.createProjectConversation.mockReset();
     fake.createSpec.mockReset();
@@ -908,6 +913,7 @@ describe("spec store actions", () => {
       phase: "waiting_approval",
       status: "waiting_approval",
     }));
+    fake.approvals.push(createApproval("approval-1", "run-waiting"));
     const store = createStore({
       currentSpec: spec,
     });
@@ -921,6 +927,9 @@ describe("spec store actions", () => {
       runId: "run-waiting",
       status: "running",
     });
+    expect(store.get().currentAgentRun?.id).toBe("run-waiting");
+    expect(store.get().agentRuns.map((run) => run.id)).toEqual(["run-waiting"]);
+    expect(store.get().currentAgentApproval?.id).toBe("approval-1");
   });
 
   it("blocks completion when a required acceptance criterion is pending", async () => {
@@ -2360,7 +2369,9 @@ function createStore(patch: Partial<StoreState> = {}) {
     changeHistory: [],
     chatMessages: [],
     conversationSummaries: [],
+    currentAgentApproval: null,
     currentAgentRun: null,
+    currentVerificationReport: null,
     currentConversation: inferredConversation,
     currentProject: createProject(),
     currentSpec: null,
@@ -2655,6 +2666,20 @@ function createVerificationReport(
   };
 }
 
+function createApproval(id: string, runId: string): AgentApproval {
+  return {
+    createdAt: "2026-01-01T00:01:00.000Z",
+    exactSideEffect: "Write app/page.tsx",
+    expiresAt: "2026-01-01T01:01:00.000Z",
+    id,
+    normalizedArgsHash: "hash-1",
+    runId,
+    targetResources: ["app/page.tsx"],
+    toolCallId: "tool-call-1",
+    toolName: "write_files",
+  };
+}
+
 function createSpecRunContract(
   spec: DevelopmentSpec,
   task: SpecRevision["tasks"][number],
@@ -2703,7 +2728,9 @@ type StoreState = {
   changeHistory: unknown[];
   chatMessages: ProjectConversation["messages"];
   conversationSummaries: ProjectConversationSummary[];
+  currentAgentApproval: AgentApproval | null;
   currentAgentRun: AgentRun | null;
+  currentVerificationReport: VerificationReport | null;
   currentConversation: ProjectConversation | null;
   currentProject: ProjectInfo | null;
   currentSpec: DevelopmentSpec | null;
