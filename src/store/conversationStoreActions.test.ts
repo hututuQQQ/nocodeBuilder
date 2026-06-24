@@ -394,6 +394,55 @@ describe("conversation store actions", () => {
     );
   });
 
+  it("reloads read-only Spec history when reselecting a Chat iteration", async () => {
+    const initialBuild = createSummary({
+      activeSpecId: "spec-initial",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      title: "Initial build",
+    });
+    const historicalSpec = createSpec({
+      conversationId: "conversation-iteration",
+      id: "spec-history",
+      status: "completed",
+    });
+    const iteration = createConversation({
+      id: "conversation-iteration",
+      mode: "chat",
+      specIds: ["spec-history"],
+      title: "Follow-up",
+    });
+    fake.readProjectConversation.mockResolvedValue(iteration);
+    const store = createStore({
+      conversationSummaries: [initialBuild],
+      initialBuildSpec: createSpec({
+        conversationId: "conversation-initial",
+        id: "spec-initial",
+        status: "completed",
+      }),
+      loadCurrentSpec: vi.fn(async () => {
+        store.set({
+          currentSpec: null,
+          historicalSpecs: [historicalSpec],
+        });
+      }),
+    });
+    const actions = createConversationActions(store as never);
+    store.set(actions as unknown as Partial<StoreState>);
+
+    await actions.selectConversation("conversation-iteration");
+
+    expect(fake.readProjectConversation).toHaveBeenCalledWith(
+      "project-1",
+      "conversation-iteration",
+    );
+    expect(store.get().loadCurrentSpec).toHaveBeenCalledTimes(1);
+    expect(store.get().currentConversation).toEqual(iteration);
+    expect(store.get().currentSpec).toBeNull();
+    expect(store.get().historicalSpecs).toEqual([historicalSpec]);
+  });
+
   it("does not create a new iteration while a Spec operation is busy", async () => {
     const store = createStore({
       isRevisingSpec: true,
