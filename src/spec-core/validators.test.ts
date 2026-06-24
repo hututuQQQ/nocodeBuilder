@@ -262,6 +262,45 @@ describe("Spec validators", () => {
     ).toThrow(/successful finalVerification/i);
   });
 
+  it("allows final verification only on blocked or completed specs", () => {
+    const finalVerification = {
+      checkedAt: "2026-06-24T00:01:00Z",
+      command: "npm run build",
+      output: "failed",
+      success: false,
+    };
+
+    for (const status of ["review", "failed", "cancelled"] as const) {
+      expect(() =>
+        validateDevelopmentSpec({
+          ...createSpec(),
+          cancelledAt: status === "cancelled" ? "2026-06-24T00:01:00Z" : undefined,
+          failureMessage: status === "failed" ? "Fatal orchestration failure." : undefined,
+          finalVerification,
+          status,
+        }),
+      ).toThrow(/finalVerification is only valid/i);
+    }
+
+    expect(
+      validateDevelopmentSpec({
+        ...createSpec({
+          approvedAt: "2026-06-24T00:01:00Z",
+          tasks: [
+            {
+              ...createGeneratedPayload().tasks[0],
+              runId: "run-1",
+              status: "passed",
+            },
+          ],
+        }),
+        failureMessage: "Final npm run build failed.",
+        finalVerification,
+        status: "blocked",
+      }),
+    ).toBeDefined();
+  });
+
   it("requires completed specs to use final build verification commands", () => {
     expect(() =>
       validateDevelopmentSpec(

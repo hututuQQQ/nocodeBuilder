@@ -167,6 +167,16 @@ export function validateDevelopmentSpec(value: unknown): DevelopmentSpec {
     throw new Error("Successful finalVerification is only valid for completed Specs.");
   }
 
+  if (
+    spec.finalVerification !== undefined &&
+    spec.status !== "completed" &&
+    spec.status !== "blocked"
+  ) {
+    throw new Error(
+      "Spec finalVerification is only valid for completed or blocked Specs.",
+    );
+  }
+
   const revisions = readArray(spec.revisions, "Spec revisions");
 
   if (revisions.length === 0) {
