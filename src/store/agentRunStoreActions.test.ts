@@ -307,7 +307,10 @@ describe("agent run store actions", () => {
     });
     fake.runs.set(run.id, run);
     fake.approvals.push(approval);
-    const store = createStore({ currentAgentRun: null });
+    const store = createStore({
+      currentAgentRun: null,
+      currentConversation: createChatConversation(),
+    });
     const actions = createAgentRunActions(store as never);
 
     await actions.loadAgentRuns("project-1");
@@ -317,6 +320,22 @@ describe("agent run store actions", () => {
       decision: "approved",
       id: approval.id,
     });
+  });
+
+  it("does not load runs when no conversation is selected", async () => {
+    const run = createRun("run-without-selection", {
+      conversationId: "conversation-1",
+      phase: "planning",
+      status: "planning",
+    });
+    fake.runs.set(run.id, run);
+    const store = createStore({ currentConversation: null });
+    const actions = createAgentRunActions(store as never);
+
+    await actions.loadAgentRuns("project-1");
+
+    expect(store.get().currentAgentRun).toBeNull();
+    expect(store.get().currentAgentApproval).toBeNull();
   });
 
   it("loads the current Spec task run before unrelated non-terminal runs", async () => {
@@ -601,6 +620,15 @@ function createSpecConversation(): ProjectConversation {
     specIds: ["spec-1"],
     title: "Spec iteration",
     updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+function createChatConversation(): ProjectConversation {
+  return {
+    ...createSpecConversation(),
+    activeSpecId: null,
+    mode: "chat",
+    specIds: [],
   };
 }
 

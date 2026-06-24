@@ -337,9 +337,12 @@ function isTerminalRun(run: AgentRun) {
 
 function selectCurrentAgentRun(runs: AgentRun[], state: AppState) {
   const conversationId = state.currentConversation?.id;
-  const scopedRuns = conversationId
-    ? runs.filter((run) => run.conversationId === conversationId)
-    : runs;
+
+  if (!conversationId) {
+    return null;
+  }
+
+  const scopedRuns = runs.filter((run) => run.conversationId === conversationId);
 
   return (
     runs.find((run) => isCurrentSpecRun(state, run)) ??
