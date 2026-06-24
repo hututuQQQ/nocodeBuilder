@@ -24,9 +24,62 @@ describe("compileSpecTaskContract", () => {
     });
     expect(contract.scope.forbiddenPaths).toContain(".aibuilder/**");
   });
+
+  it("forces full_site only for the Initial Build generate task", () => {
+    const backendTask = createTask({
+      id: "task-2",
+      objective: "Apply Supabase schema for customer accounts.",
+    });
+    const revision = createRevision({
+      tasks: [
+        createTask({
+          id: "task-1",
+          objective: "Generate the initial application.",
+        }),
+        backendTask,
+      ],
+    });
+    const spec = createSpec(revision, { kind: "initial_build" });
+
+    const initialContract = compileSpecTaskContract({
+      executionMode: "generate",
+      revision,
+      spec,
+      task: revision.tasks[0],
+    });
+    const backendContract = compileSpecTaskContract({
+      executionMode: "modify",
+      revision,
+      spec,
+      task: backendTask,
+    });
+
+    expect(initialContract.taskType).toBe("full_site");
+    expect(backendContract.taskType).toBe("backend_feature");
+    expect(backendContract.permissions.databaseChange).toBe("ask");
+  });
+
+  it("infers Initial Build style tasks normally after generation", () => {
+    const styleTask = createTask({
+      objective: "Polish the button colors and spacing.",
+    });
+    const revision = createRevision({ tasks: [styleTask] });
+    const spec = createSpec(revision, { kind: "initial_build" });
+    const contract = compileSpecTaskContract({
+      executionMode: "modify",
+      revision,
+      spec,
+      task: styleTask,
+    });
+
+    expect(contract.taskType).toBe("style_edit");
+  });
 });
 
-function createSpec(revision: SpecRevision): DevelopmentSpec {
+function createSpec(
+  revision: SpecRevision,
+  patch: Partial<DevelopmentSpec> = {},
+): DevelopmentSpec {
   return {
     conversationId: "conv-1",
     createdAt: "2026-06-24T00:00:00Z",
@@ -37,21 +90,12 @@ function createSpec(revision: SpecRevision): DevelopmentSpec {
     revisions: [revision],
     status: "review",
     updatedAt: "2026-06-24T00:00:00Z",
+    ...patch,
   };
 }
 
-function createRevision(): SpecRevision {
-  const task: SpecTask = {
-    acceptanceCriteriaIds: ["criterion-1"],
-    allowedPaths: ["app/page.tsx"],
-    dependencyIds: [],
-    expectedFiles: ["app/page.tsx"],
-    id: "task-1",
-    objective: "Update the home page hero.",
-    requirementIds: ["story-1"],
-    status: "pending",
-    title: "Hero update",
-  };
+function createRevision(patch: Partial<SpecRevision> = {}): SpecRevision {
+  const task = createTask();
 
   return {
     brief: "Hero update",
@@ -87,5 +131,21 @@ function createRevision(): SpecRevision {
     },
     tasks: [task],
     version: 1,
+    ...patch,
+  };
+}
+
+function createTask(patch: Partial<SpecTask> = {}): SpecTask {
+  return {
+    acceptanceCriteriaIds: ["criterion-1"],
+    allowedPaths: ["app/page.tsx"],
+    dependencyIds: [],
+    expectedFiles: ["app/page.tsx"],
+    id: "task-1",
+    objective: "Update the home page hero.",
+    requirementIds: ["story-1"],
+    status: "pending",
+    title: "Hero update",
+    ...patch,
   };
 }

@@ -100,6 +100,37 @@ describe("conversation store actions", () => {
     expect(store.get().loadAgentRuns).toHaveBeenCalledWith("project-1");
   });
 
+  it("blocks selecting another conversation while navigation is locked", async () => {
+    const current = createConversation({ id: "conversation-current" });
+    const store = createStore({
+      currentAgentRun: { status: "waiting_approval" },
+      currentConversation: current,
+    });
+    const actions = createConversationActions(store as never);
+
+    await actions.selectConversation("conversation-other");
+
+    expect(fake.readProjectConversation).not.toHaveBeenCalled();
+    expect(store.get().currentConversation).toEqual(current);
+    expect(store.get().projectError).toContain(
+      "Finish, pause and cancel, or explicitly cancel",
+    );
+  });
+
+  it("treats selecting the current conversation as a no-op while locked", async () => {
+    const current = createConversation({ id: "conversation-current" });
+    const store = createStore({
+      currentAgentRun: { status: "paused" },
+      currentConversation: current,
+    });
+    const actions = createConversationActions(store as never);
+
+    await actions.selectConversation("conversation-current");
+
+    expect(fake.readProjectConversation).not.toHaveBeenCalled();
+    expect(store.get().projectError).toBeNull();
+  });
+
   it("loads completed Initial Build evidence while opening a later iteration", async () => {
     const initialBuild = createSummary({
       activeSpecId: "spec-initial",
@@ -198,6 +229,38 @@ describe("conversation store actions", () => {
     expect(fake.archiveProjectConversation).not.toHaveBeenCalled();
     expect(store.get().projectError).toBe(
       "conversation: initial build must complete before archiving",
+    );
+  });
+
+  it("blocks archiving the current conversation while navigation is locked", async () => {
+    const current = createConversation({ id: "conversation-current" });
+    const store = createStore({
+      conversationSummaries: [createSummary({ id: "conversation-current" })],
+      currentAgentRun: { status: "paused" },
+      currentConversation: current,
+    });
+    const actions = createConversationActions(store as never);
+
+    await actions.archiveConversation("conversation-current");
+
+    expect(fake.archiveProjectConversation).not.toHaveBeenCalled();
+    expect(store.get().projectError).toContain(
+      "Finish, pause and cancel, or explicitly cancel",
+    );
+  });
+
+  it("blocks creating a new iteration while a chat run is active", async () => {
+    const store = createStore({
+      currentAgentRun: { status: "planning" },
+      currentConversation: createConversation(),
+    });
+    const actions = createConversationActions(store as never);
+
+    await expect(actions.createConversation("project-1", "Follow-up")).resolves.toBeNull();
+
+    expect(fake.createProjectConversation).not.toHaveBeenCalled();
+    expect(store.get().projectError).toContain(
+      "Finish, pause and cancel, or explicitly cancel",
     );
   });
 
@@ -703,7 +766,10 @@ describe("conversation store actions", () => {
 function createStore(patch: Partial<StoreState> = {}) {
   let state: StoreState = {
     chatMessages: [],
+    activeCommandRunId: null,
+    commandRuns: [],
     conversationSummaries: [],
+    currentAgentRun: null,
     currentConversation: null,
     currentProject: {
       createdAt: "2026-01-01T00:00:00.000Z",
@@ -718,8 +784,11 @@ function createStore(patch: Partial<StoreState> = {}) {
     currentSpec: null,
     historicalSpecs: [],
     isExecutingSpec: false,
+    isGeneratingProject: false,
     isGeneratingSpec: false,
+    isModifyingProject: false,
     isRevisingSpec: false,
+    isRunningCommand: false,
     isSwitchingIterationMode: false,
     isVerifyingSpec: false,
     isLoadingConversations: false,
@@ -808,7 +877,10 @@ function createSpec(patch: Record<string, unknown> = {}) {
 
 type StoreState = {
   chatMessages: ProjectConversation["messages"];
+  activeCommandRunId: string | null;
+  commandRuns: Array<{ id: string; projectId: string; status: string }>;
   conversationSummaries: ProjectConversationSummary[];
+  currentAgentRun: { status: string } | null;
   currentConversation: ProjectConversation | null;
   currentProject: {
     createdAt: string;
@@ -823,8 +895,11 @@ type StoreState = {
   currentSpec: unknown | null;
   historicalSpecs: unknown[];
   isExecutingSpec: boolean;
+  isGeneratingProject: boolean;
   isGeneratingSpec: boolean;
+  isModifyingProject: boolean;
   isRevisingSpec: boolean;
+  isRunningCommand: boolean;
   isSwitchingIterationMode: boolean;
   isVerifyingSpec: boolean;
   isLoadingConversations: boolean;

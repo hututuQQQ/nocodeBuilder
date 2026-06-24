@@ -17,6 +17,10 @@ import type { DevelopmentSpec } from "../../spec-core/types";
 import { useAppStore } from "../../store/appStore";
 import { selectConversationList } from "../../store/conversationStoreActions";
 import { hasCompletedInitialBuildEvidence } from "../../store/initialBuildGate";
+import {
+  isWorkspaceNavigationLocked,
+  WORKSPACE_NAVIGATION_LOCK_MESSAGE,
+} from "../../store/workspaceNavigationLock";
 
 type ProjectSidebarProps = {
   onOpenSettings: () => void;
@@ -72,6 +76,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
   const showArchivedConversations = useAppStore(
     (state) => state.showArchivedConversations,
   );
+  const workspaceNavigationLocked = useAppStore(isWorkspaceNavigationLocked);
   const unarchiveConversation = useAppStore(
     (state) => state.unarchiveConversation,
   );
@@ -111,6 +116,9 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
     projectId: string,
   ) {
     event.stopPropagation();
+    if (workspaceNavigationLocked) {
+      return;
+    }
     setNewIterationProjectId(projectId);
     setNewIterationMode("chat");
     setNewIterationTitle("");
@@ -206,6 +214,13 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
       <div className="border-b border-zinc-800 p-3">
         <button
           className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-teal-400/30 bg-teal-400/10 text-sm font-medium text-teal-100 transition hover:border-teal-300/60 hover:bg-teal-400/15"
+          aria-disabled={workspaceNavigationLocked}
+          disabled={workspaceNavigationLocked}
+          title={
+            workspaceNavigationLocked
+              ? WORKSPACE_NAVIGATION_LOCK_MESSAGE
+              : "New Project"
+          }
           type="button"
           onClick={() => setIsDialogOpen(true)}
         >
@@ -237,6 +252,8 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
           <div className="space-y-2">
             {projects.map((project) => {
               const isCurrent = currentProject?.id === project.id;
+              const projectSelectionLocked =
+                workspaceNavigationLocked && !isCurrent;
               const initialBuildCompleted =
                 isCurrent &&
                 hasCompletedInitialBuildForCurrentProject(
@@ -250,26 +267,41 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
               const canUseNewIteration = canUseNewIterationShortcut({
                 initialBuildCompleted,
                 isCurrentProject: isCurrent,
-                iterationBusy,
+                iterationBusy: iterationBusy || workspaceNavigationLocked,
               });
 
               return (
                 <div key={project.id}>
                   <div
-                    className={`group/project flex h-10 w-full cursor-pointer items-center gap-2 rounded-md border px-2 text-left text-sm transition ${
+                    aria-disabled={projectSelectionLocked}
+                    className={`group/project flex h-10 w-full items-center gap-2 rounded-md border px-2 text-left text-sm transition ${
                       isCurrent
                         ? "border-teal-400/40 bg-teal-400/10 text-teal-50"
-                        : "border-zinc-800 bg-zinc-900/40 text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900"
+                        : projectSelectionLocked
+                          ? "cursor-not-allowed border-zinc-900 bg-zinc-950/60 text-zinc-600"
+                          : "cursor-pointer border-zinc-800 bg-zinc-900/40 text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900"
                     }`}
-                    onClick={() => void selectProject(project.id)}
+                    onClick={() => {
+                      if (!projectSelectionLocked) {
+                        void selectProject(project.id);
+                      }
+                    }}
                     onKeyDown={(event) => {
+                      if (projectSelectionLocked) {
+                        return;
+                      }
                       if (event.key === "Enter" || event.key === " ") {
                         event.preventDefault();
                         void selectProject(project.id);
                       }
                     }}
                     role="button"
-                    tabIndex={0}
+                    tabIndex={projectSelectionLocked ? -1 : 0}
+                    title={
+                      projectSelectionLocked
+                        ? WORKSPACE_NAVIGATION_LOCK_MESSAGE
+                        : project.name
+                    }
                   >
                     <FolderKanban
                       size={15}
@@ -328,7 +360,9 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                           void handleCreateConversation(event, project.id)
                         }
                         title={
-                          !isCurrent
+                          workspaceNavigationLocked
+                            ? WORKSPACE_NAVIGATION_LOCK_MESSAGE
+                            : !isCurrent
                             ? "Select project first"
                             : !initialBuildCompleted
                               ? "Complete Initial Spec first"
@@ -367,6 +401,10 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                         visibleConversations.map((conversation) => {
                           const isSelected =
                             currentConversation?.id === conversation.id;
+                          const conversationSelectionLocked =
+                            workspaceNavigationLocked && !isSelected;
+                          const archiveLocked =
+                            workspaceNavigationLocked && isSelected;
                           const canArchive = canArchiveConversation(
                             conversation,
                             currentConversation,
@@ -376,16 +414,24 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
 
                           return (
                             <div
-                              className={`group/chat flex h-8 w-full min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-xs transition ${
+                              aria-disabled={conversationSelectionLocked}
+                              className={`group/chat flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-xs transition ${
                                 isSelected
                                   ? "bg-zinc-800 text-zinc-50"
-                                  : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
+                                  : conversationSelectionLocked
+                                    ? "cursor-not-allowed text-zinc-700"
+                                    : "cursor-pointer text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
                               }`}
                               key={conversation.id}
                               onClick={(event) =>
-                                handleSelectConversation(event, conversation.id)
+                                conversationSelectionLocked
+                                  ? event.stopPropagation()
+                                  : handleSelectConversation(event, conversation.id)
                               }
                               onKeyDown={(event) => {
+                                if (conversationSelectionLocked) {
+                                  return;
+                                }
                                 if (
                                   event.key === "Enter" ||
                                   event.key === " "
@@ -396,7 +442,12 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                                 }
                               }}
                               role="button"
-                              tabIndex={0}
+                              tabIndex={conversationSelectionLocked ? -1 : 0}
+                              title={
+                                conversationSelectionLocked
+                                  ? WORKSPACE_NAVIGATION_LOCK_MESSAGE
+                                  : conversation.title
+                              }
                             >
                               <MessageSquare
                                 size={13}
@@ -431,13 +482,19 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                                 <button
                                   aria-label={`Archive ${conversation.title}`}
                                   className="grid size-6 shrink-0 place-items-center rounded text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-100"
+                                  aria-disabled={archiveLocked}
+                                  disabled={archiveLocked}
                                   onClick={(event) =>
                                     handleArchiveConversation(
                                       event,
                                       conversation.id,
                                     )
                                   }
-                                  title="Archive chat"
+                                  title={
+                                    archiveLocked
+                                      ? WORKSPACE_NAVIGATION_LOCK_MESSAGE
+                                      : "Archive chat"
+                                  }
                                   type="button"
                                 >
                                   <Archive size={12} aria-hidden="true" />

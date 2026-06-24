@@ -7,6 +7,10 @@ import {
   __specStoreActionsTestUtils,
   createSpecActions,
 } from "./specStoreActions";
+import {
+  clearAllSpecExecutionCancellationsForTests,
+  requestSpecExecutionCancellation,
+} from "../spec-runtime/executionCancellation";
 
 const fake = vi.hoisted(() => ({
   agentRuns: new Map<string, unknown>(),
@@ -25,6 +29,7 @@ const fake = vi.hoisted(() => ({
   runSpecTaskRuntime: vi.fn(),
   saveSpec: vi.fn(),
   saveProjectConversation: vi.fn(),
+  specs: new Map<string, DevelopmentSpec>(),
   switchProjectConversationMode: vi.fn(),
   verificationReports: new Map<string, unknown>(),
 }));
@@ -119,9 +124,14 @@ describe("spec store actions", () => {
     fake.runSpecTaskRuntime.mockReset();
     fake.saveSpec.mockReset();
     fake.saveProjectConversation.mockReset();
+    fake.specs = new Map();
     fake.switchProjectConversationMode.mockReset();
     fake.verificationReports = new Map();
-    fake.createSpec.mockImplementation(async (_projectId: string, spec: DevelopmentSpec) => spec);
+    clearAllSpecExecutionCancellationsForTests();
+    fake.createSpec.mockImplementation(async (_projectId: string, spec: DevelopmentSpec) => {
+      fake.specs.set(spec.id, spec);
+      return spec;
+    });
     fake.deleteUnattachedSpec.mockResolvedValue(undefined);
     fake.listProjectConversations.mockResolvedValue([
       createConversationSummary({
@@ -133,7 +143,7 @@ describe("spec store actions", () => {
       }),
     ]);
     fake.readSpec.mockImplementation(async (_projectId: string, specId: string) =>
-      createSpec({ id: specId, status: "completed" }),
+      fake.specs.get(specId) ?? createSpec({ id: specId, status: "completed" }),
     );
     fake.listFiles.mockResolvedValue({
       children: [],
@@ -149,7 +159,10 @@ describe("spec store actions", () => {
       run: null,
       verificationReport: null,
     });
-    fake.saveSpec.mockImplementation(async (_projectId: string, spec: DevelopmentSpec) => spec);
+    fake.saveSpec.mockImplementation(async (_projectId: string, spec: DevelopmentSpec) => {
+      fake.specs.set(spec.id, spec);
+      return spec;
+    });
     fake.saveProjectConversation.mockImplementation(
       async (_projectId: string, conversation: ProjectConversation) => conversation,
     );
@@ -1001,6 +1014,72 @@ describe("spec store actions", () => {
     });
   });
 
+  it("does not project a stale Spec task result into the current Spec", async () => {
+    const revision = createExecutableRevision({
+      tasks: [createExecutableTask("task-1")],
+    });
+    const runningSpec = createSpec({
+      conversationId: "conversation-old",
+      currentRevisionId: revision.id,
+      id: "spec-old",
+      revisions: [revision],
+      status: "review",
+    });
+    const visibleSpec = createSpec({
+      conversationId: "conversation-new",
+      id: "spec-new",
+      status: "building",
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-visible",
+          status: "running",
+        }),
+      ],
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: runningSpec.id,
+        conversationId: runningSpec.conversationId,
+        mode: "spec",
+        specIds: [runningSpec.id],
+        title: "Old Spec",
+      }),
+      currentSpec: runningSpec,
+    });
+
+    fake.runSpecTaskRuntime.mockImplementation(async (input: RuntimeInput) => {
+      store.set({
+        currentConversation: createConversation("project-1", {
+          activeSpecId: visibleSpec.id,
+          conversationId: visibleSpec.conversationId,
+          mode: "spec",
+          specIds: [visibleSpec.id],
+          title: "Visible Spec",
+        }),
+        currentSpec: visibleSpec,
+      });
+
+      return {
+        run: createRun(input.runId, {
+          completedAt: "2026-01-01T00:01:00.000Z",
+          phase: "completed",
+          status: "completed",
+        }),
+        verificationReport: createVerificationReport(input.runId, "passed"),
+      };
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.approveAndExecuteCurrentSpec();
+
+    expect(store.get().currentSpec?.id).toBe("spec-new");
+    expect(store.get().currentSpec?.revisions[0].tasks[0]).toMatchObject({
+      runId: "run-visible",
+      status: "running",
+    });
+    expect(fake.specs.get("spec-old")?.revisions[0].tasks[0].status).toBe("passed");
+  });
+
   it("continues execution from an approved Spec after reload", async () => {
     const revision = createExecutableRevision({
       approvedAt: "2026-01-01T00:00:01.000Z",
@@ -1164,6 +1243,7 @@ describe("spec store actions", () => {
       status: "building",
     });
     fake.agentRuns.set("run-waiting", createRun("run-waiting", {
+      contract: createSpecRunContract(spec, revision.tasks[0]),
       phase: "waiting_approval",
       status: "waiting_approval",
     }));
@@ -1201,6 +1281,7 @@ describe("spec store actions", () => {
       status: "building",
     });
     fake.agentRuns.set("run-paused", createRun("run-paused", {
+      contract: createSpecRunContract(spec, revision.tasks[0]),
       phase: "paused",
       status: "paused",
     }));
@@ -2670,38 +2751,8 @@ describe("spec store actions", () => {
     );
   });
 
-  it("does not switch to Chat while final verification is busy", async () => {
-    const spec = createSpec({
-      status: "verifying",
-    });
-    const store = createStore({
-      currentConversation: createConversation("project-1", {
-        activeSpecId: spec.id,
-        conversationId: spec.conversationId,
-        mode: "spec",
-        specIds: [spec.id],
-        title: "Spec iteration",
-      }),
-      currentSpec: spec,
-      isVerifyingSpec: true,
-    });
-    const actions = createSpecActions(store as never);
-
-    await actions.switchCurrentIterationToChat({ cancelActiveSpec: true });
-
-    expect(fake.saveSpec).not.toHaveBeenCalled();
-    expect(fake.switchProjectConversationMode).not.toHaveBeenCalled();
-    expect(store.get().currentConversation?.mode).toBe("spec");
-    expect(store.get().currentSpec?.status).toBe("verifying");
-    expect(store.get().projectError).toBe(
-      "Wait for the active Spec operation to finish before switching modes.",
-    );
-  });
-
-  it("does not cancel a persisted verifying Spec when switching to Chat", async () => {
-    const spec = createSpec({
-      status: "verifying",
-    });
+  it("requests safe-boundary cancellation when switching verifying Spec to Chat", async () => {
+    const spec = createVerifyingSpec();
     const store = createStore({
       currentConversation: createConversation("project-1", {
         activeSpecId: spec.id,
@@ -2717,13 +2768,114 @@ describe("spec store actions", () => {
 
     await actions.switchCurrentIterationToChat({ cancelActiveSpec: true });
 
-    expect(fake.saveSpec).not.toHaveBeenCalled();
-    expect(fake.switchProjectConversationMode).not.toHaveBeenCalled();
-    expect(store.get().currentConversation?.mode).toBe("spec");
-    expect(store.get().currentSpec?.status).toBe("verifying");
-    expect(store.get().projectError).toBe(
-      "Wait for the active Spec operation to finish before switching modes.",
+    const cancelledSpec = fake.saveSpec.mock.calls[
+      fake.saveSpec.mock.calls.length - 1
+    ][1] as DevelopmentSpec;
+    expect(cancelledSpec.status).toBe("cancelled");
+    expect(fake.switchProjectConversationMode).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({
+        activeSpecId: null,
+        conversationId: spec.conversationId,
+        targetMode: "chat",
+      }),
     );
+    expect(store.get().currentConversation?.mode).toBe("chat");
+    expect(store.get().currentSpec).toBeNull();
+  });
+
+  it("stops final verification after install when cancellation is requested", async () => {
+    const spec = createVerifyingSpec({ kind: "initial_build" });
+    const commands: string[] = [];
+    const store = createStore({
+      currentSpec: spec,
+      runProjectCommand: vi.fn(async (_projectId: string, command: string) => {
+        commands.push(command);
+
+        if (command === "npm install") {
+          requestSpecExecutionCancellation({
+            conversationId: spec.conversationId,
+            modeChangedAt: store.get().currentConversation?.modeChangedAt ?? "",
+            projectId: spec.projectId,
+            specId: spec.id,
+          });
+        }
+
+        return {
+          output: "ok",
+          success: true,
+        };
+      }),
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    expect(commands).toEqual(["npm install"]);
+    expect(store.get().currentConversation?.mode).toBe("chat");
+    expect(store.get().historicalSpecs[0].status).toBe("cancelled");
+  });
+
+  it("does not complete final verification when cancellation is requested after build", async () => {
+    const spec = createVerifyingSpec();
+    const commands: string[] = [];
+    const store = createStore({
+      currentSpec: spec,
+      runProjectCommand: vi.fn(async (_projectId: string, command: string) => {
+        commands.push(command);
+        requestSpecExecutionCancellation({
+          conversationId: spec.conversationId,
+          modeChangedAt: store.get().currentConversation?.modeChangedAt ?? "",
+          projectId: spec.projectId,
+          specId: spec.id,
+        });
+
+        return {
+          output: "ok",
+          success: true,
+        };
+      }),
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    expect(commands).toEqual(["npm run build"]);
+    expect(store.get().currentConversation?.mode).toBe("chat");
+    expect(store.get().historicalSpecs[0].status).toBe("cancelled");
+    expect(store.get().historicalSpecs[0].status).not.toBe("completed");
+  });
+
+  it("ignores cancellation requests for an old Spec id", async () => {
+    requestSpecExecutionCancellation({
+      conversationId: "conversation-old",
+      modeChangedAt: "2026-01-01T00:00:00.000Z",
+      projectId: "project-1",
+      specId: "spec-old",
+    });
+    const spec = createVerifyingSpec();
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    expect(store.get().currentSpec?.status).toBe("completed");
+  });
+
+  it("keeps Spec mode when safe-boundary switch fails", async () => {
+    const spec = createVerifyingSpec();
+    fake.switchProjectConversationMode.mockRejectedValue(new Error("switch failed"));
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.switchCurrentIterationToChat({ cancelActiveSpec: true });
+
+    expect(store.get().currentConversation?.mode).toBe("spec");
+    expect(store.get().projectError).toBe("switch failed");
   });
 
   it("does not approve while the revision action is busy", async () => {
@@ -3392,6 +3544,43 @@ function createSpec(patch: Partial<DevelopmentSpec> & { tasks?: SpecRevision["ta
     updatedAt: "2026-01-01T00:00:00.000Z",
     ...patch,
   };
+}
+
+function createVerifyingSpec(
+  patch: Partial<DevelopmentSpec> & { tasks?: SpecRevision["tasks"] } = {},
+): DevelopmentSpec {
+  const tasks = patch.tasks ?? [
+    createExecutableTask("task-1", {
+      runId: "run-verified",
+      status: "passed",
+    }),
+  ];
+  const revision = createExecutableRevision({ tasks });
+  const spec = createSpec({
+    currentRevisionId: revision.id,
+    revisions: [revision],
+    status: "verifying",
+    ...patch,
+  });
+
+  for (const task of tasks) {
+    if (!task.runId) {
+      continue;
+    }
+
+    fake.agentRuns.set(task.runId, createRun(task.runId, {
+      completedAt: "2026-01-01T00:01:00.000Z",
+      phase: "completed",
+      status: "completed",
+    }));
+    fake.verificationReports.set(
+      task.runId,
+      createVerificationReport(task.runId, "passed"),
+    );
+  }
+
+  fake.specs.set(spec.id, spec);
+  return spec;
 }
 
 function createExecutableRevision(

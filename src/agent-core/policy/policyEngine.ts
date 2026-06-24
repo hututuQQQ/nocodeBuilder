@@ -1,4 +1,9 @@
 import type { AgentRun, TaskContract, ToolDefinition } from "../types";
+import {
+  isPathAllowed,
+  isPathForbidden,
+  normalizeProjectPath,
+} from "../pathScope";
 
 export type PolicyDecision =
   | {
@@ -79,11 +84,22 @@ export class PolicyEngine {
 
     if (
       tool.sideEffect !== "none" &&
-      paths.some((path) => isForbiddenPath(path, contract.scope.forbiddenPaths))
+      paths.some((path) => isPathForbidden(path, contract.scope.forbiddenPaths))
     ) {
       return {
         allowed: false,
         reason: "Tool target is inside a forbidden path such as .aibuilder or .env.",
+      };
+    }
+
+    if (
+      (tool.sideEffect === "workspace_write" || tool.sideEffect === "destructive") &&
+      paths.length > 0 &&
+      paths.some((path) => !isPathAllowed(path, contract.scope.allowedPaths))
+    ) {
+      return {
+        allowed: false,
+        reason: "Tool target is outside the task's allowed paths.",
       };
     }
 
@@ -167,7 +183,7 @@ function collectPaths(value: unknown, parentKey = ""): string[] {
   if (Array.isArray(value)) {
     return value.flatMap((item) => {
       if (typeof item === "string" && isPathField(parentKey)) {
-        return [item.replace(/\\/g, "/")];
+        return [normalizeProjectPath(item)];
       }
 
       return collectPaths(item, parentKey);
@@ -179,7 +195,7 @@ function collectPaths(value: unknown, parentKey = ""): string[] {
 
   for (const [key, item] of Object.entries(record)) {
     if (typeof item === "string" && isPathField(key)) {
-      paths.push(item.replace(/\\/g, "/"));
+      paths.push(normalizeProjectPath(item));
     } else {
       paths.push(...collectPaths(item, key));
     }
@@ -198,22 +214,6 @@ function isPathField(key: string) {
     normalized.endsWith("path") ||
     normalized.endsWith("paths")
   );
-}
-
-function isForbiddenPath(path: string, forbiddenPaths: string[]) {
-  return forbiddenPaths.some((pattern) => {
-    const normalized = pattern.replace(/\\/g, "/");
-
-    if (normalized.endsWith("/**")) {
-      return path === normalized.slice(0, -3) || path.startsWith(normalized.slice(0, -2));
-    }
-
-    if (normalized.endsWith(".*")) {
-      return path === normalized.slice(0, -2) || path.startsWith(normalized.slice(0, -1));
-    }
-
-    return path === normalized || path.startsWith(`${normalized}/`);
-  });
 }
 
 function extractCommand(args: unknown) {

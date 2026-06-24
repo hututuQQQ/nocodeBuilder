@@ -44,6 +44,7 @@ import {
 import { agentRuntimeApi } from "../services/agentRuntime";
 import { appendLogs } from "../store/commandLogs";
 import { persistCurrentConversation } from "../store/conversationState";
+import type { AppState } from "../store/appStore";
 import {
   appendAssistantMessage,
   appendTerminalLog,
@@ -253,7 +254,7 @@ async function runApplicationRuntime(
         );
 
     await completeStreamForRun(project.id, store, stream, finalRun);
-    void persistCurrentConversation(store);
+    void persistRuntimeCurrentConversation(store, finalRun);
     return {
       run: finalRun,
       verificationReport: await getRunVerificationReport(project.id, finalRun),
@@ -271,7 +272,7 @@ async function runApplicationRuntime(
 
     if (cleanupResult.run?.status === "cancelled") {
       stream.completeWithTypewriter("Run cancelled.");
-      void persistCurrentConversation(store);
+      void persistRuntimeCurrentConversation(store, cleanupResult.run);
       store.set((state) => ({
         terminalLogs: appendLogs(state.terminalLogs, [
           `[agent] Run ${cleanupResult.run?.id ?? controllerRunId} cancelled.`,
@@ -287,7 +288,7 @@ async function runApplicationRuntime(
     }
 
     stream.failWithTypewriter(`Agent run failed: ${cleanupMessage}`);
-    void persistCurrentConversation(store);
+    void persistRuntimeCurrentConversation(store, cleanupResult.run);
     store.set((state) => ({
       projectError: cleanupMessage,
       terminalLogs: appendLogs(state.terminalLogs, [`[agent:error] ${cleanupMessage}`]),
@@ -367,7 +368,12 @@ function createApplicationPorts({
     eventStore: {
       append: async (event) => {
         const record = await agentRuntimeApi.appendEvent(project.id, event);
-        store.set((state) => ({ agentEvents: [...state.agentEvents, record] }));
+        store.set((state) => ({
+          agentEvents:
+            state.currentAgentRun?.id === record.runId
+              ? [...state.agentEvents, record]
+              : state.agentEvents,
+        }));
         return record;
       },
       list: (runId) => agentRuntimeApi.listEvents(project.id, runId),
@@ -390,11 +396,18 @@ function createApplicationPorts({
         const created = await agentRuntimeApi.createRun(project.id, run);
         await writeBaselineArtifact(project.id, created.id, session);
         const events = await agentRuntimeApi.listEvents(project.id, created.id);
-        store.set((state) => ({
-          agentEvents: events,
-          agentRuns: [created, ...state.agentRuns.filter((item) => item.id !== created.id)],
-          currentAgentRun: created,
-        }));
+        store.set((state) => {
+          const canProject = canProjectRunToCurrentUi(state, created);
+
+          return {
+            agentEvents: canProject ? events : state.agentEvents,
+            agentRuns: [
+              created,
+              ...state.agentRuns.filter((item) => item.id !== created.id),
+            ],
+            currentAgentRun: canProject ? created : state.currentAgentRun,
+          };
+        });
         return created;
       },
       get: (runId) => agentRuntimeApi.getRun(project.id, runId),
@@ -444,7 +457,14 @@ function createApplicationPorts({
           store,
           stream,
         });
-        store.set({ currentVerificationReport: report });
+        store.set((state) => ({
+          currentVerificationReport: canProjectRunToCurrentUi(
+            state,
+            verificationInput.run,
+          )
+            ? report
+            : state.currentVerificationReport,
+        }));
         await agentRuntimeApi.saveVerificationReport(project.id, report);
         return report;
       },
@@ -793,14 +813,18 @@ function createApprovalPort(
       const created = await agentRuntimeApi.createApproval(projectId, approval);
       const run = await agentRuntimeApi.getRun(projectId, created.runId);
       const events = await agentRuntimeApi.listEvents(projectId, created.runId);
-      store.set((state) => ({
-        agentEvents: events,
-        agentRuns: run
-          ? [run, ...state.agentRuns.filter((item) => item.id !== run.id)]
-          : state.agentRuns,
-        currentAgentApproval: created,
-        currentAgentRun: run ?? state.currentAgentRun,
-      }));
+      store.set((state) => {
+        const canProject = run ? canProjectRunToCurrentUi(state, run) : false;
+
+        return {
+          agentEvents: canProject ? events : state.agentEvents,
+          agentRuns: run
+            ? [run, ...state.agentRuns.filter((item) => item.id !== run.id)]
+            : state.agentRuns,
+          currentAgentApproval: canProject ? created : state.currentAgentApproval,
+          currentAgentRun: canProject && run ? run : state.currentAgentRun,
+        };
+      });
       return created;
     },
     getLatestResolved: async (runId) => {
@@ -1074,11 +1098,70 @@ function flattenFileTree(fileTree: FileTree): FileTree[] {
 }
 
 function projectRunToStore(store: StoreAccess, run: AgentRun, event: AgentEvent) {
-  store.set((state) => ({
-    agentEvents: [...state.agentEvents, event],
-    agentRuns: [run, ...state.agentRuns.filter((item) => item.id !== run.id)],
-    currentAgentRun: run,
-  }));
+  store.set((state) => {
+    const canProject = canProjectRunToCurrentUi(state, run);
+
+    return {
+      agentEvents: canProject ? [...state.agentEvents, event] : state.agentEvents,
+      agentRuns: [run, ...state.agentRuns.filter((item) => item.id !== run.id)],
+      currentAgentRun: canProject ? run : state.currentAgentRun,
+    };
+  });
+}
+
+function canProjectRunToCurrentUi(state: AppState, run: AgentRun) {
+  if (
+    state.currentProject?.id !== run.projectId ||
+    state.currentConversation?.id !== run.conversationId
+  ) {
+    return false;
+  }
+
+  const source = run.contract.source;
+
+  if (source?.mode !== "spec") {
+    return state.currentConversation.mode !== "spec";
+  }
+
+  const spec = state.currentSpec;
+
+  if (
+    state.currentConversation.mode !== "spec" ||
+    !spec ||
+    state.currentConversation.activeSpecId !== spec.id ||
+    source.specId !== spec.id ||
+    source.revisionId !== spec.currentRevisionId
+  ) {
+    return false;
+  }
+
+  const revision = spec.revisions.find((item) => item.id === source.revisionId);
+  const runningTask = revision?.tasks.find((task) => task.id === source.taskId);
+
+  return Boolean(
+    revision &&
+      runningTask &&
+      runningTask.runId === run.id &&
+      source.taskId === runningTask.id,
+  );
+}
+
+function persistRuntimeCurrentConversation(
+  store: StoreAccess,
+  run: AgentRun | null,
+) {
+  if (!run) {
+    return;
+  }
+
+  const state = store.get();
+
+  if (
+    state.currentProject?.id === run.projectId &&
+    state.currentConversation?.id === run.conversationId
+  ) {
+    return persistCurrentConversation(store);
+  }
 }
 
 function collectReadSnapshots(runState: AgentRunState) {
@@ -1170,7 +1253,11 @@ async function completeStreamForRun(
   run: AgentRun,
 ) {
   if (run.status === "completed") {
-    const report = store.get().currentVerificationReport;
+    const report = canProjectRunToCurrentUi(store.get(), run)
+      ? store.get().currentVerificationReport
+      : await agentRuntimeApi
+          .getLatestVerificationReport(projectId, run.id)
+          .catch(() => null);
     const checkpoint = await agentRuntimeApi.getLatestCheckpoint(projectId, run.id);
     const metadata = checkpoint
       ? readRunDriveStateMetadata(checkpoint.plan)

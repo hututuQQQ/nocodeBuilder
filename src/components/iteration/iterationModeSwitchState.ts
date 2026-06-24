@@ -36,23 +36,20 @@ export function getIterationModeSwitchControlState({
   const nonCancellableBusy =
     flags.isGeneratingSpec ||
     flags.isRevisingSpec ||
-    flags.isVerifyingSpec ||
     flags.isSwitchingIterationMode;
   const canOpenCancelSwitch =
     currentMode === "spec" && isCancellableSpecExecutionStatus(specStatus);
-  const executionBusy = flags.isExecutingSpec;
-  const verifyingLocked = specStatus === "verifying";
+  const executionBusy = flags.isExecutingSpec || flags.isVerifyingSpec;
 
   return {
     anyBusy,
     chatButtonDisabled:
       currentMode === "chat" ||
       nonCancellableBusy ||
-      verifyingLocked ||
       (executionBusy && !canOpenCancelSwitch),
     generateSpecDisabled: anyBusy,
     specButtonDisabled: currentMode === "spec" || anyBusy,
-    switchToChatDisabled: nonCancellableBusy || verifyingLocked,
+    switchToChatDisabled: nonCancellableBusy || (executionBusy && !canOpenCancelSwitch),
   };
 }
 
@@ -61,12 +58,12 @@ export function isSpecExecutionStatus(status: string | null) {
 }
 
 export function isCancellableSpecExecutionStatus(status: string | null) {
-  return status === "approved" || status === "building";
+  return status === "approved" || status === "building" || status === "verifying";
 }
 
 export function getSwitchToChatDialogDescription(specStatus: string | null) {
   if (specStatus === "verifying") {
-    return "Final verification is running. Wait for the result before switching modes.";
+    return "The current verification command may finish before switching. No further verification step will start.";
   }
 
   if (isSpecExecutionStatus(specStatus)) {

@@ -18,6 +18,10 @@ import {
   readInitialBuildSpecForGate,
 } from "./initialBuildGate";
 import type { StoreAccess } from "./storeAccess";
+import {
+  isWorkspaceNavigationLocked,
+  WORKSPACE_NAVIGATION_LOCK_MESSAGE,
+} from "./workspaceNavigationLock";
 
 const INITIAL_BUILD_ARCHIVE_GATE_ERROR =
   "conversation: initial build must complete before archiving";
@@ -141,6 +145,11 @@ export function createConversationActions({
         return null;
       }
 
+      if (isWorkspaceNavigationLocked(get())) {
+        recordWorkspaceNavigationBlocked(set, "conversation");
+        return null;
+      }
+
       if (conversationInput.kind === "iteration") {
         try {
           await ensureInitialBuildCompletedForIteration(
@@ -206,8 +215,18 @@ export function createConversationActions({
 
     selectConversation: async (conversationId) => {
       const project = get().currentProject;
+      const currentConversation = get().currentConversation;
 
       if (!project) {
+        return;
+      }
+
+      if (isWorkspaceNavigationLocked(get())) {
+        if (currentConversation?.id === conversationId) {
+          return;
+        }
+
+        recordWorkspaceNavigationBlocked(set, "conversation");
         return;
       }
 
@@ -257,6 +276,11 @@ export function createConversationActions({
       const isCurrentConversation = currentConversation?.id === conversationId;
 
       if (!project) {
+        return;
+      }
+
+      if (isWorkspaceNavigationLocked(get()) && isCurrentConversation) {
+        recordWorkspaceNavigationBlocked(set, "conversation");
         return;
       }
 
@@ -409,6 +433,18 @@ function isSpecWorkflowBusy(state: AppState) {
       state.isVerifyingSpec ||
       state.isSwitchingIterationMode,
   );
+}
+
+function recordWorkspaceNavigationBlocked(
+  set: StoreAccess["set"],
+  source: "conversation",
+) {
+  set((state) => ({
+    projectError: WORKSPACE_NAVIGATION_LOCK_MESSAGE,
+    terminalLogs: appendLogs(state.terminalLogs, [
+      `[${source}:error] ${WORKSPACE_NAVIGATION_LOCK_MESSAGE}`,
+    ]),
+  }));
 }
 
 export type { ProjectConversation };

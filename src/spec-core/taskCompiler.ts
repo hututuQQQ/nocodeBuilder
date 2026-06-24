@@ -16,9 +16,13 @@ export function compileSpecTaskContract({
   spec: DevelopmentSpec;
   task: SpecTask;
 }): TaskContract {
+  const forcedTaskType =
+    spec.kind === "initial_build" && executionMode === "generate"
+      ? "full_site"
+      : undefined;
   const base = compileTaskContract({
     objective: task.objective,
-    taskType: spec.kind === "initial_build" ? "full_site" : undefined,
+    taskType: forcedTaskType,
   });
   const criteriaById = new Map(
     revision.requirements.acceptanceCriteria.map((criterion) => [

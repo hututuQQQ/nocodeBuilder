@@ -54,6 +54,20 @@ export function createAgentRunActions({ get, set }: StoreAccess): AgentRunAction
       }
 
       try {
+        if (run.contract.source?.mode === "spec") {
+          const cancelledRun = await requestCurrentRunCancellationAndWait(
+            store,
+            project,
+            run,
+          );
+
+          if (cancelledRun.status === "cancelled") {
+            await get().continueCurrentSpecExecution();
+          }
+
+          return;
+        }
+
         await requestCurrentRunCancellation(store, project, run);
       } catch (error) {
         recordAgentActionError(set, error);
@@ -80,8 +94,7 @@ export function createAgentRunActions({ get, set }: StoreAccess): AgentRunAction
         );
       }
 
-      await requestCurrentRunCancellation(store, project, run);
-      return waitForCancelledRun(store, project.id, run.id);
+      return requestCurrentRunCancellationAndWait(store, project, run);
     },
 
     clearSelectedSiteNode: () => {
@@ -224,6 +237,27 @@ async function recoverCurrentAgentRun(store: StoreAccess) {
   await modifyCurrentProjectRuntime(store, run.contract.objective, {
     existingRun: run,
   });
+}
+
+async function requestCurrentRunCancellationAndWait(
+  store: StoreAccess,
+  project: NonNullable<AppState["currentProject"]>,
+  run: AgentRun,
+) {
+  assertCurrentSpecRunControl(store.get(), run);
+
+  if (run.status === "cancelled") {
+    return run;
+  }
+
+  if (isTerminalRun(run)) {
+    throw new Error(
+      `AgentRun ${run.id} is already ${run.status}; cancellation requires cancelled state.`,
+    );
+  }
+
+  await requestCurrentRunCancellation(store, project, run);
+  return waitForCancelledRun(store, project.id, run.id);
 }
 
 async function resolveCurrentAgentApproval(

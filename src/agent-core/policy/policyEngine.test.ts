@@ -125,4 +125,133 @@ describe("PolicyEngine", () => {
 
     expect(decision.approvalRequired).toBe(true);
   });
+
+  it("allows workspace writes inside allowed paths", () => {
+    const run = createScopedRun(["app/**"]);
+    const tool = getCoreToolDefinition("write_files");
+    const decision = new PolicyEngine().evaluate({
+      args: {
+        files: [{ content: "export default null;", path: "app/page.tsx" }],
+      },
+      run,
+      tool: tool!,
+    });
+
+    expect(decision.allowed).toBe(true);
+  });
+
+  it("hard denies workspace writes outside allowed paths", () => {
+    const run = createScopedRun(["app/**"]);
+    const tool = getCoreToolDefinition("write_files");
+    const decision = new PolicyEngine().evaluate({
+      args: {
+        files: [{ content: "export const secret = true;", path: "lib/secret.ts" }],
+      },
+      run,
+      tool: tool!,
+    });
+
+    expect(decision).toEqual({
+      allowed: false,
+      reason: "Tool target is outside the task's allowed paths.",
+    });
+  });
+
+  it("allows exact allowed edit paths", () => {
+    const run = createScopedRun(["package.json"]);
+    const tool = getCoreToolDefinition("edit_file");
+    const decision = new PolicyEngine().evaluate({
+      args: {
+        new_string: "{\"scripts\":{}}",
+        old_string: "{}",
+        path: "package.json",
+      },
+      run,
+      tool: tool!,
+    });
+
+    expect(decision.allowed).toBe(true);
+  });
+
+  it("hard denies deletes outside allowed paths before approval", () => {
+    const run = createScopedRun(["app/**"]);
+    const tool = getCoreToolDefinition("delete_files");
+    const decision = new PolicyEngine().evaluate({
+      args: { paths: ["components/Old.tsx"] },
+      run,
+      tool: tool!,
+    });
+
+    expect(decision).toEqual({
+      allowed: false,
+      reason: "Tool target is outside the task's allowed paths.",
+    });
+  });
+
+  it("keeps forbidden paths higher priority than allowed paths", () => {
+    const run = createScopedRun([".aibuilder/**", "app/**"]);
+    const tool = getCoreToolDefinition("write_files");
+    const decision = new PolicyEngine().evaluate({
+      args: { files: [{ content: "{}", path: ".aibuilder/site-spec.json" }] },
+      run,
+      tool: tool!,
+    });
+
+    expect(decision).toEqual({
+      allowed: false,
+      reason: "Tool target is inside a forbidden path such as .aibuilder or .env.",
+    });
+  });
+
+  it("normalizes paths before enforcing allowed scope", () => {
+    const run = createScopedRun(["app/**"]);
+    const tool = getCoreToolDefinition("write_files");
+    const allowedDecision = new PolicyEngine().evaluate({
+      args: { files: [{ content: "ok", path: "app\\page.tsx" }] },
+      run,
+      tool: tool!,
+    });
+    const traversalDecision = new PolicyEngine().evaluate({
+      args: { files: [{ content: "bad", path: "app/../lib/secret.ts" }] },
+      run,
+      tool: tool!,
+    });
+
+    expect(allowedDecision.allowed).toBe(true);
+    expect(traversalDecision.allowed).toBe(false);
+  });
+
+  it("does not scope-deny controlled workspace tools without path arguments", () => {
+    const run = createScopedRun(["app/**"]);
+    const tool = getCoreToolDefinition("refresh_site_index");
+    const decision = new PolicyEngine().evaluate({
+      args: { reason: "after edits" },
+      run,
+      tool: tool!,
+    });
+
+    expect(decision.allowed).toBe(true);
+  });
 });
+
+function createScopedRun(allowedPaths: string[]) {
+  const machine = new RunStateMachine();
+  const contract = compileTaskContract({ objective: "Change scoped files" });
+
+  return machine.createRun({
+    contract: {
+      ...contract,
+      permissions: {
+        ...contract.permissions,
+        dependencyChange: "allow",
+        fileDelete: "ask",
+      },
+      scope: {
+        ...contract.scope,
+        allowedPaths,
+      },
+    },
+    conversationId: "conversation-1",
+    projectId: "project-1",
+  });
+}

@@ -7,6 +7,12 @@ import type {
   VerificationReport,
   VerificationStatus,
 } from "../types";
+import {
+  isInvalidProjectPath,
+  isPathForbidden,
+  matchesProjectPathPattern,
+  normalizeProjectPath,
+} from "../pathScope";
 
 export type VerifierCommandResult = {
   command: string;
@@ -859,13 +865,7 @@ export function verifyScope(
   const approvedDeletionPaths = new Set(
     (options.approvedDeletionPaths ?? []).map(normalizeProjectPath),
   );
-  const invalidPath = normalizedChangedFiles.find(
-    (path) =>
-      path.startsWith("/") ||
-      path.startsWith("../") ||
-      path.includes("/../") ||
-      /^[A-Za-z]:\//.test(path),
-  );
+  const invalidPath = normalizedChangedFiles.find(isInvalidProjectPath);
 
   if (invalidPath) {
     return failedCheck(
@@ -877,7 +877,7 @@ export function verifyScope(
   }
 
   const forbidden = normalizedChangedFiles.find((path) =>
-    contract.scope.forbiddenPaths.some((pattern) => matchesPattern(path, pattern)),
+    isPathForbidden(path, contract.scope.forbiddenPaths),
   );
 
   if (forbidden) {
@@ -902,7 +902,10 @@ export function verifyScope(
   }
 
   const outsideAllowed = normalizedChangedFiles.find(
-    (path) => !contract.scope.allowedPaths.some((pattern) => matchesPattern(path, pattern)),
+    (path) =>
+      !contract.scope.allowedPaths.some((pattern) =>
+        matchesProjectPathPattern(path, pattern),
+      ),
   );
 
   if (outsideAllowed) {
@@ -1083,7 +1086,9 @@ function collectRequestAddressedEvidence(
   }
 
   const scopeEvidence = changedFiles.some((path) =>
-    contract.scope.allowedPaths.some((pattern) => matchesPattern(path, pattern)),
+    contract.scope.allowedPaths.some((pattern) =>
+      matchesProjectPathPattern(path, pattern),
+    ),
   );
 
   if (!scopeEvidence) {
@@ -1460,26 +1465,6 @@ function isPreviewRequired(contract: TaskContract) {
   return ["full_site", "add_page", "component_edit", "style_edit", "copy_edit"].includes(
     contract.taskType,
   );
-}
-
-function matchesPattern(path: string, pattern: string) {
-  const normalizedPattern = normalizeProjectPath(pattern);
-
-  if (normalizedPattern.endsWith("/**")) {
-    const prefix = normalizedPattern.slice(0, -3);
-    return path === prefix || path.startsWith(`${prefix}/`);
-  }
-
-  if (normalizedPattern.endsWith(".*")) {
-    const prefix = normalizedPattern.slice(0, -2);
-    return path === prefix || path.startsWith(`${prefix}.`);
-  }
-
-  return path === normalizedPattern || path.startsWith(`${normalizedPattern}/`);
-}
-
-function normalizeProjectPath(path: string) {
-  return path.replace(/\\/g, "/").replace(/^\.\/+/, "");
 }
 
 function extractDiagnostics(output: string) {

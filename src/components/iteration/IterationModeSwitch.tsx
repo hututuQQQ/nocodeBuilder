@@ -28,6 +28,7 @@ export function IterationModeSwitch() {
   const switchingExecutingSpec = isCancellableSpecExecutionStatus(
     currentSpec?.status ?? null,
   );
+  const switchingVerifyingSpec = currentSpec?.status === "verifying";
   const switchToChatDescription = getSwitchToChatDialogDescription(
     currentSpec?.status ?? null,
   );
@@ -160,7 +161,11 @@ export function IterationModeSwitch() {
         <div className="fixed inset-0 z-30 grid place-items-center bg-black/60 px-4">
           <div className="w-full max-w-[420px] rounded-md border border-zinc-800 bg-zinc-950 p-4 shadow-2xl">
             <DialogTitle onClose={() => setDialog(null)}>
-              {switchingExecutingSpec ? "Cancel Spec and switch to Chat" : "Switch to Chat"}
+              {switchingVerifyingSpec
+                ? "Cancel verification and switch to Chat"
+                : switchingExecutingSpec
+                  ? "Cancel Spec and switch to Chat"
+                  : "Switch to Chat"}
             </DialogTitle>
             <p className="mt-2 text-xs leading-5 text-zinc-500">
               {switchToChatDescription}
@@ -184,7 +189,11 @@ export function IterationModeSwitch() {
                 ) : (
                   <MessageSquare size={15} aria-hidden="true" />
                 )}
-                {switchingExecutingSpec ? "Cancel execution and switch" : "Switch to Chat"}
+                {switchingVerifyingSpec
+                  ? "Cancel verification and switch"
+                  : switchingExecutingSpec
+                    ? "Cancel execution and switch"
+                    : "Switch to Chat"}
               </button>
             </div>
           </div>

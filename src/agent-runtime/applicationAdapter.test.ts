@@ -349,6 +349,7 @@ const {
   generateInitialProjectRuntime,
   modifyCurrentProjectRuntime,
 } = await import("./applicationAdapter");
+const conversationState = await import("../store/conversationState");
 
 describe("Application runtime adapter", () => {
   beforeEach(() => {
@@ -374,6 +375,7 @@ describe("Application runtime adapter", () => {
     fake.verifierInputs = [];
     fake.verifierPorts = [];
     fake.verificationStatuses = [];
+    vi.mocked(conversationState.persistCurrentConversation).mockClear();
   });
 
   it("completes a simple answer through the production adapter", async () => {
@@ -467,6 +469,48 @@ describe("Application runtime adapter", () => {
     expect(fake.toolNames).toEqual(["read_files", "edit_file"]);
     expect(fake.verifierInputs).toHaveLength(2);
     expect(fake.events.map((event) => event.type)).toContain("run.completed");
+  });
+
+  it("does not project stale run results into another conversation", async () => {
+    let store: FakeStore;
+    fake.actions = [
+      () => {
+        store.set({
+          agentEvents: [],
+          currentAgentRun: null,
+          currentConversation: {
+            id: "conversation-2",
+            messages: [],
+            mode: "chat",
+            projectId: "project-1",
+          },
+          currentVerificationReport: null,
+        });
+
+        return {
+          type: "answer",
+          message: "Finished after the user switched conversations.",
+        };
+      },
+    ];
+    fake.verificationStatuses = ["passed"];
+    store = createFakeStore() as unknown as FakeStore;
+
+    const result = await modifyCurrentProjectRuntime(
+      store as never,
+      "Answer after context switch",
+    );
+    const run = [...fake.runs.values()][0];
+
+    expect(result).toBe(true);
+    expect(run.status).toBe("completed");
+    expect(store.get().currentConversation).toMatchObject({
+      id: "conversation-2",
+    });
+    expect(store.get().currentAgentRun).toBeNull();
+    expect(store.get().agentEvents).toEqual([]);
+    expect(store.get().currentVerificationReport).toBeNull();
+    expect(conversationState.persistCurrentConversation).not.toHaveBeenCalled();
   });
 
   it("repairs after failed auto-verification and then completes", async () => {
@@ -1436,6 +1480,11 @@ function hashText(content: string) {
 
   return `${content.length}:${(hash >>> 0).toString(16)}`;
 }
+
+type FakeStore = {
+  get: () => Record<string, unknown>;
+  set: (patch: Record<string, unknown>) => void;
+};
 
 function createFakeStore() {
   let state: Record<string, unknown> = {

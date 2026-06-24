@@ -119,6 +119,84 @@ describe("agent run store actions", () => {
     ]);
   });
 
+  it("reconciles the current Spec after a normal paused-run cancel", async () => {
+    const run = createRun("run-spec-paused", {
+      contract: createSpecContract("modify"),
+      conversationId: "conversation-1",
+      phase: "paused",
+      status: "paused",
+    });
+    fake.runs.set(run.id, run);
+    const continueCurrentSpecExecution = vi.fn(async () => undefined);
+    const store = createStore({
+      continueCurrentSpecExecution,
+      currentAgentRun: run,
+      currentConversation: createSpecConversation(),
+      currentSpec: createSpec({ runId: run.id }),
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await actions.cancelCurrentAgentRun();
+
+    expect(store.get().currentAgentRun?.status).toBe("cancelled");
+    expect(continueCurrentSpecExecution).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not call Spec reconcile when cancelling a chat run", async () => {
+    const run = createRun("run-chat-paused", {
+      phase: "paused",
+      status: "paused",
+    });
+    fake.runs.set(run.id, run);
+    const continueCurrentSpecExecution = vi.fn(async () => undefined);
+    const store = createStore({
+      continueCurrentSpecExecution,
+      currentAgentRun: run,
+      currentConversation: createChatConversation(),
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await actions.cancelCurrentAgentRun();
+
+    expect(store.get().currentAgentRun?.status).toBe("cancelled");
+    expect(continueCurrentSpecExecution).not.toHaveBeenCalled();
+  });
+
+  it("waits for an active Spec cancel before reconciling", async () => {
+    fake.activeController = true;
+    const run = createRun("run-active-spec-cancel", {
+      contract: createSpecContract("modify"),
+      conversationId: "conversation-1",
+      phase: "planning",
+      status: "planning",
+    });
+    fake.runs.set(run.id, run);
+    const continueCurrentSpecExecution = vi.fn(async () => undefined);
+    const store = createStore({
+      continueCurrentSpecExecution,
+      currentAgentRun: run,
+      currentConversation: createSpecConversation(),
+      currentSpec: createSpec({ runId: run.id }),
+    });
+    const actions = createAgentRunActions(store as never);
+
+    const cancelPromise = actions.cancelCurrentAgentRun();
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+
+    expect(continueCurrentSpecExecution).not.toHaveBeenCalled();
+
+    fake.runs.set(run.id, {
+      ...fake.runs.get(run.id)!,
+      completedAt: "2026-01-01T00:01:00.000Z",
+      phase: "cancelled",
+      status: "cancelled",
+    });
+
+    await cancelPromise;
+
+    expect(continueCurrentSpecExecution).toHaveBeenCalledTimes(1);
+  });
+
   it("leaves active cancellation for the running controller", async () => {
     fake.activeController = true;
     const run = createRun("run-active", { status: "planning", phase: "planning" });

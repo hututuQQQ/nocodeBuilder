@@ -6,6 +6,10 @@ import {
 import type { AppState } from "./appStore";
 import { appendLogs } from "./commandLogs";
 import type { StoreAccess } from "./storeAccess";
+import {
+  isWorkspaceNavigationLocked,
+  WORKSPACE_NAVIGATION_LOCK_MESSAGE,
+} from "./workspaceNavigationLock";
 
 type ProjectActions = Pick<
   AppState,
@@ -58,24 +62,17 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
     },
 
     createProject: async (projectName, projectPrompt) => {
+      if (isWorkspaceNavigationLocked(get())) {
+        recordProjectNavigationBlocked(set);
+        return null;
+      }
+
       set({ isCreatingProject: true, projectError: null });
 
       try {
         const project = await projectApi.createProject(projectName);
 
-        set((state) => ({
-          projects: [
-            project,
-            ...state.projects.filter((item) => item.id !== project.id),
-          ],
-          terminalLogs: appendLogs(state.terminalLogs, [
-            `[project] Created ${project.name} at ${project.path}`,
-          ]),
-        }));
-
-        await get().selectProject(project.id, {
-          startDevServer: false,
-        });
+        prepareProjectForInitialSpec({ project, set });
 
         const initialConversation = await get().createInitialSpec(
           project.id,
@@ -84,7 +81,13 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
         );
 
         if (!initialConversation) {
-          await projectApi.deleteUninitializedProject(project.id).catch((error) => {
+          let cleanupSucceeded = false;
+
+          await projectApi.deleteUninitializedProject(project.id).then(
+            () => {
+              cleanupSucceeded = true;
+            },
+            (error) => {
             const cleanupMessage = getProjectErrorMessage(error);
 
             set((state) => ({
@@ -95,22 +98,32 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
                 `[project:error] Failed to clean up ${project.name}: ${cleanupMessage}`,
               ]),
             }));
-          });
+            },
+          );
 
-          set((state) => ({
-            chatMessages: [],
-            conversationSummaries: [],
-            currentConversation: null,
-            currentProject:
-              state.currentProject?.id === project.id ? null : state.currentProject,
-            initialBuildSpec: null,
-            currentSpec: null,
-            historicalSpecs: [],
-            projects: state.projects.filter((item) => item.id !== project.id),
-          }));
+          if (cleanupSucceeded) {
+            set((state) => ({
+              chatMessages: [],
+              conversationSummaries: [],
+              currentAgentApproval: null,
+              currentAgentRun: null,
+              currentConversation: null,
+              currentProject:
+                state.currentProject?.id === project.id ? null : state.currentProject,
+              currentSpec: null,
+              currentVerificationReport: null,
+              historicalSpecs: [],
+              initialBuildSpec: null,
+              projects: state.projects.filter((item) => item.id !== project.id),
+            }));
+          }
 
           return null;
         }
+
+        await get().selectProject(project.id, {
+          startDevServer: false,
+        });
 
         return project;
       } catch (error) {
@@ -239,6 +252,15 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
         return;
       }
 
+      if (isWorkspaceNavigationLocked(get()) && previousProject?.id !== projectId) {
+        recordProjectNavigationBlocked(set);
+        return;
+      }
+
+      if (isWorkspaceNavigationLocked(get()) && previousProject?.id === projectId) {
+        return;
+      }
+
       if (previousProject && previousProject.id !== projectId) {
         await get().stopDevServer(previousProject.id);
       }
@@ -309,4 +331,54 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
       }
     },
   };
+}
+
+function prepareProjectForInitialSpec({
+  project,
+  set,
+}: {
+  project: NonNullable<AppState["currentProject"]>;
+  set: StoreAccess["set"];
+}) {
+  set((state) => ({
+    agentEvents: [],
+    agentRuns: [],
+    chatMessages: [],
+    changeHistory: [],
+    conversationSummaries: [],
+    currentAgentApproval: null,
+    currentAgentRun: null,
+    currentConversation: null,
+    currentProject: project,
+    currentSpec: null,
+    currentVerificationReport: null,
+    devServerStatus: "stopped",
+    fileTree: null,
+    historicalSpecs: [],
+    initialBuildSpec: null,
+    lastDeploymentUrl: null,
+    previewUrl: null,
+    projectError: null,
+    projects: [
+      project,
+      ...state.projects.filter((item) => item.id !== project.id),
+    ],
+    selectedChangeFilePath: null,
+    selectedFileContent: "",
+    selectedFilePath: null,
+    selectedSiteNodeId: null,
+    showArchivedConversations: false,
+    terminalLogs: appendLogs(state.terminalLogs, [
+      `[project] Created ${project.name} at ${project.path}`,
+    ]),
+  }));
+}
+
+function recordProjectNavigationBlocked(set: StoreAccess["set"]) {
+  set((state) => ({
+    projectError: WORKSPACE_NAVIGATION_LOCK_MESSAGE,
+    terminalLogs: appendLogs(state.terminalLogs, [
+      `[project:error] ${WORKSPACE_NAVIGATION_LOCK_MESSAGE}`,
+    ]),
+  }));
 }
