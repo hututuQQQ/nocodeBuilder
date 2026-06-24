@@ -803,6 +803,49 @@ describe("spec store actions", () => {
     expect(store.get().currentSpec?.revisions[0].tasks[0].status).toBe("running");
   });
 
+  it("blocks the Spec when launching a task runtime throws after runId persistence", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1"),
+        createExecutableTask("task-2", {
+          dependencyIds: ["task-1"],
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "review",
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: spec.id,
+        conversationId: spec.conversationId,
+        mode: "spec",
+        specIds: [spec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: spec,
+    });
+    fake.runSpecTaskRuntime.mockRejectedValue(new Error("runtime crashed"));
+    const actions = createSpecActions(store as never);
+
+    await actions.approveAndExecuteCurrentSpec();
+
+    const currentTasks = store.get().currentSpec?.revisions[0].tasks ?? [];
+    expect(store.get().currentSpec?.status).toBe("blocked");
+    expect(store.get().currentSpec?.failureMessage).toBe("Task Task task-1 failed.");
+    expect(currentTasks[0]).toMatchObject({
+      error: "runtime crashed",
+      runId: expect.stringMatching(/^run-/),
+      status: "failed",
+    });
+    expect(currentTasks[1]).toMatchObject({
+      blockedByTaskId: "task-1",
+      status: "blocked",
+    });
+  });
+
   it("continues execution from an approved Spec after reload", async () => {
     const revision = createExecutableRevision({
       approvedAt: "2026-01-01T00:00:01.000Z",

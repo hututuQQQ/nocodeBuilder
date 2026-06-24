@@ -944,7 +944,27 @@ async function executeSpecTasks(store: StoreAccess, specId: string) {
       runId,
       store,
       taskObjective: runningTask.objective,
+    }).catch(async (error: unknown) => {
+      const message = getProjectErrorMessage(error);
+      const failedTaskSpec = updateTask(store.get().currentSpec ?? runningSpec, task.id, {
+        error: message,
+        runId,
+        status: "failed",
+      });
+      await saveSpecToStore(
+        store,
+        markSpecBlocked(
+          markBlockedDownstreamTasks(failedTaskSpec, task.id),
+          `Task ${task.title} failed.`,
+        ),
+      );
+      return null;
     });
+
+    if (!result) {
+      return;
+    }
+
     const run = result.run;
     const report = result.verificationReport;
 
