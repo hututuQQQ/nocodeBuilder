@@ -251,7 +251,7 @@ export function validateDevelopmentSpec(value: unknown): DevelopmentSpec {
   validateSpecTaskStateConsistency(
     status as DevelopmentSpec["status"],
     currentRevision,
-    spec.finalVerification !== undefined,
+    isFinalBuildOrInstallCommand(spec.finalVerification?.command),
   );
 
   return value as DevelopmentSpec;
@@ -648,7 +648,7 @@ function validatePersistedTask(value: unknown): SpecTask {
 function validateSpecTaskStateConsistency(
   status: DevelopmentSpec["status"],
   currentRevision: SpecRevision,
-  hasFinalVerification: boolean,
+  requiresFinalVerificationTaskEvidence: boolean,
 ) {
   const taskMissingPassedRun = currentRevision.tasks.find(
     (task) => task.status !== "passed" || !task.runId,
@@ -683,7 +683,11 @@ function validateSpecTaskStateConsistency(
     );
   }
 
-  if (status === "blocked" && hasFinalVerification && taskMissingPassedRun) {
+  if (
+    status === "blocked" &&
+    requiresFinalVerificationTaskEvidence &&
+    taskMissingPassedRun
+  ) {
     throw new Error(
       "Blocked Spec finalVerification requires all current revision tasks to be passed with runId.",
     );
@@ -704,12 +708,15 @@ function isSuccessfulFinalBuildCommand(command: unknown) {
   );
 }
 
+function isFinalBuildOrInstallCommand(command: unknown) {
+  return command === "npm install" || isSuccessfulFinalBuildCommand(command);
+}
+
 function isSupportedFailedFinalVerificationCommand(command: unknown) {
   return (
     command === "acceptance criteria" ||
     command === "task verification reports" ||
-    command === "npm install" ||
-    isSuccessfulFinalBuildCommand(command)
+    isFinalBuildOrInstallCommand(command)
   );
 }
 

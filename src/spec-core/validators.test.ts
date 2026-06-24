@@ -380,6 +380,29 @@ describe("Spec validators", () => {
       }),
     ).toThrow(/blocked spec finalVerification requires all current revision tasks/i);
 
+    expect(
+      validateDevelopmentSpec({
+        ...createSpec({
+          approvedAt: "2026-06-24T00:01:00Z",
+          tasks: [
+            {
+              ...createGeneratedPayload().tasks[0],
+              error: "Verification report for AgentRun run-1 did not pass.",
+              runId: "run-1",
+              status: "failed",
+            },
+          ],
+        }),
+        failureMessage: "Task verification reports are not all passing: task-1.",
+        finalVerification: {
+          ...finalVerification,
+          command: "task verification reports",
+          output: "Task verification reports are not all passing: task-1.",
+        },
+        status: "blocked",
+      }),
+    ).toBeDefined();
+
     expect(() =>
       validateDevelopmentSpec({
         ...createSpec({
