@@ -801,6 +801,13 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
             if (latestRun?.status !== "cancelled") {
               throw new Error("AgentRun cancellation did not reach cancelled state.");
             }
+
+            if (
+              latestRun.id !== runForCancellation.id ||
+              !isRunForSpec(latestRun, spec)
+            ) {
+              throw new Error("Cancelled AgentRun does not belong to the current Spec task.");
+            }
           }
 
           nextSpec = cancelRunningTasks(spec);

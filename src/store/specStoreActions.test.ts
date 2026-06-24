@@ -2165,6 +2165,52 @@ describe("spec store actions", () => {
     );
   });
 
+  it("keeps Spec mode when cancellation returns a stale cancelled run", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-active",
+          status: "running",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    const store = createStore({
+      cancelCurrentAgentRunAndWait: vi.fn(async () =>
+        createRun("run-stale", {
+          contract: createSpecRunContract(spec, revision.tasks[0]),
+          status: "cancelled",
+        }),
+      ),
+      currentAgentRun: createRun("run-active", {
+        contract: createSpecRunContract(spec, revision.tasks[0]),
+      }),
+      currentConversation: createConversation("project-1", {
+        activeSpecId: spec.id,
+        conversationId: spec.conversationId,
+        mode: "spec",
+        specIds: [spec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.switchCurrentIterationToChat({ cancelActiveSpec: true });
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(fake.switchProjectConversationMode).not.toHaveBeenCalled();
+    expect(store.get().currentConversation?.mode).toBe("spec");
+    expect(store.get().currentSpec?.status).toBe("building");
+    expect(store.get().projectError).toBe(
+      "Cancelled AgentRun does not belong to the current Spec task.",
+    );
+  });
+
   it("does not switch to Chat while a Spec revision is in progress", async () => {
     const spec = createSpec({
       status: "revising",
