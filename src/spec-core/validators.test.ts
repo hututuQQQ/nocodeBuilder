@@ -239,6 +239,27 @@ describe("Spec validators", () => {
         status: "completed",
       }),
     ).toThrow(/finalVerification/i);
+
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createCompletedSpec(),
+        failureMessage: "Final npm run build failed.",
+      }),
+    ).toThrow(/cannot include failureMessage/i);
+
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec(),
+        failureMessage: "Spec is blocked.",
+        finalVerification: {
+          checkedAt: "2026-06-24T00:01:00Z",
+          command: "npm run build",
+          output: "ok",
+          success: true,
+        },
+        status: "blocked",
+      }),
+    ).toThrow(/successful finalVerification/i);
   });
 
   it("requires completed specs to have passed task run evidence", () => {

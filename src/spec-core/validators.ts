@@ -150,6 +150,14 @@ export function validateDevelopmentSpec(value: unknown): DevelopmentSpec {
     throw new Error("Completed Spec requires completedAt and successful finalVerification.");
   }
 
+  if (spec.status === "completed" && spec.failureMessage !== undefined) {
+    throw new Error("Completed Spec cannot include failureMessage.");
+  }
+
+  if (spec.status !== "completed" && spec.finalVerification?.success === true) {
+    throw new Error("Successful finalVerification is only valid for completed Specs.");
+  }
+
   const revisions = readArray(spec.revisions, "Spec revisions");
 
   if (revisions.length === 0) {
