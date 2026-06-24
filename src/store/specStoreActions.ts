@@ -1573,6 +1573,7 @@ function restoreRetryableTaskGraph(
   taskId: string,
 ): SpecRevision {
   const restoreIds = new Set([taskId]);
+  const tasksById = new Map(revision.tasks.map((task) => [task.id, task]));
   let changed = true;
 
   while (changed) {
@@ -1583,6 +1584,7 @@ function restoreRetryableTaskGraph(
         task.status === "blocked" &&
         task.blockedByTaskId &&
         restoreIds.has(task.blockedByTaskId) &&
+        canRestoreBlockedTask(task, tasksById, restoreIds) &&
         !restoreIds.has(task.id)
       ) {
         restoreIds.add(task.id);
@@ -1617,6 +1619,26 @@ function restoreRetryableTaskGraph(
       return task;
     }),
   };
+}
+
+function canRestoreBlockedTask(
+  task: SpecTask,
+  tasksById: Map<string, SpecTask>,
+  restoreIds: Set<string>,
+) {
+  return task.dependencyIds.every((dependencyId) => {
+    if (restoreIds.has(dependencyId)) {
+      return true;
+    }
+
+    const dependency = tasksById.get(dependencyId);
+
+    if (!dependency) {
+      return false;
+    }
+
+    return !["failed", "cancelled", "blocked"].includes(dependency.status);
+  });
 }
 
 function markBlockedDownstreamTasks(

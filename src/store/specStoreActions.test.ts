@@ -2807,6 +2807,12 @@ describe("spec store actions", () => {
           error: "unrelated block",
           status: "blocked",
         }),
+        createTask("task-7", {
+          blockedByTaskId: "task-2",
+          dependencyIds: ["task-2", "task-5"],
+          error: "blocked by two failed chains",
+          status: "blocked",
+        }),
       ],
     });
 
@@ -2832,6 +2838,10 @@ describe("spec store actions", () => {
     });
     expect(taskById.get("task-6")).toMatchObject({
       blockedByTaskId: "task-5",
+      status: "blocked",
+    });
+    expect(taskById.get("task-7")).toMatchObject({
+      blockedByTaskId: "task-2",
       status: "blocked",
     });
   });
