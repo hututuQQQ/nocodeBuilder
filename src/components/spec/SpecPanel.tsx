@@ -172,7 +172,12 @@ export function SpecPanel({
           <EmptySpec />
         ) : (
           <div className="mx-auto max-w-5xl space-y-4">
-            <SpecSummary spec={currentSpec} revision={revision} />
+            <SpecSummary
+              busy={busy}
+              onRetryTask={(taskId) => void retrySpecTask(taskId)}
+              revision={revision}
+              spec={currentSpec}
+            />
             <SpecStepper status={currentSpec.status} />
             <RequirementsView revision={revision} />
             <DesignView revision={revision} />
@@ -207,12 +212,21 @@ export function SpecPanel({
 }
 
 function SpecSummary({
+  busy,
+  onRetryTask,
   revision,
   spec,
 }: {
+  busy: boolean;
+  onRetryTask: (taskId: string) => void;
   revision: SpecRevision;
   spec: DevelopmentSpec;
 }) {
+  const retryableTask =
+    spec.status === "blocked" ? findFirstRetryableSpecTask(revision.tasks) : null;
+  const retryLabel =
+    spec.kind === "initial_build" ? "Retry initial build" : "Retry task";
+
   return (
     <section className="rounded-md border border-zinc-800 bg-zinc-950/70 p-4">
       <div className="flex min-w-0 items-start gap-3">
@@ -233,9 +247,28 @@ function SpecSummary({
             {revision.brief}
           </p>
           {spec.failureMessage ? (
-            <p className="mt-2 rounded border border-red-400/30 bg-red-400/10 px-3 py-2 text-xs leading-5 text-red-200">
-              {spec.failureMessage}
-            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-2 rounded border border-red-400/30 bg-red-400/10 px-3 py-2">
+              <p className="min-w-0 flex-1 text-xs leading-5 text-red-200">
+                {spec.failureMessage}
+              </p>
+              {retryableTask ? (
+                <button
+                  aria-label={`Retry ${retryableTask.title}`}
+                  className="flex h-8 shrink-0 items-center gap-2 rounded-md border border-blue-400/30 bg-blue-400/10 px-3 text-xs font-medium text-blue-100 transition hover:border-blue-300/60 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
+                  disabled={busy}
+                  onClick={() => onRetryTask(retryableTask.id)}
+                  title={`Retry ${retryableTask.title}`}
+                  type="button"
+                >
+                  {busy ? (
+                    <Loader2 size={13} className="animate-spin" aria-hidden="true" />
+                  ) : (
+                    <RefreshCcw size={13} aria-hidden="true" />
+                  )}
+                  {retryLabel}
+                </button>
+              ) : null}
+            </div>
           ) : null}
         </div>
       </div>
@@ -626,6 +659,14 @@ export function canShowSpecTaskRetry(
         candidate.id === dependencyId && candidate.status === "passed",
     ),
   );
+}
+
+export function findFirstRetryableSpecTask<
+  T extends Pick<SpecTask, "dependencyIds" | "id" | "status">,
+>(
+  tasks: T[],
+): T | null {
+  return tasks.find((task) => canShowSpecTaskRetry(task, tasks)) ?? null;
 }
 
 function SpecHistory({

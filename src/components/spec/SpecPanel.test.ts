@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   canShowSpecTaskRetry,
+  findFirstRetryableSpecTask,
   formatAcceptanceEvidenceLabels,
   getAcceptanceStatusSymbol,
 } from "./SpecPanel";
@@ -62,5 +63,42 @@ describe("SpecPanel acceptance criteria projection", () => {
         [passedDependency],
       ),
     ).toBe(false);
+  });
+
+  it("finds the failed Initial Build task for the blocked-state retry action", () => {
+    const failedTask = {
+      dependencyIds: [],
+      id: "task-1",
+      status: "failed" as const,
+      title: "Initialize Next.js project with dependencies",
+    };
+    const blockedTask = {
+      blockedByTaskId: "task-1",
+      dependencyIds: ["task-1"],
+      id: "task-2",
+      status: "blocked" as const,
+      title: "Build homepage",
+    };
+
+    expect(findFirstRetryableSpecTask([failedTask, blockedTask])).toBe(
+      failedTask,
+    );
+  });
+
+  it("skips dependency-blocked tasks when picking a blocked-state retry target", () => {
+    const failedDependency = {
+      dependencyIds: [],
+      id: "task-1",
+      status: "failed" as const,
+    };
+    const blockedTask = {
+      dependencyIds: ["task-1"],
+      id: "task-2",
+      status: "blocked" as const,
+    };
+
+    expect(findFirstRetryableSpecTask([blockedTask, failedDependency])).toBe(
+      failedDependency,
+    );
   });
 });
