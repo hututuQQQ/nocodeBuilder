@@ -2367,6 +2367,41 @@ describe("spec store actions", () => {
     expect(store.get().currentSpec?.status).toBe("review");
   });
 
+  it("does not approve while another Spec workflow action is busy", async () => {
+    for (const busyFlag of [
+      "isGeneratingSpec",
+      "isVerifyingSpec",
+      "isSwitchingIterationMode",
+    ] as const) {
+      fake.saveSpec.mockClear();
+      fake.runSpecTaskRuntime.mockClear();
+      const revision = createExecutableRevision();
+      const spec = createSpec({
+        currentRevisionId: revision.id,
+        revisions: [revision],
+        status: "review",
+      });
+      const store = createStore({
+        currentConversation: createConversation("project-1", {
+          activeSpecId: spec.id,
+          conversationId: spec.conversationId,
+          mode: "spec",
+          specIds: [spec.id],
+          title: "Spec iteration",
+        }),
+        currentSpec: spec,
+        [busyFlag]: true,
+      });
+      const actions = createSpecActions(store as never);
+
+      await actions.approveAndExecuteCurrentSpec();
+
+      expect(fake.saveSpec).not.toHaveBeenCalled();
+      expect(fake.runSpecTaskRuntime).not.toHaveBeenCalled();
+      expect(store.get().currentSpec?.status).toBe("review");
+    }
+  });
+
   it("does not approve a stale Spec from another conversation", async () => {
     const revision = createExecutableRevision();
     const staleSpec = createSpec({
@@ -2423,6 +2458,42 @@ describe("spec store actions", () => {
     expect(fake.saveSpec).not.toHaveBeenCalled();
     expect(fake.requestSpecRevision).not.toHaveBeenCalled();
     expect(store.get().currentSpec?.status).toBe("review");
+  });
+
+  it("does not request a revision while another Spec workflow action is busy", async () => {
+    for (const busyFlag of [
+      "isExecutingSpec",
+      "isGeneratingSpec",
+      "isVerifyingSpec",
+      "isSwitchingIterationMode",
+    ] as const) {
+      fake.saveSpec.mockClear();
+      fake.requestSpecRevision.mockClear();
+      const revision = createExecutableRevision();
+      const spec = createSpec({
+        currentRevisionId: revision.id,
+        revisions: [revision],
+        status: "review",
+      });
+      const store = createStore({
+        currentConversation: createConversation("project-1", {
+          activeSpecId: spec.id,
+          conversationId: spec.conversationId,
+          mode: "spec",
+          specIds: [spec.id],
+          title: "Spec iteration",
+        }),
+        currentSpec: spec,
+        [busyFlag]: true,
+      });
+      const actions = createSpecActions(store as never);
+
+      await actions.reviseCurrentSpec("Tighten the requirements");
+
+      expect(fake.saveSpec).not.toHaveBeenCalled();
+      expect(fake.requestSpecRevision).not.toHaveBeenCalled();
+      expect(store.get().currentSpec?.status).toBe("review");
+    }
   });
 
   it("does not request a revision for a stale Spec from another conversation", async () => {

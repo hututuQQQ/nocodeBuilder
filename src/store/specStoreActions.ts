@@ -421,7 +421,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         conversation.mode !== "spec" ||
         conversation.activeSpecId !== spec.id ||
         spec.status !== "review" ||
-        get().isRevisingSpec ||
+        isSpecWorkflowBusy(get()) ||
         !message
       ) {
         return;
@@ -500,8 +500,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         !spec ||
         conversation.mode !== "spec" ||
         conversation.activeSpecId !== spec.id ||
-        get().isExecutingSpec ||
-        get().isRevisingSpec
+        isSpecWorkflowBusy(get())
       ) {
         return;
       }
