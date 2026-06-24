@@ -1477,6 +1477,96 @@ describe("spec store actions", () => {
     expect(runProjectCommand).toHaveBeenCalledTimes(1);
   });
 
+  it("persists final npm install thrown errors as verification evidence", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-1",
+          status: "passed",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      kind: "feature",
+      revisions: [revision],
+      status: "verifying",
+    });
+    fake.agentRuns.set("run-1", createRun("run-1", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "completed",
+      status: "completed",
+    }));
+    fake.verificationReports.set("run-1", createVerificationReport("run-1", "passed"));
+    fake.checkpoints.set("run-1", {
+      packageChanged: true,
+    });
+    const runProjectCommand = vi.fn(async () => {
+      throw new Error("install process crashed");
+    });
+    const store = createStore({
+      currentSpec: spec,
+      runProjectCommand,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    expect(store.get().currentSpec?.status).toBe("blocked");
+    expect(store.get().currentSpec?.failureMessage).toContain(
+      "install process crashed",
+    );
+    expect(store.get().currentSpec?.finalVerification).toMatchObject({
+      command: "npm install",
+      output: "install process crashed",
+      success: false,
+    });
+    expect(runProjectCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists final build thrown errors as verification evidence", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-1",
+          status: "passed",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "verifying",
+    });
+    fake.agentRuns.set("run-1", createRun("run-1", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "completed",
+      status: "completed",
+    }));
+    fake.verificationReports.set("run-1", createVerificationReport("run-1", "passed"));
+    const runProjectCommand = vi.fn(async () => {
+      throw new Error("build process crashed");
+    });
+    const store = createStore({
+      currentSpec: spec,
+      runProjectCommand,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    expect(store.get().currentSpec?.status).toBe("blocked");
+    expect(store.get().currentSpec?.failureMessage).toContain(
+      "build process crashed",
+    );
+    expect(store.get().currentSpec?.finalVerification).toMatchObject({
+      command: "npm run build",
+      output: "build process crashed",
+      success: false,
+    });
+    expect(runProjectCommand).toHaveBeenCalledWith("project-1", "npm run build");
+  });
+
   it("persists fallback evidence when final build succeeds without output", async () => {
     const revision = createExecutableRevision({
       tasks: [

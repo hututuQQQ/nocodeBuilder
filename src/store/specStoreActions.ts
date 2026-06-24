@@ -1208,7 +1208,7 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
     spec.kind === "initial_build" ||
     (await didSpecChangePackageJson(project.id, revision.tasks));
   const installResult = installRequired
-    ? await store.get().runProjectCommand(project.id, "npm install")
+    ? await runFinalProjectCommand(store, project.id, "npm install")
     : null;
 
   if (installResult && !installResult.success) {
@@ -1223,7 +1223,11 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
     return;
   }
 
-  const buildResult = await store.get().runProjectCommand(project.id, "npm run build");
+  const buildResult = await runFinalProjectCommand(
+    store,
+    project.id,
+    "npm run build",
+  );
 
   if (!buildResult?.success) {
     const output = normalizeFinalVerificationOutput(buildResult?.output);
@@ -1260,6 +1264,28 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
       "completed",
     ),
   );
+}
+
+async function runFinalProjectCommand(
+  store: StoreAccess,
+  projectId: string,
+  command: string,
+): Promise<Awaited<ReturnType<AppState["runProjectCommand"]>>> {
+  try {
+    return await store.get().runProjectCommand(projectId, command);
+  } catch (error) {
+    const now = new Date().toISOString();
+
+    return {
+      command,
+      exitCode: null,
+      finishedAt: now,
+      output: getProjectErrorMessage(error),
+      projectId,
+      startedAt: now,
+      success: false,
+    };
+  }
 }
 
 async function saveSpecToStore(store: StoreAccess, spec: DevelopmentSpec) {
