@@ -601,9 +601,15 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
       set({ isVerifyingSpec: true, projectError: null });
 
       try {
+        const retryBase = {
+          ...spec,
+          failureMessage: undefined,
+          finalVerification: undefined,
+        };
+
         await verifyCompletedTasks(
           store,
-          transitionSpecStatus(spec, "verifying"),
+          transitionSpecStatus(retryBase, "verifying"),
         );
       } catch (error) {
         recordSpecError(set, error);

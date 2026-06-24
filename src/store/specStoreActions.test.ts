@@ -1225,6 +1225,7 @@ describe("spec store actions", () => {
       command: "npm run build",
       success: true,
     });
+    expect(store.get().currentSpec?.failureMessage).toBeUndefined();
     expect(store.get().runProjectCommand).toHaveBeenCalledWith(
       "project-1",
       "npm run build",
@@ -1263,6 +1264,7 @@ describe("spec store actions", () => {
       command: "npm run build",
       success: true,
     });
+    expect(store.get().currentSpec?.failureMessage).toBeUndefined();
     expect(store.get().runProjectCommand).toHaveBeenCalledWith(
       "project-1",
       "npm run build",
