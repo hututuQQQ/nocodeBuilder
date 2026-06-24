@@ -52,7 +52,13 @@ export function transitionSpecStatus(
     failureMessage:
       nextStatus === "failed" || nextStatus === "blocked"
         ? options.failureMessage ?? spec.failureMessage ?? "Spec failed."
-        : spec.failureMessage,
+        : nextStatus === "cancelled"
+          ? spec.failureMessage
+          : undefined,
+    finalVerification:
+      nextStatus === "completed" || nextStatus === "blocked"
+        ? spec.finalVerification
+        : undefined,
     status: nextStatus,
     updatedAt: now,
   };

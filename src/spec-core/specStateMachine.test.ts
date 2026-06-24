@@ -24,7 +24,30 @@ describe("specStateMachine", () => {
 
     expect(blocked.status).toBe("blocked");
     expect(blocked.failureMessage).toBe("Task failed.");
-    expect(transitionSpecStatus(blocked, "building").status).toBe("building");
+
+    const retrying = transitionSpecStatus(blocked, "building");
+    expect(retrying.status).toBe("building");
+    expect(retrying.failureMessage).toBeUndefined();
+  });
+
+  it("clears stale final verification evidence when retrying verification", () => {
+    const blocked = {
+      ...createSpec(),
+      failureMessage: "Final npm run build failed.",
+      finalVerification: {
+        checkedAt: "2026-01-01T00:01:00.000Z",
+        command: "npm run build",
+        output: "build failed",
+        success: false,
+      },
+      status: "blocked" as const,
+    };
+
+    const retrying = transitionSpecStatus(blocked, "verifying");
+
+    expect(retrying.status).toBe("verifying");
+    expect(retrying.failureMessage).toBeUndefined();
+    expect(retrying.finalVerification).toBeUndefined();
   });
 
   it("does not allow terminal failed specs to be revived", () => {
