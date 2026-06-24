@@ -36,20 +36,23 @@ export function getIterationModeSwitchControlState({
   const nonCancellableBusy =
     flags.isGeneratingSpec ||
     flags.isRevisingSpec ||
+    flags.isVerifyingSpec ||
     flags.isSwitchingIterationMode;
   const canOpenCancelSwitch =
-    currentMode === "spec" && isSpecExecutionStatus(specStatus);
-  const executionBusy = flags.isExecutingSpec || flags.isVerifyingSpec;
+    currentMode === "spec" && isCancellableSpecExecutionStatus(specStatus);
+  const executionBusy = flags.isExecutingSpec;
+  const verifyingLocked = specStatus === "verifying";
 
   return {
     anyBusy,
     chatButtonDisabled:
       currentMode === "chat" ||
       nonCancellableBusy ||
+      verifyingLocked ||
       (executionBusy && !canOpenCancelSwitch),
     generateSpecDisabled: anyBusy,
     specButtonDisabled: currentMode === "spec" || anyBusy,
-    switchToChatDisabled: nonCancellableBusy,
+    switchToChatDisabled: nonCancellableBusy || verifyingLocked,
   };
 }
 
@@ -57,7 +60,15 @@ export function isSpecExecutionStatus(status: string | null) {
   return status === "approved" || status === "building" || status === "verifying";
 }
 
+export function isCancellableSpecExecutionStatus(status: string | null) {
+  return status === "approved" || status === "building";
+}
+
 export function getSwitchToChatDialogDescription(specStatus: string | null) {
+  if (specStatus === "verifying") {
+    return "Final verification is running. Wait for the result before switching modes.";
+  }
+
   if (isSpecExecutionStatus(specStatus)) {
     return "The current AgentRun will be cancelled. Files already written will not be rolled back.";
   }

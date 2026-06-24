@@ -23,7 +23,7 @@ describe("iteration mode switch state", () => {
     expect(state.specButtonDisabled).toBe(true);
   });
 
-  it("allows the same cancel-and-switch entrypoint while final verification is active", () => {
+  it("blocks the cancel-and-switch entrypoint while final verification is active", () => {
     const state = getIterationModeSwitchControlState({
       currentMode: "spec",
       flags: {
@@ -36,8 +36,25 @@ describe("iteration mode switch state", () => {
       specStatus: "verifying",
     });
 
-    expect(state.chatButtonDisabled).toBe(false);
-    expect(state.switchToChatDisabled).toBe(false);
+    expect(state.chatButtonDisabled).toBe(true);
+    expect(state.switchToChatDisabled).toBe(true);
+  });
+
+  it("keeps a persisted verifying Spec locked even when no verification flag is set", () => {
+    const state = getIterationModeSwitchControlState({
+      currentMode: "spec",
+      flags: {
+        isExecutingSpec: false,
+        isGeneratingSpec: false,
+        isRevisingSpec: false,
+        isSwitchingIterationMode: false,
+        isVerifyingSpec: false,
+      },
+      specStatus: "verifying",
+    });
+
+    expect(state.chatButtonDisabled).toBe(true);
+    expect(state.switchToChatDisabled).toBe(true);
   });
 
   it("blocks mode changes during revision, generation, and an in-flight mode switch", () => {
@@ -76,6 +93,9 @@ describe("iteration mode switch state", () => {
   it("describes execution and review Spec switches distinctly", () => {
     expect(getSwitchToChatDialogDescription("building")).toBe(
       "The current AgentRun will be cancelled. Files already written will not be rolled back.",
+    );
+    expect(getSwitchToChatDialogDescription("verifying")).toBe(
+      "Final verification is running. Wait for the result before switching modes.",
     );
     expect(getSwitchToChatDialogDescription("review")).toBe(
       "The current unexecuted Spec will be cancelled and kept in history.",

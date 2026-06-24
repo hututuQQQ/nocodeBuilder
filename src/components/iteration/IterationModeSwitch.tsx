@@ -4,6 +4,7 @@ import { useAppStore } from "../../store/appStore";
 import {
   getIterationModeSwitchControlState,
   getSwitchToChatDialogDescription,
+  isCancellableSpecExecutionStatus,
 } from "./iterationModeSwitchState";
 
 export function IterationModeSwitch() {
@@ -24,7 +25,9 @@ export function IterationModeSwitch() {
   const switchCurrentIterationToSpec = useAppStore(
     (state) => state.switchCurrentIterationToSpec,
   );
-  const switchingExecutingSpec = isExecutingSpec(currentSpec);
+  const switchingExecutingSpec = isCancellableSpecExecutionStatus(
+    currentSpec?.status ?? null,
+  );
   const switchToChatDescription = getSwitchToChatDialogDescription(
     currentSpec?.status ?? null,
   );
@@ -210,11 +213,5 @@ function DialogTitle({
         <X size={15} aria-hidden="true" />
       </button>
     </div>
-  );
-}
-
-function isExecutingSpec(spec: { status: string } | null) {
-  return Boolean(
-    spec && ["approved", "building", "verifying"].includes(spec.status),
   );
 }
