@@ -989,7 +989,7 @@ async function executeSpecTasks(store: StoreAccess, specId: string) {
         report?.repairFeedback.join("\n") ||
         report?.missingEvidence.join("\n") ||
         `AgentRun ended without a passed verification report.`,
-      runId: run?.id,
+      runId: run?.id ?? runId,
       status: run?.status === "cancelled" ? "cancelled" : "failed",
     });
     if (run?.status === "cancelled") {
