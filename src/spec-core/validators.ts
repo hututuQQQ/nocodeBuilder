@@ -644,6 +644,13 @@ function validateSpecTaskStateConsistency(
     (task) => task.status !== "passed" || !task.runId,
   );
 
+  if (
+    status === "approved" &&
+    currentRevision.tasks.some((task) => task.status !== "pending")
+  ) {
+    throw new Error("Approved Spec cannot include non-pending tasks.");
+  }
+
   if ((status === "completed" || status === "verifying") && taskMissingPassedRun) {
     throw new Error(
       `${formatSpecStatus(status)} Spec requires all current revision tasks to be passed with runId.`,

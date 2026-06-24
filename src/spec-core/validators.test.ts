@@ -404,6 +404,22 @@ describe("Spec validators", () => {
       ),
     ).toThrow(/cannot include approvedAt/i);
 
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec({
+          approvedAt: "2026-06-24T00:01:00Z",
+          tasks: [
+            {
+              ...createGeneratedPayload().tasks[0],
+              runId: "run-1",
+              status: "passed",
+            },
+          ],
+        }),
+        status: "approved",
+      }),
+    ).toThrow(/approved spec cannot include non-pending tasks/i);
+
     expect(
       validateDevelopmentSpec({
         ...createSpec({
