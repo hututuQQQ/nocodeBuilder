@@ -18,6 +18,7 @@ import {
 import { useAppStore } from "../../store/appStore";
 import type {
   DevelopmentSpec,
+  SpecAcceptanceResult,
   SpecRevision,
   SpecTask,
 } from "../../spec-core/types";
@@ -563,10 +564,10 @@ function BuildView({
                     <StatusPill status={result.status} />
                   </div>
                   <p className="mt-1 text-[11px] leading-4 text-zinc-500">
-                    Tasks: {result.taskIds.join(", ") || "none"}
+                    {formatAcceptanceEvidenceLabels(result).tasks}
                   </p>
                   <p className="mt-1 text-[11px] leading-4 text-zinc-500">
-                    Runs: {result.runIds.join(", ") || "none"}
+                    {formatAcceptanceEvidenceLabels(result).runs}
                   </p>
                   {result.summary ? (
                     <p className="mt-2 whitespace-pre-wrap rounded border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-[11px] leading-4 text-zinc-400">
@@ -596,6 +597,15 @@ export function getAcceptanceStatusSymbol(
   }
 
   return "○";
+}
+
+export function formatAcceptanceEvidenceLabels(
+  result: Pick<SpecAcceptanceResult, "runIds" | "taskIds">,
+) {
+  return {
+    runs: `Runs: ${result.runIds.join(", ") || "none"}`,
+    tasks: `Tasks: ${result.taskIds.join(", ") || "none"}`,
+  };
 }
 
 function SpecHistory({
