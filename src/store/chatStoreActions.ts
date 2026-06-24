@@ -50,6 +50,17 @@ export function createChatActions({ get, set }: StoreAccess): ChatActions {
           return;
         }
 
+        if (isSpecMessageBlockedByWorkflow(get())) {
+          set((state) => ({
+            projectError:
+              "Wait for the active Spec operation to finish before sending messages.",
+            terminalLogs: appendLogs(state.terminalLogs, [
+              "[spec] Message blocked while a Spec operation is in progress.",
+            ]),
+          }));
+          return;
+        }
+
         await handleSpecConversationMessage(store, message);
         return;
       }
@@ -181,6 +192,14 @@ function isTerminalRun(run: AppState["currentAgentRun"]) {
   return (
     !run ||
     ["completed", "failed", "cancelled", "budget_exceeded"].includes(run.status)
+  );
+}
+
+function isSpecMessageBlockedByWorkflow(state: AppState) {
+  return Boolean(
+    state.isGeneratingSpec ||
+      state.isVerifyingSpec ||
+      state.isSwitchingIterationMode,
   );
 }
 

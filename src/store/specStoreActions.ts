@@ -734,8 +734,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         !conversation ||
         conversation.kind !== "iteration" ||
         conversation.mode !== "spec" ||
-        !spec ||
-        get().isSwitchingIterationMode
+        !spec
       ) {
         return;
       }
@@ -750,6 +749,14 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
       if (spec.status === "revising" || get().isRevisingSpec) {
         set({
           projectError: "Wait for the Spec revision to finish before switching modes.",
+        });
+        return;
+      }
+
+      if (isNonCancellableSpecModeSwitchBusy(get())) {
+        set({
+          projectError:
+            "Wait for the active Spec operation to finish before switching modes.",
         });
         return;
       }
@@ -1826,6 +1833,13 @@ function isSpecWorkflowBusy(state: AppState) {
       state.isRevisingSpec ||
       state.isExecutingSpec ||
       state.isVerifyingSpec ||
+      state.isSwitchingIterationMode,
+  );
+}
+
+function isNonCancellableSpecModeSwitchBusy(state: AppState) {
+  return Boolean(
+    state.isGeneratingSpec ||
       state.isSwitchingIterationMode,
   );
 }

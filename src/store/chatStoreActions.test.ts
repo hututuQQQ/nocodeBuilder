@@ -54,6 +54,37 @@ describe("chat store actions", () => {
     );
   });
 
+  it("blocks Spec messages while a non-steering Spec operation is busy", async () => {
+    for (const busyFlag of [
+      "isGeneratingSpec",
+      "isVerifyingSpec",
+      "isSwitchingIterationMode",
+    ] as const) {
+      const conversation = createConversation({
+        activeSpecId: "spec-1",
+        mode: "spec",
+        specIds: ["spec-1"],
+      });
+      const store = createStore({
+        currentConversation: conversation,
+        currentSpec: createReviewSpec(),
+        [busyFlag]: true,
+      });
+      const actions = createChatActions(store as never);
+
+      await actions.sendMessage("Please change the requirements");
+
+      expect(store.get().chatMessages).toEqual([]);
+      expect(store.get().currentConversation?.messages).toEqual([]);
+      expect(store.get().projectError).toBe(
+        "Wait for the active Spec operation to finish before sending messages.",
+      );
+      expect(store.get().terminalLogs).toContain(
+        "[spec] Message blocked while a Spec operation is in progress.",
+      );
+    }
+  });
+
   it("keeps review Spec messages in Spec guidance without modifying the project", async () => {
     const store = createStore({
       currentConversation: createConversation({
@@ -158,9 +189,12 @@ function createStore(patch: Partial<StoreState> = {}) {
       updatedAt: "2026-01-01T00:00:00.000Z",
     },
     currentSpec: null,
+    isGeneratingSpec: false,
     isGeneratingProject: false,
     isModifyingProject: false,
     isRevisingSpec: false,
+    isSwitchingIterationMode: false,
+    isVerifyingSpec: false,
     projectError: null,
     sendAgentSteering: vi.fn(async () => undefined),
     terminalLogs: [],
@@ -230,9 +264,12 @@ type StoreState = {
     updatedAt: string;
   } | null;
   currentSpec: DevelopmentSpec | null;
+  isGeneratingSpec: boolean;
   isGeneratingProject: boolean;
   isModifyingProject: boolean;
   isRevisingSpec: boolean;
+  isSwitchingIterationMode: boolean;
+  isVerifyingSpec: boolean;
   projectError: string | null;
   sendAgentSteering: ReturnType<typeof vi.fn>;
   terminalLogs: string[];
