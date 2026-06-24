@@ -1046,10 +1046,13 @@ async function reconcileAndContinueSpecExecution(
     await saveSpecToStore(
       store,
       markSpecBlocked(
-        updateTask(spec, runningTask.id, {
-          error: "Running task is missing its AgentRun id.",
-          status: "failed",
-        }),
+        markBlockedDownstreamTasks(
+          updateTask(spec, runningTask.id, {
+            error: "Running task is missing its AgentRun id.",
+            status: "failed",
+          }),
+          runningTask.id,
+        ),
         `Task ${runningTask.title} failed.`,
       ),
     );
@@ -1062,10 +1065,13 @@ async function reconcileAndContinueSpecExecution(
     await saveSpecToStore(
       store,
       markSpecBlocked(
-        updateTask(spec, runningTask.id, {
-          error: `AgentRun ${runningTask.runId} was not found.`,
-          status: "failed",
-        }),
+        markBlockedDownstreamTasks(
+          updateTask(spec, runningTask.id, {
+            error: `AgentRun ${runningTask.runId} was not found.`,
+            status: "failed",
+          }),
+          runningTask.id,
+        ),
         `Task ${runningTask.title} failed.`,
       ),
     );

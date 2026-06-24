@@ -959,12 +959,17 @@ describe("spec store actions", () => {
     );
   });
 
-  it("marks a missing AgentRun as retryable blocked instead of leaving it running", async () => {
+  it("blocks downstream tasks when a running task is missing its runId during reconcile", async () => {
     const revision = createExecutableRevision({
       tasks: [
         createExecutableTask("task-1", {
-          runId: "run-missing",
           status: "running",
+        }),
+        createExecutableTask("task-2", {
+          dependencyIds: ["task-1"],
+        }),
+        createExecutableTask("task-3", {
+          dependencyIds: ["task-2"],
         }),
       ],
     });
@@ -980,11 +985,62 @@ describe("spec store actions", () => {
 
     await actions.continueCurrentSpecExecution();
 
-    const task = store.get().currentSpec?.revisions[0].tasks[0];
+    const tasks = store.get().currentSpec?.revisions[0].tasks ?? [];
     expect(store.get().currentSpec?.status).toBe("blocked");
-    expect(task).toMatchObject({
+    expect(tasks[0]).toMatchObject({
+      error: "Running task is missing its AgentRun id.",
+      status: "failed",
+    });
+    expect(tasks[1]).toMatchObject({
+      blockedByTaskId: "task-1",
+      status: "blocked",
+    });
+    expect(tasks[2]).toMatchObject({
+      blockedByTaskId: "task-2",
+      status: "blocked",
+    });
+  });
+
+  it("marks a missing AgentRun as retryable blocked instead of leaving it running", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-missing",
+          status: "running",
+        }),
+        createExecutableTask("task-2", {
+          dependencyIds: ["task-1"],
+        }),
+        createExecutableTask("task-3", {
+          dependencyIds: ["task-2"],
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    const tasks = store.get().currentSpec?.revisions[0].tasks ?? [];
+    expect(store.get().currentSpec?.status).toBe("blocked");
+    expect(tasks[0]).toMatchObject({
       error: "AgentRun run-missing was not found.",
       status: "failed",
+    });
+    expect(tasks[1]).toMatchObject({
+      blockedByTaskId: "task-1",
+      status: "blocked",
+    });
+    expect(tasks[2]).toMatchObject({
+      blockedByTaskId: "task-2",
+      status: "blocked",
     });
   });
 
