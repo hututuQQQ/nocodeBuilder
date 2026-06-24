@@ -48,11 +48,7 @@ export function canRetrySpecVerification(spec: DevelopmentSpec): boolean {
     return false;
   }
 
-  if (
-    spec.finalVerification.command !== "npm install" &&
-    spec.finalVerification.command !== "npm run build" &&
-    spec.finalVerification.command !== "npm install && npm run build"
-  ) {
+  if (!isSupportedFailedFinalVerificationCommand(spec.finalVerification.command)) {
     return false;
   }
 

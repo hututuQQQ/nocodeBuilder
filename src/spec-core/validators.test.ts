@@ -878,14 +878,14 @@ describe("Spec validators", () => {
         ...retryable.finalVerification,
         command: "acceptance criteria",
       },
-    })).toBe(false);
+    })).toBe(true);
     expect(canRetrySpecVerification({
       ...retryable,
       finalVerification: {
         ...retryable.finalVerification,
         command: "task verification reports",
       },
-    })).toBe(false);
+    })).toBe(true);
     expect(canRetrySpecVerification({
       ...retryable,
       finalVerification: {

@@ -1291,6 +1291,53 @@ describe("spec store actions", () => {
     );
   });
 
+  it("retries verification after failed acceptance criteria evidence", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-1",
+          status: "passed",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      failureMessage: "Required acceptance criteria are not all passing: criterion-1.",
+      finalVerification: {
+        checkedAt: "2026-01-01T00:03:00.000Z",
+        command: "acceptance criteria",
+        output: "Required acceptance criteria are not all passing: criterion-1.",
+        success: false,
+      },
+      revisions: [revision],
+      status: "blocked",
+    });
+    fake.agentRuns.set("run-1", createRun("run-1", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "completed",
+      status: "completed",
+    }));
+    fake.verificationReports.set("run-1", createVerificationReport("run-1", "passed"));
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.retrySpecVerification();
+
+    expect(fake.runSpecTaskRuntime).not.toHaveBeenCalled();
+    expect(store.get().currentSpec?.status).toBe("completed");
+    expect(store.get().currentSpec?.finalVerification).toMatchObject({
+      command: "npm run build",
+      success: true,
+    });
+    expect(store.get().currentSpec?.failureMessage).toBeUndefined();
+    expect(store.get().runProjectCommand).toHaveBeenCalledWith(
+      "project-1",
+      "npm run build",
+    );
+  });
+
   it("completes when every required criterion and final build pass", async () => {
     const revision = createExecutableRevision({
       tasks: [
