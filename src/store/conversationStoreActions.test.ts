@@ -65,9 +65,22 @@ describe("conversation store actions", () => {
     expect(store.get().historicalSpecs).toEqual([]);
   });
 
-  it("opens the first active conversation without creating a fallback Chat", async () => {
-    const summary = createSummary();
-    const conversation = createConversation();
+  it("opens the active Initial Build without creating a fallback Chat", async () => {
+    const summary = createSummary({
+      activeSpecId: "spec-initial",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      title: "Initial build",
+    });
+    const conversation = createConversation({
+      activeSpecId: "spec-initial",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      specIds: ["spec-initial"],
+      title: "Initial build",
+    });
     fake.listProjectConversations.mockResolvedValue([summary]);
     fake.readProjectConversation.mockResolvedValue(conversation);
     const store = createStore();
@@ -79,7 +92,7 @@ describe("conversation store actions", () => {
     expect(fake.createProjectConversation).not.toHaveBeenCalled();
     expect(fake.readProjectConversation).toHaveBeenCalledWith(
       "project-1",
-      "conversation-1",
+      "conversation-initial",
     );
     expect(store.get().currentConversation).toEqual(conversation);
     expect(store.get().chatMessages).toEqual(conversation.messages);
@@ -156,6 +169,156 @@ describe("conversation store actions", () => {
     expect(store.get().currentConversation).toBeNull();
     expect(store.get().currentSpec).toBeNull();
     expect(store.get().historicalSpecs).toEqual([completedSpec]);
+  });
+
+  it("opens Initial Build instead of an existing iteration while Initial Spec is incomplete", async () => {
+    const initialBuild = createSummary({
+      activeSpecId: "spec-initial",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      title: "Initial build",
+    });
+    const iteration = createSummary({
+      id: "conversation-iteration",
+      kind: "iteration",
+      mode: "chat",
+      title: "Follow-up",
+    });
+    const reviewSpec = createSpec({
+      conversationId: "conversation-initial",
+      id: "spec-initial",
+      status: "review",
+    });
+    const initialConversation = createConversation({
+      activeSpecId: "spec-initial",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      specIds: ["spec-initial"],
+      title: "Initial build",
+    });
+    fake.listProjectConversations.mockResolvedValue([iteration, initialBuild]);
+    fake.readSpec.mockResolvedValue(reviewSpec);
+    fake.readProjectConversation.mockResolvedValue(initialConversation);
+    const store = createStore();
+    const actions = createConversationActions(store as never);
+    store.set(actions as unknown as Partial<StoreState>);
+
+    await actions.loadProjectConversations("project-1");
+
+    expect(fake.readProjectConversation).toHaveBeenCalledWith(
+      "project-1",
+      "conversation-initial",
+    );
+    expect(fake.readProjectConversation).not.toHaveBeenCalledWith(
+      "project-1",
+      "conversation-iteration",
+    );
+    expect(store.get().initialBuildSpec).toEqual(reviewSpec);
+    expect(store.get().currentConversation).toEqual(initialConversation);
+  });
+
+  it("does not keep a current iteration while Initial Spec is incomplete", async () => {
+    const initialBuild = createSummary({
+      activeSpecId: "spec-initial",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      title: "Initial build",
+    });
+    const iteration = createSummary({
+      id: "conversation-iteration",
+      kind: "iteration",
+      mode: "chat",
+      title: "Follow-up",
+    });
+    const reviewSpec = createSpec({
+      conversationId: "conversation-initial",
+      id: "spec-initial",
+      status: "review",
+    });
+    const initialConversation = createConversation({
+      activeSpecId: "spec-initial",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      specIds: ["spec-initial"],
+      title: "Initial build",
+    });
+    fake.listProjectConversations.mockResolvedValue([iteration, initialBuild]);
+    fake.readSpec.mockResolvedValue(reviewSpec);
+    fake.readProjectConversation.mockResolvedValue(initialConversation);
+    const store = createStore({
+      currentConversation: createConversation({
+        id: "conversation-iteration",
+        kind: "iteration",
+        mode: "chat",
+        title: "Follow-up",
+      }),
+    });
+    const actions = createConversationActions(store as never);
+    store.set(actions as unknown as Partial<StoreState>);
+
+    await actions.loadProjectConversations("project-1");
+
+    expect(fake.readProjectConversation).toHaveBeenCalledWith(
+      "project-1",
+      "conversation-initial",
+    );
+    expect(store.get().currentConversation).toEqual(initialConversation);
+  });
+
+  it("does not select an existing iteration before Initial Spec completes", async () => {
+    const initialBuild = createSummary({
+      activeSpecId: "spec-initial",
+      id: "conversation-initial",
+      kind: "initial_build",
+      mode: "spec",
+      title: "Initial build",
+    });
+    const iteration = createSummary({
+      id: "conversation-iteration",
+      kind: "iteration",
+      mode: "chat",
+      title: "Follow-up",
+    });
+    fake.readProjectConversation.mockResolvedValue(
+      createConversation({
+        id: "conversation-iteration",
+        kind: "iteration",
+        mode: "chat",
+        title: "Follow-up",
+      }),
+    );
+    fake.listProjectConversations.mockResolvedValue([initialBuild, iteration]);
+    fake.readSpec.mockResolvedValue(
+      createSpec({
+        conversationId: "conversation-initial",
+        id: "spec-initial",
+        status: "review",
+      }),
+    );
+    const store = createStore({
+      conversationSummaries: [initialBuild, iteration],
+    });
+    const actions = createConversationActions(store as never);
+    store.set(actions as unknown as Partial<StoreState>);
+
+    await actions.selectConversation("conversation-iteration");
+
+    expect(fake.readProjectConversation).toHaveBeenCalledWith(
+      "project-1",
+      "conversation-iteration",
+    );
+    expect(fake.listProjectConversations).toHaveBeenCalledWith(
+      "project-1",
+      true,
+    );
+    expect(store.get().currentConversation).toBeNull();
+    expect(store.get().projectError).toBe(
+      "conversation: initial build must complete before creating iterations",
+    );
   });
 
   it("does not create a new iteration while a Spec operation is busy", async () => {

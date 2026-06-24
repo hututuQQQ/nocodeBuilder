@@ -58,7 +58,7 @@ export async function ensureInitialBuildCompletedForIteration(
   const initialBuild = initialBuilds[0];
   const spec = await readInitialBuildSpecForGate(projectId, initialBuild);
 
-  if (!hasCompletedInitialBuildSpec(projectId, initialBuild, spec)) {
+  if (!hasCompletedInitialBuildSpecForSummary(projectId, initialBuild, spec)) {
     throw new Error(INITIAL_BUILD_ITERATION_GATE_ERROR);
   }
 }
@@ -106,14 +106,14 @@ function hasCompletedInitialBuildSpecEvidence(
     return false;
   }
 
-  return hasCompletedInitialBuildSpec(
+  return hasCompletedInitialBuildSpecForSummary(
     projectId,
     summary,
     findInitialBuildSpec(state, summary),
   );
 }
 
-function hasCompletedInitialBuildSpec(
+export function hasCompletedInitialBuildSpecForSummary(
   projectId: string,
   summary: ProjectConversationSummary | null,
   spec: DevelopmentSpec | null,

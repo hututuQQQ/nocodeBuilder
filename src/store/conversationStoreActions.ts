@@ -13,6 +13,7 @@ import {
 } from "./conversationState";
 import {
   ensureInitialBuildCompletedForIteration,
+  hasCompletedInitialBuildSpecForSummary,
   INITIAL_BUILD_ITERATION_GATE_ERROR,
   readInitialBuildSpecForGate,
 } from "./initialBuildGate";
@@ -43,16 +44,29 @@ export function createConversationActions({
           true,
         );
         const currentConversation = get().currentConversation;
-        const canKeepCurrent =
-          currentConversation?.projectId === projectId &&
-          summaries.some((summary) => summary.id === currentConversation.id);
         const activeSummaries = summaries.filter(
           (summary) => !summary.archivedAt,
         );
+        const initialBuildSummary =
+          summaries.find((summary) => summary.kind === "initial_build") ?? null;
         const initialBuildSpec = await readInitialBuildSpecForGate(
           projectId,
-          summaries.find((summary) => summary.kind === "initial_build") ?? null,
+          initialBuildSummary,
         );
+        const initialBuildCompleted = hasCompletedInitialBuildSpecForSummary(
+          projectId,
+          initialBuildSummary,
+          initialBuildSpec,
+        );
+        const currentSummary = currentConversation
+          ? summaries.find((summary) => summary.id === currentConversation.id) ??
+            null
+          : null;
+        const canKeepCurrent =
+          currentConversation?.projectId === projectId &&
+          Boolean(currentSummary) &&
+          (currentConversation.kind !== "iteration" || initialBuildCompleted) &&
+          (currentSummary?.kind !== "iteration" || initialBuildCompleted);
 
         set({
           conversationSummaries: summaries,
@@ -63,7 +77,11 @@ export function createConversationActions({
           return;
         }
 
-        const summaryToOpen = activeSummaries[0] ?? null;
+        const summaryToOpen = initialBuildCompleted
+          ? activeSummaries[0] ?? null
+          : activeSummaries.find(
+              (summary) => summary.kind === "initial_build",
+            ) ?? null;
 
         if (summaryToOpen) {
           await get().selectConversation(summaryToOpen.id);
@@ -197,6 +215,10 @@ export function createConversationActions({
           project.id,
           conversationId,
         );
+
+        if (conversation.kind === "iteration") {
+          await ensureInitialBuildCompletedForIteration(project.id, get());
+        }
 
         set((state) => ({
           agentEvents: [],
