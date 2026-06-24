@@ -583,24 +583,27 @@ describe("Spec validators", () => {
     ).toBeDefined();
   });
 
-  it("rejects terminal specs that still contain a running task", () => {
-    expect(() =>
-      validateDevelopmentSpec(
-        {
-          ...createSpec({
-            tasks: [
-              {
-                ...createGeneratedPayload().tasks[0],
-                runId: "run-1",
-                status: "running",
-              },
-            ],
-          }),
-          failureMessage: "Orchestration failed.",
-          status: "failed",
-        },
-      ),
-    ).toThrow(/terminal spec cannot include running tasks/i);
+  it("rejects stopped specs that still contain a running task", () => {
+    for (const status of ["failed", "blocked"] as const) {
+      expect(() =>
+        validateDevelopmentSpec(
+          {
+            ...createSpec({
+              approvedAt: status === "blocked" ? "2026-06-24T00:01:00Z" : undefined,
+              tasks: [
+                {
+                  ...createGeneratedPayload().tasks[0],
+                  runId: "run-1",
+                  status: "running",
+                },
+              ],
+            }),
+            failureMessage: "Orchestration stopped.",
+            status,
+          },
+        ),
+      ).toThrow(/stopped spec cannot include running tasks/i);
+    }
   });
 
   it("requires initial build specs to include a foundation task", () => {

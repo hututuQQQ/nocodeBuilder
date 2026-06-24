@@ -651,10 +651,10 @@ function validateSpecTaskStateConsistency(
   }
 
   if (
-    ["completed", "failed", "cancelled"].includes(status) &&
+    ["blocked", "completed", "failed", "cancelled"].includes(status) &&
     currentRevision.tasks.some((task) => task.status === "running")
   ) {
-    throw new Error("Terminal Spec cannot include running tasks.");
+    throw new Error("Stopped Spec cannot include running tasks.");
   }
 }
 
