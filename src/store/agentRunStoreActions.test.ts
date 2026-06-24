@@ -346,6 +346,25 @@ describe("agent run store actions", () => {
     expect(store.get().currentAgentRun?.conversationId).toBe("conversation-1");
   });
 
+  it("does not load unrelated runs for the current conversation", async () => {
+    const unrelatedRun = createRun("run-unrelated", {
+      conversationId: "conversation-other",
+      phase: "planning",
+      status: "planning",
+    });
+    fake.runs.set(unrelatedRun.id, unrelatedRun);
+    const store = createStore({
+      currentConversation: createSpecConversation(),
+      currentSpec: null,
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await actions.loadAgentRuns("project-1");
+
+    expect(store.get().currentAgentRun).toBeNull();
+    expect(store.get().currentAgentApproval).toBeNull();
+  });
+
   it("does not cancel or steer a Spec run that is not the current running task", async () => {
     const run = createRun("run-other-task", {
       contract: {

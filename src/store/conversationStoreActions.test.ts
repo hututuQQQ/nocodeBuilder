@@ -84,6 +84,7 @@ describe("conversation store actions", () => {
     expect(store.get().currentConversation).toEqual(conversation);
     expect(store.get().chatMessages).toEqual(conversation.messages);
     expect(store.get().loadCurrentSpec).toHaveBeenCalledTimes(1);
+    expect(store.get().loadAgentRuns).toHaveBeenCalledWith("project-1");
   });
 
   it("loads completed Initial Build evidence while opening a later iteration", async () => {
@@ -123,6 +124,7 @@ describe("conversation store actions", () => {
     expect(fake.readSpec).toHaveBeenCalledWith("project-1", "spec-initial");
     expect(store.get().initialBuildSpec).toEqual(completedSpec);
     expect(store.get().currentConversation).toEqual(conversation);
+    expect(store.get().loadAgentRuns).toHaveBeenCalledWith("project-1");
   });
 
   it("keeps archived completed Initial Spec evidence when no active iterations exist", async () => {
@@ -306,6 +308,7 @@ describe("conversation store actions", () => {
     ).resolves.toEqual(iteration);
 
     expect(fake.createProjectConversation).toHaveBeenCalledTimes(1);
+    expect(store.get().loadAgentRuns).toHaveBeenCalledWith("project-1");
   });
 
   it("does not let an existing iteration summary bypass the Initial Build gate", async () => {
@@ -435,6 +438,7 @@ function createStore(patch: Partial<StoreState> = {}) {
     isSwitchingIterationMode: false,
     isVerifyingSpec: false,
     isLoadingConversations: false,
+    loadAgentRuns: vi.fn(async () => undefined),
     loadCurrentSpec: vi.fn(async () => undefined),
     projectError: null,
     showArchivedConversations: false,
@@ -539,6 +543,7 @@ type StoreState = {
   isSwitchingIterationMode: boolean;
   isVerifyingSpec: boolean;
   isLoadingConversations: boolean;
+  loadAgentRuns: ReturnType<typeof vi.fn>;
   loadCurrentSpec: ReturnType<typeof vi.fn>;
   projectError: string | null;
   showArchivedConversations: boolean;

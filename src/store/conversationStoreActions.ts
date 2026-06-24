@@ -147,12 +147,16 @@ export function createConversationActions({
         );
 
         set((state) => ({
+          agentEvents: [],
           chatMessages: conversation.messages,
           conversationSummaries: upsertConversationSummary(
             state.conversationSummaries,
             conversationToSummary(conversation),
           ),
+          currentAgentApproval: null,
+          currentAgentRun: null,
           currentConversation: conversation,
+          currentVerificationReport: null,
           initialBuildSpec: state.initialBuildSpec,
           currentSpec: null,
           historicalSpecs: [],
@@ -160,6 +164,7 @@ export function createConversationActions({
         }));
 
         await get().loadCurrentSpec();
+        await get().loadAgentRuns(targetProjectId);
 
         return conversation;
       } catch (error) {
@@ -194,14 +199,19 @@ export function createConversationActions({
         );
 
         set((state) => ({
+          agentEvents: [],
           chatMessages: conversation.messages,
           conversationSummaries: upsertConversationSummary(
             state.conversationSummaries,
             conversationToSummary(conversation),
           ),
+          currentAgentApproval: null,
+          currentAgentRun: null,
           currentConversation: conversation,
+          currentVerificationReport: null,
         }));
         await get().loadCurrentSpec();
+        await get().loadAgentRuns(project.id);
       } catch (error) {
         const message = getProjectErrorMessage(error);
 
