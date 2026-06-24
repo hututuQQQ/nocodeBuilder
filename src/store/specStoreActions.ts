@@ -1189,11 +1189,12 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
     : null;
 
   if (installResult && !installResult.success) {
+    const output = normalizeFinalVerificationOutput(installResult.output);
     await saveSpecToStore(
       store,
       markSpecBlocked(
-        markFinalVerificationFailed(spec, "npm install", installResult.output),
-        `Final npm install failed:\n${installResult.output}`,
+        markFinalVerificationFailed(spec, "npm install", output),
+        `Final npm install failed:\n${output}`,
       ),
     );
     return;
@@ -1202,7 +1203,7 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
   const buildResult = await store.get().runProjectCommand(project.id, "npm run build");
 
   if (!buildResult?.success) {
-    const output = buildResult?.output ?? "No command output.";
+    const output = normalizeFinalVerificationOutput(buildResult?.output);
     await saveSpecToStore(
       store,
       markSpecBlocked(
@@ -1225,10 +1226,11 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
         finalVerification: {
           checkedAt: new Date().toISOString(),
           command: installRequired ? "npm install && npm run build" : "npm run build",
-          output: [
+          output: formatSuccessfulFinalVerificationOutput(
+            installRequired,
             installResult?.output,
             buildResult.output,
-          ].filter(Boolean).join("\n"),
+          ),
           success: true,
         },
       },
@@ -1281,10 +1283,33 @@ function markFinalVerificationFailed(
     finalVerification: {
       checkedAt: new Date().toISOString(),
       command,
-      output,
+      output: normalizeFinalVerificationOutput(output),
       success: false,
     },
   };
+}
+
+function normalizeFinalVerificationOutput(output: string | null | undefined) {
+  return output?.trim() ? output : "No command output.";
+}
+
+function formatSuccessfulFinalVerificationOutput(
+  installRequired: boolean,
+  installOutput: string | null | undefined,
+  buildOutput: string | null | undefined,
+) {
+  const output = [
+    installOutput?.trim() ? installOutput : null,
+    buildOutput?.trim() ? buildOutput : null,
+  ].filter(Boolean).join("\n");
+
+  if (output) {
+    return output;
+  }
+
+  return installRequired
+    ? "npm install and npm run build completed successfully without command output."
+    : "npm run build completed successfully without command output.";
 }
 
 function markTasksWithIncompleteVerificationReports(
