@@ -165,6 +165,42 @@ describe("agent run store actions", () => {
     expect(fake.events.map((event) => event.type)).toEqual(["run.cancel_requested"]);
   });
 
+  it("rejects active cancellation when the run reaches a non-cancelled terminal state", async () => {
+    fake.activeController = true;
+    const run = createRun("run-active-failed-cancel", {
+      contract: createSpecContract("modify"),
+      conversationId: "conversation-1",
+      phase: "planning",
+      status: "planning",
+    });
+    fake.runs.set(run.id, run);
+    const store = createStore({
+      currentAgentRun: run,
+      currentConversation: createSpecConversation(),
+      currentSpec: createSpec({ runId: run.id }),
+    });
+    const actions = createAgentRunActions(store as never);
+    store.set({
+      cancelCurrentAgentRun: actions.cancelCurrentAgentRun,
+    } as Partial<StoreState>);
+
+    const resultPromise = actions.cancelCurrentAgentRunAndWait();
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+
+    fake.runs.set(run.id, {
+      ...fake.runs.get(run.id)!,
+      completedAt: "2026-01-01T00:01:00.000Z",
+      phase: "failed",
+      status: "failed",
+    });
+
+    await expect(resultPromise).rejects.toThrow(
+      "AgentRun run-active-failed-cancel reached failed instead of cancelled after cancellation.",
+    );
+    expect(store.get().currentAgentRun?.status).toBe("failed");
+    expect(fake.events.map((event) => event.type)).toEqual(["run.cancel_requested"]);
+  });
+
   it("recovers any inactive non-terminal run instead of only paused runs", async () => {
     const run = createRun("run-planning", { status: "planning", phase: "planning" });
     fake.runs.set(run.id, run);

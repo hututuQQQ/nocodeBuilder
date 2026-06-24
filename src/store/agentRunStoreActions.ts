@@ -115,7 +115,7 @@ export function createAgentRunActions({ get, set }: StoreAccess): AgentRunAction
       }
 
       await get().cancelCurrentAgentRun();
-      return waitForTerminalRun(store, project.id, run.id);
+      return waitForCancelledRun(store, project.id, run.id);
     },
 
     clearSelectedSiteNode: () => {
@@ -404,7 +404,7 @@ function isCurrentSpecRun(state: AppState, run: AgentRun) {
   );
 }
 
-async function waitForTerminalRun(
+async function waitForCancelledRun(
   store: StoreAccess,
   projectId: string,
   runId: string,
@@ -416,7 +416,7 @@ async function waitForTerminalRun(
     const run = await agentRuntimeApi.getRun(projectId, runId);
 
     if (!run) {
-      return null;
+      throw new Error(`AgentRun ${runId} was not found while waiting for cancellation.`);
     }
 
     store.set((state) => ({
@@ -424,14 +424,20 @@ async function waitForTerminalRun(
       currentAgentRun: run,
     }));
 
-    if (isTerminalRun(run)) {
+    if (run.status === "cancelled") {
       return run;
+    }
+
+    if (isTerminalRun(run)) {
+      throw new Error(
+        `AgentRun ${runId} reached ${run.status} instead of cancelled after cancellation.`,
+      );
     }
 
     await delay(300);
   }
 
-  throw new Error(`AgentRun ${runId} did not reach a terminal state after cancellation.`);
+  throw new Error(`AgentRun ${runId} did not reach cancelled state after cancellation.`);
 }
 
 function delay(ms: number) {
