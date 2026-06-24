@@ -664,6 +664,59 @@ describe("agent run store actions", () => {
     );
   });
 
+  it("does not pause a stale Spec run for the current task when the runId differs", async () => {
+    fake.activeController = true;
+    const run = createRun("run-stale-pause", {
+      contract: createSpecContract("modify"),
+      conversationId: "conversation-1",
+      phase: "planning",
+      status: "planning",
+    });
+    fake.runs.set(run.id, run);
+    const store = createStore({
+      currentAgentRun: run,
+      currentConversation: createSpecConversation(),
+      currentSpec: createSpec({ runId: "run-current-task" }),
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await actions.pauseCurrentAgentRun();
+
+    expect(fake.events).toHaveLength(0);
+    expect(store.get().currentAgentRun?.pauseRequested).toBe(false);
+    expect(store.get().currentAgentRun?.status).toBe("planning");
+    expect(store.get().projectError).toContain(
+      "does not belong to the current Spec task",
+    );
+  });
+
+  it("does not resume a stale Spec run for the current task when the runId differs", async () => {
+    const run = createRun("run-stale-resume", {
+      contract: createSpecContract("modify"),
+      conversationId: "conversation-1",
+      phase: "paused",
+      status: "paused",
+    });
+    fake.runs.set(run.id, run);
+    const continueCurrentSpecExecution = vi.fn(async () => undefined);
+    const store = createStore({
+      continueCurrentSpecExecution,
+      currentAgentRun: run,
+      currentConversation: createSpecConversation(),
+      currentSpec: createSpec({ runId: "run-current-task" }),
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await actions.resumeCurrentAgentRun();
+
+    expect(fake.specCalls).toHaveLength(0);
+    expect(fake.modifyCalls).toHaveLength(0);
+    expect(continueCurrentSpecExecution).not.toHaveBeenCalled();
+    expect(store.get().projectError).toContain(
+      "does not belong to the current Spec task",
+    );
+  });
+
   it("does not treat a terminal Spec run from another task as a valid cancel result", async () => {
     const run = createRun("run-other-terminal", {
       completedAt: "2026-01-01T00:01:00.000Z",
