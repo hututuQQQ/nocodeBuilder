@@ -110,8 +110,14 @@ export function createAgentRunActions({ get, set }: StoreAccess): AgentRunAction
 
       assertCurrentSpecRunControl(get(), run);
 
-      if (isTerminalRun(run)) {
+      if (run.status === "cancelled") {
         return run;
+      }
+
+      if (isTerminalRun(run)) {
+        throw new Error(
+          `AgentRun ${run.id} is already ${run.status}; cancellation requires cancelled state.`,
+        );
       }
 
       await get().cancelCurrentAgentRun();

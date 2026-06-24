@@ -165,6 +165,50 @@ describe("agent run store actions", () => {
     expect(fake.events.map((event) => event.type)).toEqual(["run.cancel_requested"]);
   });
 
+  it("returns an already cancelled Spec run as a successful cancel wait", async () => {
+    const run = createRun("run-already-cancelled", {
+      completedAt: "2026-01-01T00:01:00.000Z",
+      contract: createSpecContract("modify"),
+      conversationId: "conversation-1",
+      phase: "cancelled",
+      status: "cancelled",
+    });
+    fake.runs.set(run.id, run);
+    const store = createStore({
+      currentAgentRun: run,
+      currentConversation: createSpecConversation(),
+      currentSpec: createSpec({ runId: run.id }),
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await expect(actions.cancelCurrentAgentRunAndWait()).resolves.toBe(run);
+
+    expect(fake.events).toHaveLength(0);
+  });
+
+  it("rejects an already terminal Spec run that is not cancelled", async () => {
+    const run = createRun("run-already-failed", {
+      completedAt: "2026-01-01T00:01:00.000Z",
+      contract: createSpecContract("modify"),
+      conversationId: "conversation-1",
+      phase: "failed",
+      status: "failed",
+    });
+    fake.runs.set(run.id, run);
+    const store = createStore({
+      currentAgentRun: run,
+      currentConversation: createSpecConversation(),
+      currentSpec: createSpec({ runId: run.id }),
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await expect(actions.cancelCurrentAgentRunAndWait()).rejects.toThrow(
+      "AgentRun run-already-failed is already failed; cancellation requires cancelled state.",
+    );
+
+    expect(fake.events).toHaveLength(0);
+  });
+
   it("rejects active cancellation when the run reaches a non-cancelled terminal state", async () => {
     fake.activeController = true;
     const run = createRun("run-active-failed-cancel", {
