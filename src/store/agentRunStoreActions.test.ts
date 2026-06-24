@@ -498,6 +498,89 @@ describe("agent run store actions", () => {
     expect(store.get().currentAgentRun?.conversationId).toBe("conversation-1");
   });
 
+  it("does not load stale Spec runs in Spec mode when they are not the current task", async () => {
+    const staleSpecRun = createRun("run-stale-task", {
+      contract: {
+        ...compileTaskContract({
+          objective: "Spec run",
+          taskType: "component_edit",
+        }),
+        source: {
+          acceptanceCriteriaIds: ["criterion-1"],
+          executionMode: "modify",
+          mode: "spec",
+          requirementIds: ["story-1"],
+          revisionId: "rev-1",
+          specId: "spec-1",
+          taskId: "task-other",
+        },
+      },
+      conversationId: "conversation-1",
+      phase: "planning",
+      status: "planning",
+    });
+    fake.runs.set(staleSpecRun.id, staleSpecRun);
+    const store = createStore({
+      currentConversation: createSpecConversation(),
+      currentSpec: createSpec({ runId: "run-current-task" }),
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await actions.loadAgentRuns("project-1");
+
+    expect(store.get().currentAgentRun).toBeNull();
+    expect(store.get().currentAgentApproval).toBeNull();
+  });
+
+  it("does not load historical Spec runs after the conversation is in Chat mode", async () => {
+    const historicalSpecRun = createRun("run-history-spec", {
+      contract: createSpecContract("modify"),
+      conversationId: "conversation-1",
+      phase: "planning",
+      status: "planning",
+    });
+    fake.runs.set(historicalSpecRun.id, historicalSpecRun);
+    const store = createStore({
+      currentConversation: createChatConversation({
+        specIds: ["spec-1"],
+      }),
+      currentSpec: null,
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await actions.loadAgentRuns("project-1");
+
+    expect(store.get().currentAgentRun).toBeNull();
+    expect(store.get().currentAgentApproval).toBeNull();
+  });
+
+  it("loads normal Chat runs while ignoring historical Spec runs", async () => {
+    const historicalSpecRun = createRun("run-history-spec", {
+      contract: createSpecContract("modify"),
+      conversationId: "conversation-1",
+      phase: "planning",
+      status: "planning",
+    });
+    const chatRun = createRun("run-chat", {
+      conversationId: "conversation-1",
+      phase: "planning",
+      status: "planning",
+    });
+    fake.runs.set(historicalSpecRun.id, historicalSpecRun);
+    fake.runs.set(chatRun.id, chatRun);
+    const store = createStore({
+      currentConversation: createChatConversation({
+        specIds: ["spec-1"],
+      }),
+      currentSpec: null,
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await actions.loadAgentRuns("project-1");
+
+    expect(store.get().currentAgentRun?.id).toBe(chatRun.id);
+  });
+
   it("does not load unrelated runs for the current conversation", async () => {
     const unrelatedRun = createRun("run-unrelated", {
       conversationId: "conversation-other",
@@ -756,12 +839,15 @@ function createSpecConversation(): ProjectConversation {
   };
 }
 
-function createChatConversation(): ProjectConversation {
+function createChatConversation(
+  patch: Partial<ProjectConversation> = {},
+): ProjectConversation {
   return {
     ...createSpecConversation(),
     activeSpecId: null,
     mode: "chat",
     specIds: [],
+    ...patch,
   };
 }
 

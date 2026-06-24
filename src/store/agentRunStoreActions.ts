@@ -309,13 +309,15 @@ function selectCurrentAgentRun(runs: AgentRun[], state: AppState) {
   }
 
   const scopedRuns = runs.filter((run) => run.conversationId === conversationId);
+  const currentSpecRun = scopedRuns.find((run) => isCurrentSpecRun(state, run)) ?? null;
 
-  return (
-    runs.find((run) => isCurrentSpecRun(state, run)) ??
-    scopedRuns.find((run) => !isTerminalRun(run)) ??
-    scopedRuns[0] ??
-    null
-  );
+  if (state.currentConversation?.mode === "spec") {
+    return currentSpecRun;
+  }
+
+  const chatRuns = scopedRuns.filter((run) => run.contract.source?.mode !== "spec");
+
+  return chatRuns.find((run) => !isTerminalRun(run)) ?? chatRuns[0] ?? null;
 }
 
 function validateCurrentSpecRunControl(store: StoreAccess, run: AgentRun) {
