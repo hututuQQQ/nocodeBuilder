@@ -643,6 +643,13 @@ function validateSpecTaskStateConsistency(
   const taskMissingPassedRun = currentRevision.tasks.find(
     (task) => task.status !== "passed" || !task.runId,
   );
+  const runningTaskCount = currentRevision.tasks.filter(
+    (task) => task.status === "running",
+  ).length;
+
+  if (runningTaskCount > 1) {
+    throw new Error("Spec cannot include more than one running task.");
+  }
 
   if (
     status === "approved" &&

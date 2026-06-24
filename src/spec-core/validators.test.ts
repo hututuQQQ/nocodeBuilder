@@ -492,6 +492,26 @@ describe("Spec validators", () => {
       ),
     ).toThrow(/status passed requires runId/i);
 
+    expect(() =>
+      validateDevelopmentSpec(
+        createSpec({
+          tasks: [
+            {
+              ...createGeneratedPayload().tasks[0],
+              runId: "run-1",
+              status: "running",
+            },
+            {
+              ...createGeneratedPayload().tasks[0],
+              id: "task-2",
+              runId: "run-2",
+              status: "running",
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/more than one running task/i);
+
     for (const status of ["pending", "blocked"] as const) {
       expect(() =>
         validateDevelopmentSpec(
