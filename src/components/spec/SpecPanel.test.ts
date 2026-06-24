@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  canShowSpecTaskRetry,
   formatAcceptanceEvidenceLabels,
   getAcceptanceStatusSymbol,
 } from "./SpecPanel";
@@ -25,5 +26,41 @@ describe("SpecPanel acceptance criteria projection", () => {
       runs: "Runs: none",
       tasks: "Tasks: none",
     });
+  });
+
+  it("shows Retry only for failed, cancelled, or recoverable blocked tasks", () => {
+    const passedDependency = { id: "task-1", status: "passed" as const };
+    const failedDependency = { id: "task-2", status: "failed" as const };
+
+    expect(
+      canShowSpecTaskRetry(
+        { dependencyIds: [], status: "failed" },
+        [passedDependency],
+      ),
+    ).toBe(true);
+    expect(
+      canShowSpecTaskRetry(
+        { dependencyIds: [], status: "cancelled" },
+        [passedDependency],
+      ),
+    ).toBe(true);
+    expect(
+      canShowSpecTaskRetry(
+        { dependencyIds: ["task-1"], status: "blocked" },
+        [passedDependency],
+      ),
+    ).toBe(true);
+    expect(
+      canShowSpecTaskRetry(
+        { dependencyIds: ["task-2"], status: "blocked" },
+        [failedDependency],
+      ),
+    ).toBe(false);
+    expect(
+      canShowSpecTaskRetry(
+        { dependencyIds: [], status: "pending" },
+        [passedDependency],
+      ),
+    ).toBe(false);
   });
 });

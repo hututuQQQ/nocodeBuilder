@@ -1586,6 +1586,92 @@ describe("spec store actions", () => {
     expect(store.get().currentSpec).toBe(spec);
   });
 
+  it("does not retry a blocked task while its blocking dependency is still failed", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          error: "Task failed.",
+          runId: "run-1",
+          status: "failed",
+        }),
+        createExecutableTask("task-2", {
+          blockedByTaskId: "task-1",
+          dependencyIds: ["task-1"],
+          error: "Blocked because dependency task-1 failed.",
+          status: "blocked",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      failureMessage: "Task Task task-1 failed.",
+      revisions: [revision],
+      status: "blocked",
+    });
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.retrySpecTask("task-2");
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(fake.runSpecTaskRuntime).not.toHaveBeenCalled();
+    expect(store.get().currentSpec).toBe(spec);
+  });
+
+  it("retries a recoverable blocked task once its dependencies have passed", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-1",
+          status: "passed",
+        }),
+        createExecutableTask("task-2", {
+          blockedByTaskId: "task-1",
+          dependencyIds: ["task-1"],
+          error: "Blocked because dependency task-1 failed.",
+          status: "blocked",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      failureMessage: "Task Task task-1 failed.",
+      revisions: [revision],
+      status: "blocked",
+    });
+    fake.runSpecTaskRuntime.mockImplementation(async (input: RuntimeInput) => ({
+      run: createRun(input.runId, {
+        phase: "paused",
+        status: "paused",
+      }),
+      verificationReport: null,
+    }));
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.retrySpecTask("task-2");
+
+    expect(fake.runSpecTaskRuntime).toHaveBeenCalledTimes(1);
+    expect(store.get().currentSpec?.status).toBe("building");
+    expect(store.get().currentSpec?.revisions[0].tasks).toMatchObject([
+      {
+        id: "task-1",
+        status: "passed",
+      },
+      {
+        blockedByTaskId: undefined,
+        error: undefined,
+        id: "task-2",
+        runId: expect.stringMatching(/^run-/),
+        status: "running",
+      },
+    ]);
+  });
+
   it("does not retry verification without a failed final verification marker", async () => {
     const revision = createExecutableRevision({
       tasks: [

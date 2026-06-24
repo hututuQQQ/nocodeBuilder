@@ -568,7 +568,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
 
       if (
         !target ||
-        !["failed", "cancelled", "blocked"].includes(target.status)
+        !canRetrySpecTaskTarget(revision, target)
       ) {
         return;
       }
@@ -1621,6 +1621,22 @@ function restoreRetryableTaskGraph(
       return task;
     }),
   };
+}
+
+function canRetrySpecTaskTarget(revision: SpecRevision, target: SpecTask) {
+  if (target.status === "failed" || target.status === "cancelled") {
+    return true;
+  }
+
+  if (target.status !== "blocked") {
+    return false;
+  }
+
+  return target.dependencyIds.every((dependencyId) =>
+    revision.tasks.some(
+      (task) => task.id === dependencyId && task.status === "passed",
+    ),
+  );
 }
 
 function canRestoreBlockedTask(

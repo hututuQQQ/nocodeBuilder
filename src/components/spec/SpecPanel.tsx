@@ -395,7 +395,7 @@ function SpecTaskList({
                   </p>
                 ) : null}
               </div>
-              {["failed", "cancelled", "blocked"].includes(task.status) ? (
+              {canShowSpecTaskRetry(task, tasks) ? (
                 <button
                   aria-label={`Retry ${task.title}`}
                   className="grid size-8 shrink-0 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-blue-400/40 hover:text-blue-100 disabled:cursor-not-allowed disabled:text-zinc-700"
@@ -606,6 +606,26 @@ export function formatAcceptanceEvidenceLabels(
     runs: `Runs: ${result.runIds.join(", ") || "none"}`,
     tasks: `Tasks: ${result.taskIds.join(", ") || "none"}`,
   };
+}
+
+export function canShowSpecTaskRetry(
+  task: Pick<SpecTask, "dependencyIds" | "status">,
+  tasks: Array<Pick<SpecTask, "id" | "status">>,
+) {
+  if (task.status === "failed" || task.status === "cancelled") {
+    return true;
+  }
+
+  if (task.status !== "blocked") {
+    return false;
+  }
+
+  return task.dependencyIds.every((dependencyId) =>
+    tasks.some(
+      (candidate) =>
+        candidate.id === dependencyId && candidate.status === "passed",
+    ),
+  );
 }
 
 function SpecHistory({
