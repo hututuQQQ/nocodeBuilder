@@ -349,15 +349,25 @@ fn validate_approved_revision_immutability(existing: &Value, next: &Value) -> Re
         let next_revision = find_revision_by_id(next_revisions, revision_id)
             .ok_or_else(|| "spec: existing revisions cannot be removed".to_string())?;
 
-        if existing_revision
+        let existing_approved = existing_revision
             .get("approvedAt")
             .and_then(Value::as_str)
-            .is_none()
-        {
-            continue;
-        }
+            .is_some();
+        let next_approved = next_revision
+            .get("approvedAt")
+            .and_then(Value::as_str)
+            .is_some();
 
-        if approved_revision_plan(existing_revision)? != approved_revision_plan(next_revision)? {
+        let plan_changed = if existing_approved {
+            approved_revision_plan(existing_revision)? != approved_revision_plan(next_revision)?
+        } else if next_approved {
+            revision_plan_without_approval(existing_revision)?
+                != revision_plan_without_approval(next_revision)?
+        } else {
+            false
+        };
+
+        if plan_changed {
             return Err("spec: approved revision plan fields are immutable".to_string());
         }
     }
@@ -389,19 +399,25 @@ fn find_revision_by_id<'a>(revisions: &'a [Value], revision_id: &str) -> Option<
 }
 
 fn approved_revision_plan(revision: &Value) -> Result<Value, String> {
+    let mut plan = revision_plan_without_approval(revision)?
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "spec: approved revision plan must be an object".to_string())?;
+    let approved_at = revision
+        .get("approvedAt")
+        .ok_or_else(|| "spec: approved revision approvedAt is required".to_string())?;
+    plan.insert("approvedAt".to_string(), approved_at.clone());
+
+    Ok(Value::Object(plan))
+}
+
+fn revision_plan_without_approval(revision: &Value) -> Result<Value, String> {
     let mut plan = serde_json::Map::new();
 
-    for field in [
-        "id",
-        "version",
-        "brief",
-        "requirements",
-        "design",
-        "approvedAt",
-    ] {
+    for field in ["id", "version", "brief", "requirements", "design"] {
         let value = revision
             .get(field)
-            .ok_or_else(|| format!("spec: approved revision {field} is required"))?;
+            .ok_or_else(|| format!("spec: revision {field} is required"))?;
         plan.insert(field.to_string(), value.clone());
     }
 
@@ -737,6 +753,36 @@ mod tests {
         });
 
         assert!(validate_approved_revision_immutability(&existing, &next).is_ok());
+    }
+
+    #[test]
+    fn first_approval_rejects_plan_mutation() {
+        let existing = json!({
+            "revisions": [{
+                "id": "rev-1",
+                "version": 1,
+                "brief": "Draft",
+                "requirements": {"goal": "A"},
+                "design": {"summary": "B"},
+                "tasks": [{"id": "task-1", "title": "Task"}]
+            }]
+        });
+        let next = json!({
+            "revisions": [{
+                "id": "rev-1",
+                "version": 1,
+                "brief": "Draft",
+                "approvedAt": "2026-01-01T00:00:00Z",
+                "requirements": {"goal": "Changed during approval"},
+                "design": {"summary": "B"},
+                "tasks": [{"id": "task-1", "title": "Task"}]
+            }]
+        });
+
+        let error = validate_approved_revision_immutability(&existing, &next)
+            .expect_err("approval must not mutate the revision plan");
+
+        assert!(error.contains("approved revision plan fields are immutable"));
     }
 
     #[test]
