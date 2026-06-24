@@ -373,6 +373,28 @@ describe("Spec validators", () => {
       validateDevelopmentSpec({
         ...createSpec({
           approvedAt: "2026-06-24T00:01:00Z",
+          tasks: [
+            {
+              ...createGeneratedPayload().tasks[0],
+              runId: "run-1",
+              status: "passed",
+            },
+          ],
+        }),
+        failureMessage: "Task verification reports are not all passing: task-1.",
+        finalVerification: {
+          ...finalVerification,
+          command: "task verification reports",
+          output: "Task verification reports are not all passing: task-1.",
+        },
+        status: "blocked",
+      }),
+    ).toThrow(/task verification reports require at least one stopped task/i);
+
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec({
+          approvedAt: "2026-06-24T00:01:00Z",
         }),
         failureMessage: "Final npm run build failed.",
         finalVerification,

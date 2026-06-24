@@ -252,6 +252,7 @@ export function validateDevelopmentSpec(value: unknown): DevelopmentSpec {
     status as DevelopmentSpec["status"],
     currentRevision,
     isFinalBuildOrInstallCommand(spec.finalVerification?.command),
+    spec.finalVerification?.command === "task verification reports",
   );
 
   return value as DevelopmentSpec;
@@ -649,6 +650,7 @@ function validateSpecTaskStateConsistency(
   status: DevelopmentSpec["status"],
   currentRevision: SpecRevision,
   requiresFinalVerificationTaskEvidence: boolean,
+  requiresFailedTaskVerificationEvidence: boolean,
 ) {
   const taskMissingPassedRun = currentRevision.tasks.find(
     (task) => task.status !== "passed" || !task.runId,
@@ -690,6 +692,18 @@ function validateSpecTaskStateConsistency(
   ) {
     throw new Error(
       "Blocked Spec finalVerification requires all current revision tasks to be passed with runId.",
+    );
+  }
+
+  if (
+    status === "blocked" &&
+    requiresFailedTaskVerificationEvidence &&
+    !currentRevision.tasks.some((task) =>
+      ["failed", "blocked", "cancelled"].includes(task.status),
+    )
+  ) {
+    throw new Error(
+      "Blocked Spec task verification reports require at least one stopped task.",
     );
   }
 
