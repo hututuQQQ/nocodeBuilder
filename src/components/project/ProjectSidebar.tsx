@@ -237,9 +237,9 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
           <div className="space-y-2">
             {projects.map((project) => {
               const isCurrent = currentProject?.id === project.id;
-              const canCreateIteration =
-                !isCurrent ||
-                canCreateIterationForCurrentProject(
+              const initialBuildCompleted =
+                isCurrent &&
+                hasCompletedInitialBuildForCurrentProject(
                   project.id,
                   conversationSummaries,
                   currentProject,
@@ -247,6 +247,11 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                   currentSpec,
                   historicalSpecs,
                 );
+              const canUseNewIteration = canUseNewIterationShortcut({
+                initialBuildCompleted,
+                isCurrentProject: isCurrent,
+                iterationBusy,
+              });
 
               return (
                 <div key={project.id}>
@@ -318,11 +323,17 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                       <button
                         aria-label={`New iteration in ${project.name}`}
                         className="grid size-7 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-teal-400/40 hover:text-teal-100 disabled:cursor-not-allowed disabled:text-zinc-700"
-                        disabled={iterationBusy || !canCreateIteration}
+                        disabled={!canUseNewIteration}
                         onClick={(event) =>
                           void handleCreateConversation(event, project.id)
                         }
-                        title="New iteration"
+                        title={
+                          !isCurrent
+                            ? "Select project first"
+                            : !initialBuildCompleted
+                              ? "Complete Initial Spec first"
+                              : "New iteration"
+                        }
                         type="button"
                       >
                         <SquarePen size={14} aria-hidden="true" />
@@ -332,7 +343,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
 
                   {isCurrent ? (
                     <div className="mt-1 space-y-1 pl-4">
-                      {!showArchivedConversations && !canCreateIteration ? (
+                      {!showArchivedConversations && !initialBuildCompleted ? (
                         <div className="px-2 py-1.5 text-xs text-zinc-500">
                           Complete Initial Spec first
                         </div>
@@ -681,7 +692,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
   );
 }
 
-function canCreateIterationForCurrentProject(
+function hasCompletedInitialBuildForCurrentProject(
   projectId: string,
   summaries: ProjectConversationSummary[],
   currentProject: { id: string } | null,
@@ -699,6 +710,18 @@ function canCreateIterationForCurrentProject(
     },
     projectId,
   );
+}
+
+export function canUseNewIterationShortcut({
+  initialBuildCompleted,
+  isCurrentProject,
+  iterationBusy,
+}: {
+  initialBuildCompleted: boolean;
+  isCurrentProject: boolean;
+  iterationBusy: boolean;
+}) {
+  return isCurrentProject && initialBuildCompleted && !iterationBusy;
 }
 
 function formatConversationMarker(conversation: ProjectConversationSummary) {
