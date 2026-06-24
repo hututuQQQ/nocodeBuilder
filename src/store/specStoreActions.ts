@@ -424,21 +424,21 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         isSpecWorkflowBusy(get()) ||
         !message
       ) {
-        return;
+        return false;
       }
 
       if (!isActiveConversationSpec(conversation, spec)) {
         set({
           projectError: "Active Spec does not belong to the current conversation.",
         });
-        return;
+        return false;
       }
 
       const config = await keyStore.getAiProviderConfig();
 
       if (!config) {
         set({ projectError: "Configure your AI provider first." });
-        return;
+        return false;
       }
 
       set({ isRevisingSpec: true, projectError: null });
@@ -462,7 +462,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         });
 
         if (!isCurrentSpecSnapshot(store, revisionSnapshot, "revising")) {
-          return;
+          return false;
         }
 
         const nextRevision = createRevisionFromPayload(
@@ -479,11 +479,13 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         );
 
         await saveSpecToStore(store, nextSpec);
+        return true;
       } catch (error) {
         if (isCurrentSpecSnapshot(store, revisionSnapshot, "revising")) {
           await saveSpecToStore(store, spec).catch(() => undefined);
         }
         recordSpecError(set, error);
+        return false;
       } finally {
         set({ isRevisingSpec: false });
       }

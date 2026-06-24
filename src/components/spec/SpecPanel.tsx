@@ -98,8 +98,11 @@ export function SpecPanel({
       return;
     }
 
-    await reviseCurrentSpec(feedback);
-    setFeedback("");
+    const revisionCreated = await reviseCurrentSpec(feedback);
+
+    if (revisionCreated) {
+      setFeedback("");
+    }
   }
 
   return (

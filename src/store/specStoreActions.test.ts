@@ -2489,6 +2489,34 @@ describe("spec store actions", () => {
     );
   });
 
+  it("returns true after creating a revised Spec draft", async () => {
+    const revision = createExecutableRevision();
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "review",
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: spec.id,
+        conversationId: spec.conversationId,
+        mode: "spec",
+        specIds: [spec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    const result = await actions.reviseCurrentSpec("Tighten the requirements");
+
+    expect(result).toBe(true);
+    expect(fake.saveSpec).toHaveBeenCalledTimes(2);
+    expect(store.get().currentSpec?.status).toBe("review");
+    expect(store.get().currentSpec?.revisions).toHaveLength(2);
+    expect(store.get().currentSpec?.currentRevisionId).not.toBe(revision.id);
+  });
+
   it("does not request another revision while the revision action is busy", async () => {
     const revision = createExecutableRevision();
     const spec = createSpec({
@@ -2509,8 +2537,9 @@ describe("spec store actions", () => {
     });
     const actions = createSpecActions(store as never);
 
-    await actions.reviseCurrentSpec("Tighten the requirements");
+    const result = await actions.reviseCurrentSpec("Tighten the requirements");
 
+    expect(result).toBe(false);
     expect(fake.saveSpec).not.toHaveBeenCalled();
     expect(fake.requestSpecRevision).not.toHaveBeenCalled();
     expect(store.get().currentSpec?.status).toBe("review");
@@ -2544,8 +2573,9 @@ describe("spec store actions", () => {
       });
       const actions = createSpecActions(store as never);
 
-      await actions.reviseCurrentSpec("Tighten the requirements");
+      const result = await actions.reviseCurrentSpec("Tighten the requirements");
 
+      expect(result).toBe(false);
       expect(fake.saveSpec).not.toHaveBeenCalled();
       expect(fake.requestSpecRevision).not.toHaveBeenCalled();
       expect(store.get().currentSpec?.status).toBe("review");
@@ -2573,8 +2603,9 @@ describe("spec store actions", () => {
     });
     const actions = createSpecActions(store as never);
 
-    await actions.reviseCurrentSpec("Tighten the requirements");
+    const result = await actions.reviseCurrentSpec("Tighten the requirements");
 
+    expect(result).toBe(false);
     expect(fake.saveSpec).not.toHaveBeenCalled();
     expect(fake.requestSpecRevision).not.toHaveBeenCalled();
     expect(store.get().currentSpec).toBe(staleSpec);
@@ -2604,8 +2635,9 @@ describe("spec store actions", () => {
     });
     const actions = createSpecActions(store as never);
 
-    await actions.reviseCurrentSpec("Tighten the requirements");
+    const result = await actions.reviseCurrentSpec("Tighten the requirements");
 
+    expect(result).toBe(false);
     expect(store.get().currentSpec?.status).toBe("review");
     expect(store.get().currentSpec?.currentRevisionId).toBe(revision.id);
     expect(store.get().projectError).toBe("revision failed");
@@ -2641,8 +2673,9 @@ describe("spec store actions", () => {
     });
     const actions = createSpecActions(store as never);
 
-    await actions.reviseCurrentSpec("Tighten the requirements");
+    const result = await actions.reviseCurrentSpec("Tighten the requirements");
 
+    expect(result).toBe(false);
     expect(fake.saveSpec).toHaveBeenCalledTimes(1);
     expect(store.get().currentSpec?.status).toBe("cancelled");
     expect(store.get().currentSpec?.cancelledAt).toBe(cancelledSpec.cancelledAt);
@@ -2688,8 +2721,9 @@ describe("spec store actions", () => {
     });
     const actions = createSpecActions(store as never);
 
-    await actions.reviseCurrentSpec("Tighten the requirements");
+    const result = await actions.reviseCurrentSpec("Tighten the requirements");
 
+    expect(result).toBe(false);
     expect(fake.saveSpec).toHaveBeenCalledTimes(1);
     expect(store.get().currentSpec).toBe(replacementSpec);
     expect(store.get().currentSpec?.revisions).toHaveLength(1);
@@ -2729,8 +2763,9 @@ describe("spec store actions", () => {
     });
     const actions = createSpecActions(store as never);
 
-    await actions.reviseCurrentSpec("Tighten the requirements");
+    const result = await actions.reviseCurrentSpec("Tighten the requirements");
 
+    expect(result).toBe(false);
     expect(fake.saveSpec).toHaveBeenCalledTimes(1);
     expect(store.get().currentSpec?.status).toBe("review");
     expect(store.get().currentSpec?.currentRevisionId).toBe(revision.id);

@@ -168,7 +168,7 @@ export type AppState = {
     brief: string,
   ) => Promise<ProjectConversation | null>;
   continueCurrentSpecExecution: () => Promise<void>;
-  reviseCurrentSpec: (feedback: string) => Promise<void>;
+  reviseCurrentSpec: (feedback: string) => Promise<boolean>;
   approveAndExecuteCurrentSpec: () => Promise<void>;
   retrySpecTask: (taskId: string) => Promise<void>;
   retrySpecVerification: () => Promise<void>;
