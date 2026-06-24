@@ -250,6 +250,36 @@ describe("agent run store actions", () => {
     expect(continueCurrentSpecExecution).toHaveBeenCalledTimes(1);
   });
 
+  it("does not resolve a stale Spec approval from another run", async () => {
+    const run = createRun("run-current-approval", {
+      contract: createSpecContract("modify"),
+      conversationId: "conversation-1",
+      phase: "waiting_approval",
+      status: "waiting_approval",
+    });
+    const staleApproval = createApproval("run-other");
+    const continueCurrentSpecExecution = vi.fn(async () => undefined);
+    fake.runs.set(run.id, run);
+    fake.approvals.push(staleApproval);
+    const store = createStore({
+      continueCurrentSpecExecution,
+      currentAgentApproval: staleApproval,
+      currentAgentRun: run,
+      currentConversation: createSpecConversation(),
+      currentSpec: createSpec({ runId: run.id }),
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await actions.approveCurrentAgentApproval();
+
+    expect(fake.specCalls).toHaveLength(0);
+    expect(store.get().currentAgentApproval).toBe(staleApproval);
+    expect(store.get().projectError).toBe(
+      "Approval does not belong to the current AgentRun.",
+    );
+    expect(continueCurrentSpecExecution).not.toHaveBeenCalled();
+  });
+
   it("does not request pause for waiting approval runs", async () => {
     fake.activeController = true;
     const run = createRun("run-waiting", {

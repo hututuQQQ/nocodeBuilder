@@ -275,6 +275,7 @@ async function resolveCurrentAgentApproval(
 
   try {
     assertCurrentSpecRunControl(get(), run);
+    assertApprovalBelongsToRun(run, approval);
     const resolved = await agentRuntimeApi.resolveApproval(
       project.id,
       run.id,
@@ -351,6 +352,12 @@ function assertCurrentSpecRunControl(state: AppState, run: AgentRun) {
 
   if (!isCurrentSpecRun(state, run)) {
     throw new Error("AgentRun does not belong to the current Spec task.");
+  }
+}
+
+function assertApprovalBelongsToRun(run: AgentRun, approval: AgentApproval) {
+  if (approval.runId !== run.id) {
+    throw new Error("Approval does not belong to the current AgentRun.");
   }
 }
 
