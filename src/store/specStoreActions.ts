@@ -14,6 +14,7 @@ import type {
   DevelopmentSpec,
   GeneratedSpecRevisionPayload,
   SpecRevision,
+  SpecStatus,
   SpecTask,
 } from "../spec-core/types";
 import {
@@ -439,7 +440,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
           feedback: message,
         });
 
-        if (!isCurrentSpecSnapshot(store, revisionSnapshot)) {
+        if (!isCurrentSpecSnapshot(store, revisionSnapshot, "revising")) {
           return;
         }
 
@@ -458,7 +459,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
 
         await saveSpecToStore(store, nextSpec);
       } catch (error) {
-        if (isCurrentSpecSnapshot(store, revisionSnapshot)) {
+        if (isCurrentSpecSnapshot(store, revisionSnapshot, "revising")) {
           await saveSpecToStore(store, spec).catch(() => undefined);
         }
         recordSpecError(set, error);
@@ -1748,6 +1749,7 @@ function isCurrentSpecSnapshot(
     projectId: string;
     specId: string;
   },
+  expectedStatus?: SpecStatus,
 ) {
   const state = store.get();
 
@@ -1759,7 +1761,8 @@ function isCurrentSpecSnapshot(
     state.currentConversation?.modeChangedAt === snapshot.modeChangedAt &&
     state.currentSpec?.id === snapshot.specId &&
     state.currentSpec.currentRevisionId === snapshot.currentRevisionId &&
-    state.currentSpec.status !== "cancelled"
+    state.currentSpec.status !== "cancelled" &&
+    (!expectedStatus || state.currentSpec.status === expectedStatus)
   );
 }
 

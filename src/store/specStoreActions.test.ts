@@ -2094,6 +2094,48 @@ describe("spec store actions", () => {
     expect(store.get().currentSpec?.revisions).toHaveLength(1);
   });
 
+  it("discards stale revision responses after the Spec leaves revising", async () => {
+    const revision = createExecutableRevision();
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "review",
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: spec.id,
+        conversationId: spec.conversationId,
+        mode: "spec",
+        modeChangedAt: "2026-01-01T00:00:00.000Z",
+        specIds: [spec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: spec,
+    });
+    fake.requestSpecRevision.mockImplementation(async () => {
+      const currentSpec = store.get().currentSpec;
+
+      store.set({
+        currentSpec: currentSpec
+          ? {
+              ...currentSpec,
+              status: "review",
+            }
+          : currentSpec,
+      });
+
+      return createGeneratedPayload();
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.reviseCurrentSpec("Tighten the requirements");
+
+    expect(fake.saveSpec).toHaveBeenCalledTimes(1);
+    expect(store.get().currentSpec?.status).toBe("review");
+    expect(store.get().currentSpec?.currentRevisionId).toBe(revision.id);
+    expect(store.get().currentSpec?.revisions).toHaveLength(1);
+  });
+
   it("recursively blocks all pending downstream tasks", () => {
     const spec = createSpec({
       tasks: [
