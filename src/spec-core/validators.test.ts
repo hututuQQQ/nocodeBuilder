@@ -557,6 +557,32 @@ describe("Spec validators", () => {
     ).toBeDefined();
   });
 
+  it("rejects lifecycle timestamps before creation", () => {
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createCompletedSpec(),
+        completedAt: "2026-06-23T23:59:00Z",
+      }),
+    ).toThrow(/completedAt cannot be before createdAt/i);
+
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec(),
+        cancelledAt: "2026-06-23T23:59:00Z",
+        status: "cancelled",
+      }),
+    ).toThrow(/cancelledAt cannot be before createdAt/i);
+
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec({
+          approvedAt: "2026-06-23T23:59:00Z",
+        }),
+        status: "approved",
+      }),
+    ).toThrow(/approvedAt cannot be before createdAt/i);
+  });
+
   it("rejects lifecycle timestamps that contradict Spec status", () => {
     expect(() =>
       validateDevelopmentSpec({

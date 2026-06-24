@@ -120,10 +120,18 @@ export function validateDevelopmentSpec(value: unknown): DevelopmentSpec {
 
   if (spec.completedAt !== undefined) {
     assertIsoTimestamp(spec.completedAt, "Spec completedAt");
+
+    if (new Date(spec.completedAt).getTime() < new Date(createdAt).getTime()) {
+      throw new Error("Spec completedAt cannot be before createdAt.");
+    }
   }
 
   if (spec.cancelledAt !== undefined) {
     assertIsoTimestamp(spec.cancelledAt, "Spec cancelledAt");
+
+    if (new Date(spec.cancelledAt).getTime() < new Date(createdAt).getTime()) {
+      throw new Error("Spec cancelledAt cannot be before createdAt.");
+    }
   }
 
   if (spec.status !== "completed" && spec.completedAt !== undefined) {
@@ -411,10 +419,19 @@ function validateRevision(
     throw new Error("Spec revision version must be a positive integer.");
   }
 
-  assertIsoTimestamp(revision.createdAt, "Spec revision createdAt");
+  const revisionCreatedAt = readRequiredString(
+    revision.createdAt,
+    "Spec revision createdAt",
+    80,
+  );
+  assertIsoTimestamp(revisionCreatedAt, "Spec revision createdAt");
 
   if (revision.approvedAt !== undefined) {
     assertIsoTimestamp(revision.approvedAt, "Spec revision approvedAt");
+
+    if (new Date(revision.approvedAt).getTime() < new Date(revisionCreatedAt).getTime()) {
+      throw new Error("Spec revision approvedAt cannot be before createdAt.");
+    }
   }
 
   const requirements = validatePersistedRequirements(revision.requirements);
