@@ -16,6 +16,8 @@ const fake = vi.hoisted(() => ({
   createSpec: vi.fn(),
   deleteUnattachedSpec: vi.fn(),
   listProjectConversations: vi.fn(),
+  listFiles: vi.fn(),
+  readFile: vi.fn(),
   readSpec: vi.fn(),
   requestFeatureSpec: vi.fn(),
   requestInitialSpec: vi.fn(),
@@ -74,13 +76,8 @@ vi.mock("../services/projects", () => ({
       fake.createProjectConversation(...args),
     listProjectConversations: (...args: unknown[]) =>
       fake.listProjectConversations(...args),
-    listFiles: vi.fn(async () => ({
-      children: [],
-      kind: "directory",
-      name: "app",
-      path: "",
-    })),
-    readFile: vi.fn(async () => ""),
+    listFiles: (...args: unknown[]) => fake.listFiles(...args),
+    readFile: (...args: unknown[]) => fake.readFile(...args),
     saveProjectConversation: (...args: unknown[]) =>
       fake.saveProjectConversation(...args),
     switchProjectConversationMode: (...args: unknown[]) =>
@@ -113,6 +110,8 @@ describe("spec store actions", () => {
     fake.createSpec.mockReset();
     fake.deleteUnattachedSpec.mockReset();
     fake.listProjectConversations.mockReset();
+    fake.listFiles.mockReset();
+    fake.readFile.mockReset();
     fake.readSpec.mockReset();
     fake.requestFeatureSpec.mockReset();
     fake.requestInitialSpec.mockReset();
@@ -136,6 +135,13 @@ describe("spec store actions", () => {
     fake.readSpec.mockImplementation(async (_projectId: string, specId: string) =>
       createSpec({ id: specId, status: "completed" }),
     );
+    fake.listFiles.mockResolvedValue({
+      children: [],
+      kind: "directory",
+      name: "app",
+      path: "",
+    });
+    fake.readFile.mockResolvedValue("");
     fake.requestFeatureSpec.mockResolvedValue(createGeneratedPayload());
     fake.requestInitialSpec.mockResolvedValue(createGeneratedPayload());
     fake.requestSpecRevision.mockResolvedValue(createGeneratedPayload());
@@ -190,6 +196,105 @@ describe("spec store actions", () => {
       store.get().currentSpec?.id,
     ]);
     expect(store.get().chatMessages).toHaveLength(1);
+  });
+
+  it("uses target project context when creating a Feature Spec for another project", async () => {
+    const currentProject = createProject({
+      id: "project-current",
+      name: "Current Project",
+    });
+    const targetProject = createProject({
+      id: "project-target",
+      name: "Target Project",
+    });
+    fake.listProjectConversations.mockResolvedValue([
+      createConversationSummary({
+        activeSpecId: "spec-target-initial",
+        id: "conversation-target-initial",
+        kind: "initial_build",
+        mode: "spec",
+        projectId: targetProject.id,
+        title: "Initial build",
+      }),
+    ]);
+    fake.readSpec.mockResolvedValue(
+      createSpec({
+        conversationId: "conversation-target-initial",
+        id: "spec-target-initial",
+        projectId: targetProject.id,
+        status: "completed",
+      }),
+    );
+    fake.listFiles.mockResolvedValue({
+      children: [
+        {
+          kind: "file",
+          name: "page.tsx",
+          path: "app/page.tsx",
+        },
+      ],
+      kind: "directory",
+      name: "app",
+      path: "",
+    });
+    fake.createProjectConversation.mockImplementation(
+      async (projectId: string, input: Record<string, unknown>) =>
+        createConversation(projectId, input),
+    );
+    const store = createStore({
+      changeHistory: [{ id: "stale-change" }],
+      currentConversation: createConversation(currentProject.id, {
+        conversationId: "conversation-current",
+        mode: "chat",
+        title: "Current chat",
+      }),
+      currentProject,
+      fileTree: {
+        children: [
+          {
+            kind: "file",
+            name: "stale.tsx",
+            path: "app/stale.tsx",
+          },
+        ],
+        kind: "directory",
+        name: "app",
+        path: "",
+      },
+      projects: [currentProject, targetProject],
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.createFeatureSpecIteration(
+      targetProject.id,
+      "Checkout copy",
+      "Improve checkout copy",
+    );
+
+    const requestInput = fake.requestFeatureSpec.mock.calls[0][0] as {
+      context: {
+        changeHistory: unknown[];
+        currentConversation: {
+          id?: string;
+          messages: unknown[];
+          title?: string;
+        };
+      };
+    };
+    expect(fake.listFiles).toHaveBeenCalledWith(targetProject.id);
+    expect(requestInput.context.changeHistory).toEqual([]);
+    expect(requestInput.context.currentConversation).toEqual({
+      id: undefined,
+      messages: [],
+      title: undefined,
+    });
+    expect(fake.createProjectConversation).toHaveBeenCalledWith(
+      targetProject.id,
+      expect.objectContaining({
+        kind: "iteration",
+        mode: "spec",
+      }),
+    );
   });
 
   it("does not leave a conversation when Feature Spec generation fails", async () => {
@@ -1079,6 +1184,44 @@ describe("spec store actions", () => {
     expect(store.get().currentAgentRun?.id).toBe("run-waiting");
     expect(store.get().agentRuns.map((run) => run.id)).toEqual(["run-waiting"]);
     expect(store.get().currentAgentApproval?.id).toBe("approval-1");
+  });
+
+  it("keeps paused runs as running during Spec reconcile", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-paused",
+          status: "running",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    fake.agentRuns.set("run-paused", createRun("run-paused", {
+      phase: "paused",
+      status: "paused",
+    }));
+    const store = createStore({
+      currentAgentApproval: createApproval("approval-stale", "run-paused"),
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    expect(fake.saveSpec).not.toHaveBeenCalled();
+    expect(store.get().currentSpec?.status).toBe("building");
+    expect(store.get().currentSpec?.revisions[0].tasks[0]).toMatchObject({
+      runId: "run-paused",
+      status: "running",
+    });
+    expect(store.get().currentAgentRun?.id).toBe("run-paused");
+    expect(store.get().currentAgentRun?.status).toBe("paused");
+    expect(store.get().agentRuns.map((run) => run.id)).toEqual(["run-paused"]);
+    expect(store.get().currentAgentApproval).toBeNull();
   });
 
   it("blocks completion when a required acceptance criterion is pending", async () => {
@@ -2944,7 +3087,7 @@ function createStore(patch: Partial<StoreState> = {}) {
   };
 }
 
-function createProject(): ProjectInfo {
+function createProject(patch: Partial<ProjectInfo> = {}): ProjectInfo {
   return {
     createdAt: "2026-01-01T00:00:00.000Z",
     framework: "next-app-router",
@@ -2953,6 +3096,7 @@ function createProject(): ProjectInfo {
     name: "Project",
     path: "D:/projects/project-1",
     updatedAt: "2026-01-01T00:00:00.000Z",
+    ...patch,
   };
 }
 

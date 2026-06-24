@@ -1796,20 +1796,25 @@ function changedFilesIncludePackageJson(changedFiles: string[] | undefined) {
 
 async function buildFeatureSpecContext(store: StoreAccess, projectId: string) {
   const state = store.get();
-  const fileTree = state.fileTree ?? await projectApi.listFiles(projectId);
+  const isCurrentProject = state.currentProject?.id === projectId;
+  const fileTree =
+    isCurrentProject && state.fileTree
+      ? state.fileTree
+      : await projectApi.listFiles(projectId);
   const contextPaths = getContextFilePaths(fileTree).slice(0, 12);
   const files = await readContextFiles(projectId, fileTree, contextPaths);
   const [siteSpec, sourceMap] = await Promise.all([
     agentRuntimeApi.readSiteSpec(projectId).catch(() => null),
     agentRuntimeApi.readSiteSourceMap(projectId).catch(() => null),
   ]);
+  const currentConversation = isCurrentProject ? state.currentConversation : null;
 
   return {
-    changeHistory: state.changeHistory.slice(0, 8),
+    changeHistory: isCurrentProject ? state.changeHistory.slice(0, 8) : [],
     currentConversation: {
-      id: state.currentConversation?.id,
-      messages: state.currentConversation?.messages.slice(-12) ?? [],
-      title: state.currentConversation?.title,
+      id: currentConversation?.id,
+      messages: currentConversation?.messages.slice(-12) ?? [],
+      title: currentConversation?.title,
     },
     fileTree: formatProjectFileTree(fileTree),
     files,
