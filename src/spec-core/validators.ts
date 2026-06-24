@@ -155,6 +155,16 @@ export function validateDevelopmentSpec(value: unknown): DevelopmentSpec {
   }
 
   if (
+    spec.failureMessage !== undefined &&
+    spec.status !== "completed" &&
+    !["blocked", "failed", "cancelled"].includes(status)
+  ) {
+    throw new Error(
+      "Spec failureMessage is only valid for blocked, failed, or cancelled Specs.",
+    );
+  }
+
+  if (
     spec.status === "completed" &&
     !isSuccessfulFinalBuildCommand(spec.finalVerification?.command)
   ) {

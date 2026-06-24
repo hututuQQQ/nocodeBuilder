@@ -262,6 +262,41 @@ describe("Spec validators", () => {
     ).toThrow(/successful finalVerification/i);
   });
 
+  it("allows failure messages only on failed, blocked, or cancelled specs", () => {
+    for (const status of ["review", "approved", "building", "verifying"] as const) {
+      expect(() =>
+        validateDevelopmentSpec({
+          ...createSpec(),
+          failureMessage: "Stale failure message.",
+          status,
+        }),
+      ).toThrow(/failureMessage is only valid/i);
+    }
+
+    expect(
+      validateDevelopmentSpec({
+        ...createSpec({ approvedAt: "2026-06-24T00:01:00Z" }),
+        failureMessage: "Task failed.",
+        status: "blocked",
+      }),
+    ).toBeDefined();
+    expect(
+      validateDevelopmentSpec({
+        ...createSpec(),
+        failureMessage: "Fatal orchestration failure.",
+        status: "failed",
+      }),
+    ).toBeDefined();
+    expect(
+      validateDevelopmentSpec({
+        ...createSpec(),
+        cancelledAt: "2026-06-24T00:01:00Z",
+        failureMessage: "Cancelled after task failure.",
+        status: "cancelled",
+      }),
+    ).toBeDefined();
+  });
+
   it("allows final verification only on blocked or completed specs", () => {
     const finalVerification = {
       checkedAt: "2026-06-24T00:01:00Z",
