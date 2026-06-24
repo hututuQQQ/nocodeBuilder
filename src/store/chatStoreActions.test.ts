@@ -112,6 +112,28 @@ describe("chat store actions", () => {
     expect(store.get().currentConversation?.messages).toHaveLength(2);
   });
 
+  it("answers blocked Spec messages with recovery guidance", async () => {
+    const store = createStore({
+      currentConversation: createConversation({
+        activeSpecId: "spec-1",
+        mode: "spec",
+        specIds: ["spec-1"],
+      }),
+      currentSpec: createBlockedSpec(),
+    });
+    const actions = createChatActions(store as never);
+
+    await actions.sendMessage("How do I fix this?");
+
+    expect(modifyCurrentProject).not.toHaveBeenCalled();
+    expect(store.get().chatMessages).toHaveLength(2);
+    expect(store.get().chatMessages[1]).toMatchObject({
+      content:
+        "This Spec is blocked. Retry the failed task from the Spec summary, or request a revision if the plan needs to change.",
+      role: "assistant",
+    });
+  });
+
   it("adds Spec execution messages as steering only for the current running task", async () => {
     const run = createRun("run-current", {
       contract: createSpecContract({ taskId: "task-1" }),
@@ -402,5 +424,27 @@ function createReviewSpec(): DevelopmentSpec {
       },
     ],
     status: "review",
+  };
+}
+
+function createBlockedSpec(): DevelopmentSpec {
+  const spec = createReviewSpec();
+
+  return {
+    ...spec,
+    failureMessage: "Task Initialize Next.js project with dependencies failed.",
+    revisions: [
+      {
+        ...spec.revisions[0],
+        tasks: [
+          {
+            ...spec.revisions[0].tasks[0],
+            error: "AgentRun ended without a passed verification report.",
+            status: "failed",
+          },
+        ],
+      },
+    ],
+    status: "blocked",
   };
 }

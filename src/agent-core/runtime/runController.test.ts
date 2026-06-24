@@ -482,6 +482,45 @@ describe("Headless RunController", () => {
     expect(ports.events.filter((event) => event.type === "tool.completed")).toHaveLength(1);
   });
 
+  it("surfaces policy denials to the next model turn", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        {
+          type: "tool_call",
+          tool: "write_files",
+          args: {
+            files: [{ content: "export const secret = true;", path: "lib/secret.ts" }],
+            summary: "Write outside scope",
+          },
+        },
+        { type: "answer", message: "I need to stay inside the allowed paths." },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    const controller = new RunController(ports);
+    const baseContract = compileTaskContract({ objective: "Change scoped files" });
+    const contract: TaskContract = {
+      ...baseContract,
+      scope: {
+        ...baseContract.scope,
+        allowedPaths: ["app/**"],
+      },
+    };
+
+    const run = await controller.start({
+      contract,
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-policy-denied",
+    });
+
+    expect(run.status).toBe("completed");
+    expect(ports.contexts[1]?.observations).toContain(
+      "Policy denied write_files: Tool target is outside the task's allowed paths.",
+    );
+    expect(ports.events.map((event) => event.type)).toContain("policy.denied");
+  });
+
   it("stops before executing a write tool after maxMutations is reached", async () => {
     const ports = createFakePorts({
       modelActions: [

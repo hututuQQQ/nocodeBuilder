@@ -40,13 +40,18 @@ export function compileSpecTaskContract({
     return criterion;
   });
 
+  const allowedPaths =
+    spec.kind === "initial_build" && executionMode === "generate"
+      ? uniquePaths([...task.allowedPaths, ...base.scope.allowedPaths])
+      : task.allowedPaths;
+
   return validateTaskContract({
     ...base,
     acceptanceCriteria,
     objective: task.objective,
     scope: {
       ...base.scope,
-      allowedPaths: task.allowedPaths,
+      allowedPaths,
     },
     source: {
       acceptanceCriteriaIds: task.acceptanceCriteriaIds,
@@ -58,4 +63,8 @@ export function compileSpecTaskContract({
       taskId: task.id,
     },
   });
+}
+
+function uniquePaths(paths: string[]) {
+  return Array.from(new Set(paths));
 }

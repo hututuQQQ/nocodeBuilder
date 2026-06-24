@@ -59,6 +59,33 @@ describe("compileSpecTaskContract", () => {
     expect(backendContract.permissions.databaseChange).toBe("ask");
   });
 
+  it("keeps default scaffold paths for the Initial Build generate task", () => {
+    const revision = createRevision({
+      tasks: [
+        createTask({
+          allowedPaths: ["package.json", "app/**"],
+          objective: "Initialize the Next.js project foundation.",
+        }),
+      ],
+    });
+    const spec = createSpec(revision, { kind: "initial_build" });
+    const contract = compileSpecTaskContract({
+      executionMode: "generate",
+      revision,
+      spec,
+      task: revision.tasks[0],
+    });
+
+    expect(contract.scope.allowedPaths).toEqual(
+      expect.arrayContaining([
+        "package.json",
+        "app/**",
+        "data/**",
+        "postcss.config.*",
+      ]),
+    );
+  });
+
   it("infers Initial Build style tasks normally after generation", () => {
     const styleTask = createTask({
       objective: "Polish the button colors and spacing.",

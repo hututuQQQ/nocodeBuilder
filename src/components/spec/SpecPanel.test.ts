@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  canSendSpecChatMessage,
   canShowSpecTaskRetry,
+  canUseSpecChat,
   findFirstRetryableSpecTask,
   formatAcceptanceEvidenceLabels,
   getAcceptanceStatusSymbol,
@@ -100,5 +102,53 @@ describe("SpecPanel acceptance criteria projection", () => {
     expect(findFirstRetryableSpecTask([blockedTask, failedDependency])).toBe(
       failedDependency,
     );
+  });
+
+  it("allows Spec chat steering while the current task is busy", () => {
+    expect(
+      canSendSpecChatMessage({
+        canSteerActiveRun: true,
+        draft: "try a smaller first step",
+        hasConversation: true,
+        hasProject: true,
+        isArchived: false,
+        isBusy: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("blocks Spec chat sends during non-steering busy states", () => {
+    expect(
+      canSendSpecChatMessage({
+        canSteerActiveRun: false,
+        draft: "change the plan",
+        hasConversation: true,
+        hasProject: true,
+        isArchived: false,
+        isBusy: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps Spec chat input available before a message is typed", () => {
+    expect(
+      canUseSpecChat({
+        canSteerActiveRun: false,
+        hasConversation: true,
+        hasProject: true,
+        isArchived: false,
+        isBusy: false,
+      }),
+    ).toBe(true);
+    expect(
+      canSendSpecChatMessage({
+        canSteerActiveRun: false,
+        draft: "",
+        hasConversation: true,
+        hasProject: true,
+        isArchived: false,
+        isBusy: false,
+      }),
+    ).toBe(false);
   });
 });

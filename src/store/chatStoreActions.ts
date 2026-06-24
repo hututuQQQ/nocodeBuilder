@@ -178,6 +178,8 @@ function guidanceForSpecStatus(status: string) {
       return "This Spec is executing. Messages are accepted only as task steering.";
     case "verifying":
       return "Final verification is running. Wait for the result before changing modes.";
+    case "blocked":
+      return "This Spec is blocked. Retry the failed task from the Spec summary, or request a revision if the plan needs to change.";
     case "completed":
       return "This Spec is complete. Switch to Chat or create a new iteration for follow-up work.";
     case "failed":

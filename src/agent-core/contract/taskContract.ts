@@ -9,8 +9,11 @@ const DEFAULT_ALLOWED_PATHS = [
   "styles/**",
   "package.json",
   "next.config.*",
+  "postcss.config.*",
   "tailwind.config.*",
   "tsconfig.json",
+  "vercel.json",
+  "middleware.ts",
 ];
 
 const DEFAULT_FORBIDDEN_PATHS = [

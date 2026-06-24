@@ -1,13 +1,16 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
+  Bot,
   CheckCircle2,
   FileText,
   History,
   Loader2,
+  MessageSquareText,
   RefreshCcw,
   SendHorizontal,
   ShieldCheck,
+  UserRound,
   XCircle,
 } from "lucide-react";
 import type { ConfiguredModelOption } from "../../App";
@@ -16,6 +19,7 @@ import {
   type AiProviderId,
 } from "../../services/aiProviders";
 import { useAppStore } from "../../store/appStore";
+import type { ChatMessage } from "../../store/chatMessages";
 import type {
   DevelopmentSpec,
   SpecAcceptanceResult,
@@ -46,9 +50,12 @@ export function SpecPanel({
   onChangeModel,
 }: SpecPanelProps) {
   const [feedback, setFeedback] = useState("");
+  const [chatDraft, setChatDraft] = useState("");
   const [modelError, setModelError] = useState<string | null>(null);
+  const chatMessages = useAppStore((state) => state.chatMessages);
   const currentProject = useAppStore((state) => state.currentProject);
   const currentConversation = useAppStore((state) => state.currentConversation);
+  const currentAgentRun = useAppStore((state) => state.currentAgentRun);
   const currentSpec = useAppStore((state) => state.currentSpec);
   const historicalSpecs = useAppStore((state) => state.historicalSpecs);
   const isLoadingSpec = useAppStore((state) => state.isLoadingSpec);
@@ -67,6 +74,7 @@ export function SpecPanel({
   const retrySpecVerification = useAppStore(
     (state) => state.retrySpecVerification,
   );
+  const sendMessage = useAppStore((state) => state.sendMessage);
   const provider = getAiProviderDefinition(activeProvider);
   const activeSelection = { provider: activeProvider, model: activeModel };
   const availableModelOptions =
@@ -81,6 +89,24 @@ export function SpecPanel({
     isExecutingSpec ||
     isVerifyingSpec ||
     isSwitchingIterationMode;
+  const canSteerActiveRun = Boolean(
+    currentAgentRun && !isTerminalAgentRun(currentAgentRun.status),
+  );
+  const canUseChat = canUseSpecChat({
+    canSteerActiveRun,
+    hasConversation: Boolean(currentConversation),
+    hasProject: Boolean(currentProject),
+    isArchived: Boolean(currentConversation?.archivedAt),
+    isBusy: busy,
+  });
+  const canSendChat = canSendSpecChatMessage({
+    canSteerActiveRun,
+    draft: chatDraft,
+    hasConversation: Boolean(currentConversation),
+    hasProject: Boolean(currentProject),
+    isArchived: Boolean(currentConversation?.archivedAt),
+    isBusy: busy,
+  });
 
   async function handleChangeModel(selection: ConfiguredModelOption) {
     setModelError(null);
@@ -104,6 +130,33 @@ export function SpecPanel({
     if (revisionCreated) {
       setFeedback("");
     }
+  }
+
+  function submitChat() {
+    if (!canSendChat) {
+      return;
+    }
+
+    void sendMessage(chatDraft);
+    setChatDraft("");
+  }
+
+  function handleChatSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    submitChat();
+  }
+
+  function handleChatKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (
+      event.key !== "Enter" ||
+      event.shiftKey ||
+      event.nativeEvent.isComposing
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    submitChat();
   }
 
   return (
@@ -193,6 +246,17 @@ export function SpecPanel({
               onChangeFeedback={setFeedback}
               onSubmitRevision={submitRevision}
               spec={currentSpec}
+            />
+            <SpecChat
+              canSend={canSendChat}
+              canSteerActiveRun={canSteerActiveRun}
+              canUse={canUseChat}
+              draft={chatDraft}
+              messages={chatMessages}
+              onChangeDraft={setChatDraft}
+              onKeyDown={handleChatKeyDown}
+              onSubmit={handleChatSubmit}
+              specStatus={currentSpec.status}
             />
             <BuildView
               busy={busy}
@@ -503,6 +567,172 @@ function ReviewActions({
       </form>
     </section>
   );
+}
+
+function SpecChat({
+  canSend,
+  canSteerActiveRun,
+  canUse,
+  draft,
+  messages,
+  onChangeDraft,
+  onKeyDown,
+  onSubmit,
+  specStatus,
+}: {
+  canSend: boolean;
+  canSteerActiveRun: boolean;
+  canUse: boolean;
+  draft: string;
+  messages: ChatMessage[];
+  onChangeDraft: (value: string) => void;
+  onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  specStatus: DevelopmentSpec["status"];
+}) {
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ block: "end" });
+  }, [messages]);
+
+  return (
+    <section className="rounded-md border border-zinc-800 bg-zinc-950/70 p-4">
+      <SectionHeader
+        icon={<MessageSquareText size={15} aria-hidden="true" />}
+        title="Chat"
+      />
+      <div className="mt-3 max-h-72 space-y-3 overflow-y-auto rounded-md border border-zinc-800 bg-zinc-900/40 p-3">
+        {messages.length === 0 ? (
+          <p className="py-6 text-center text-xs text-zinc-600">
+            No messages yet.
+          </p>
+        ) : (
+          messages.map((message) => (
+            <SpecChatMessage key={message.id} message={message} />
+          ))
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+      <form className="mt-3 flex gap-3" onSubmit={onSubmit}>
+        <textarea
+          className="h-16 min-h-16 flex-1 resize-none rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-sm leading-5 text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/10 disabled:cursor-not-allowed disabled:text-zinc-600"
+          disabled={!canUse}
+          onChange={(event) => onChangeDraft(event.currentTarget.value)}
+          onKeyDown={onKeyDown}
+          placeholder={getSpecChatPlaceholder(specStatus, canSteerActiveRun)}
+          value={draft}
+        />
+        <button
+          className="flex h-16 w-24 shrink-0 items-center justify-center gap-2 rounded-md border border-teal-400/30 bg-teal-400/10 text-sm font-medium text-teal-100 transition hover:border-teal-300/60 hover:bg-teal-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
+          disabled={!canSend}
+          type="submit"
+        >
+          {canUse ? (
+            <SendHorizontal size={15} aria-hidden="true" />
+          ) : (
+            <Loader2 size={15} className="animate-spin" aria-hidden="true" />
+          )}
+          {canSteerActiveRun ? "Steer" : "Send"}
+        </button>
+      </form>
+    </section>
+  );
+}
+
+function SpecChatMessage({ message }: { message: ChatMessage }) {
+  const isUser = message.role === "user";
+
+  return (
+    <article
+      className={`max-w-[92%] whitespace-pre-wrap rounded-md border px-3 py-2 text-sm leading-5 ${
+        isUser
+          ? "ml-auto border-teal-400/30 bg-teal-400/10 text-teal-50"
+          : "border-zinc-800 bg-zinc-950/70 text-zinc-300"
+      }`}
+    >
+      <div
+        className={`mb-1 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] ${
+          isUser ? "text-teal-200/70" : "text-zinc-500"
+        }`}
+      >
+        {isUser ? (
+          <UserRound size={12} aria-hidden="true" />
+        ) : (
+          <Bot size={12} aria-hidden="true" />
+        )}
+        {message.role}
+      </div>
+      {message.content || (message.isStreaming ? "Working" : "")}
+    </article>
+  );
+}
+
+export function canSendSpecChatMessage({
+  canSteerActiveRun,
+  draft,
+  hasConversation,
+  hasProject,
+  isArchived,
+  isBusy,
+}: {
+  canSteerActiveRun: boolean;
+  draft: string;
+  hasConversation: boolean;
+  hasProject: boolean;
+  isArchived: boolean;
+  isBusy: boolean;
+}) {
+  return (
+    Boolean(draft.trim()) &&
+    canUseSpecChat({
+      canSteerActiveRun,
+      hasConversation,
+      hasProject,
+      isArchived,
+      isBusy,
+    })
+  );
+}
+
+export function canUseSpecChat({
+  canSteerActiveRun,
+  hasConversation,
+  hasProject,
+  isArchived,
+  isBusy,
+}: {
+  canSteerActiveRun: boolean;
+  hasConversation: boolean;
+  hasProject: boolean;
+  isArchived: boolean;
+  isBusy: boolean;
+}) {
+  return (
+    hasProject &&
+    hasConversation &&
+    !isArchived &&
+    (!isBusy || canSteerActiveRun)
+  );
+}
+
+function getSpecChatPlaceholder(
+  status: DevelopmentSpec["status"],
+  canSteerActiveRun: boolean,
+) {
+  if (canSteerActiveRun) {
+    return "Add steering for the running task...";
+  }
+
+  if (status === "blocked") {
+    return "Ask about the blocked Spec...";
+  }
+
+  if (status === "review") {
+    return "Ask about this Spec...";
+  }
+
+  return "Message about this Spec...";
 }
 
 function BuildView({
@@ -825,6 +1055,10 @@ function safeCurrentRevision(spec: DevelopmentSpec) {
   } catch {
     return null;
   }
+}
+
+function isTerminalAgentRun(status: string) {
+  return ["completed", "failed", "cancelled", "budget_exceeded"].includes(status);
 }
 
 function encodeModelSelection(selection: ConfiguredModelOption) {
