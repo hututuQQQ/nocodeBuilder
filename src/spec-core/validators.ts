@@ -195,6 +195,10 @@ export function validateDevelopmentSpec(value: unknown): DevelopmentSpec {
     throw new Error("Spec currentRevisionId must reference a revision.");
   }
 
+  validateCurrentRevisionApproval(
+    status as DevelopmentSpec["status"],
+    currentRevision,
+  );
   validateSpecTaskStateConsistency(
     status as DevelopmentSpec["status"],
     currentRevision,
@@ -583,6 +587,29 @@ function validateSpecTaskStateConsistency(
     currentRevision.tasks.some((task) => task.status === "running")
   ) {
     throw new Error("Terminal Spec cannot include running tasks.");
+  }
+}
+
+function validateCurrentRevisionApproval(
+  status: DevelopmentSpec["status"],
+  currentRevision: SpecRevision,
+) {
+  if (
+    ["approved", "building", "verifying", "blocked", "completed"].includes(status) &&
+    !currentRevision.approvedAt
+  ) {
+    throw new Error(
+      `${formatSpecStatus(status)} Spec requires current revision approvedAt.`,
+    );
+  }
+
+  if (
+    ["drafting", "review", "revising"].includes(status) &&
+    currentRevision.approvedAt
+  ) {
+    throw new Error(
+      `${formatSpecStatus(status)} Spec cannot include approvedAt on the current revision.`,
+    );
   }
 }
 

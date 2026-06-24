@@ -262,9 +262,43 @@ describe("Spec validators", () => {
     ).toThrow(/successful finalVerification/i);
   });
 
+  it("requires executable specs to have an approved current revision", () => {
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec(),
+        status: "approved",
+      }),
+    ).toThrow(/requires current revision approvedAt/i);
+
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createCompletedSpec({ approvedAt: undefined }),
+      }),
+    ).toThrow(/requires current revision approvedAt/i);
+
+    expect(() =>
+      validateDevelopmentSpec(
+        createSpec({
+          approvedAt: "2026-06-24T00:01:00Z",
+        }),
+      ),
+    ).toThrow(/cannot include approvedAt/i);
+
+    expect(
+      validateDevelopmentSpec({
+        ...createSpec({
+          approvedAt: "2026-06-24T00:01:00Z",
+        }),
+        status: "approved",
+      }),
+    ).toBeDefined();
+  });
+
   it("requires completed specs to have passed task run evidence", () => {
     const completedSpec = {
-      ...createSpec(),
+      ...createSpec({
+        approvedAt: "2026-06-24T00:01:00Z",
+      }),
       completedAt: "2026-06-24T00:01:00Z",
       finalVerification: {
         checkedAt: "2026-06-24T00:01:00Z",
@@ -340,14 +374,17 @@ describe("Spec validators", () => {
   it("requires verifying specs to have passed task run evidence", () => {
     expect(() =>
       validateDevelopmentSpec({
-        ...createSpec(),
+        ...createSpec({
+          approvedAt: "2026-06-24T00:01:00Z",
+        }),
         status: "verifying",
       }),
     ).toThrow(/verifying spec requires all current revision tasks/i);
 
     expect(
-      validateDevelopmentSpec(
-        createSpec({
+      validateDevelopmentSpec({
+        ...createSpec({
+          approvedAt: "2026-06-24T00:01:00Z",
           tasks: [
             {
               ...createGeneratedPayload().tasks[0],
@@ -356,7 +393,8 @@ describe("Spec validators", () => {
             },
           ],
         }),
-      ),
+        status: "verifying",
+      }),
     ).toBeDefined();
   });
 
@@ -686,6 +724,7 @@ function createCompletedSpec(
 ): DevelopmentSpec {
   return {
     ...createSpec({
+      approvedAt: "2026-06-24T00:01:00Z",
       tasks: [
         {
           ...createGeneratedPayload().tasks[0],
