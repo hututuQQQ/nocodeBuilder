@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { compileTaskContract } from "../agent-core/contract/taskContract";
 import type { AgentRun } from "../agent-core/types";
 import type { DevelopmentSpec } from "../spec-core/types";
+import { modifyCurrentProject } from "./agentWorkflow";
 import { createChatActions } from "./chatStoreActions";
 
 vi.mock("./agentWorkflow", () => ({
@@ -9,6 +10,10 @@ vi.mock("./agentWorkflow", () => ({
 }));
 
 describe("chat store actions", () => {
+  beforeEach(() => {
+    vi.mocked(modifyCurrentProject).mockReset();
+  });
+
   it("does not auto-create a Chat conversation when none is active", async () => {
     let createConversationCalls = 0;
     const store = createStore({
@@ -47,6 +52,33 @@ describe("chat store actions", () => {
     expect(store.get().projectError).toBe(
       "Wait for the Spec revision to finish before sending messages.",
     );
+  });
+
+  it("keeps review Spec messages in Spec guidance without modifying the project", async () => {
+    const store = createStore({
+      currentConversation: createConversation({
+        activeSpecId: "spec-1",
+        mode: "spec",
+        specIds: ["spec-1"],
+      }),
+      currentSpec: createReviewSpec(),
+    });
+    const actions = createChatActions(store as never);
+
+    await actions.sendMessage("Please change the requirements");
+
+    expect(modifyCurrentProject).not.toHaveBeenCalled();
+    expect(store.get().chatMessages).toHaveLength(2);
+    expect(store.get().chatMessages[0]).toMatchObject({
+      content: "Please change the requirements",
+      role: "user",
+    });
+    expect(store.get().chatMessages[1]).toMatchObject({
+      content:
+        "Use Request revision to change this Spec, or Approve and start build when it is ready.",
+      role: "assistant",
+    });
+    expect(store.get().currentConversation?.messages).toHaveLength(2);
   });
 
   it("adds Spec execution messages as steering only for the current running task", async () => {
@@ -312,5 +344,26 @@ function createSpec({ runId }: { runId: string }): DevelopmentSpec {
     ],
     status: "building",
     updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+function createReviewSpec(): DevelopmentSpec {
+  const spec = createSpec({ runId: "run-current" });
+
+  return {
+    ...spec,
+    revisions: [
+      {
+        ...spec.revisions[0],
+        tasks: [
+          {
+            ...spec.revisions[0].tasks[0],
+            runId: undefined,
+            status: "pending",
+          },
+        ],
+      },
+    ],
+    status: "review",
   };
 }
