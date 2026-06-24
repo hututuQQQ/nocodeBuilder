@@ -367,14 +367,12 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                         visibleConversations.map((conversation) => {
                           const isSelected =
                             currentConversation?.id === conversation.id;
-                          const archiveDisabled =
-                            conversation.kind === "initial_build" &&
-                            !isInitialBuildCompleted(
-                              conversation,
-                              currentConversation,
-                              currentSpec,
-                              historicalSpecs,
-                            );
+                          const canArchive = canArchiveConversation(
+                            conversation,
+                            currentConversation,
+                            currentSpec,
+                            historicalSpecs,
+                          );
 
                           return (
                             <div
@@ -429,7 +427,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                                 >
                                   <RotateCcw size={12} aria-hidden="true" />
                                 </button>
-                              ) : archiveDisabled ? null : (
+                              ) : !canArchive ? null : (
                                 <button
                                   aria-label={`Archive ${conversation.title}`}
                                   className="grid size-6 shrink-0 place-items-center rounded text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-100"
@@ -724,12 +722,29 @@ export function canUseNewIterationShortcut({
   return isCurrentProject && initialBuildCompleted && !iterationBusy;
 }
 
-function formatConversationMarker(conversation: ProjectConversationSummary) {
+export function formatConversationMarker(conversation: ProjectConversationSummary) {
   if (conversation.kind === "initial_build") {
     return "Spec · Locked";
   }
 
   return conversation.mode === "spec" ? "Spec" : "Chat";
+}
+
+export function canArchiveConversation(
+  summary: ProjectConversationSummary,
+  currentConversation: ProjectConversation | null,
+  currentSpec: DevelopmentSpec | null,
+  historicalSpecs: DevelopmentSpec[],
+) {
+  return (
+    summary.kind !== "initial_build" ||
+    isInitialBuildCompleted(
+      summary,
+      currentConversation,
+      currentSpec,
+      historicalSpecs,
+    )
+  );
 }
 
 function isInitialBuildCompleted(
