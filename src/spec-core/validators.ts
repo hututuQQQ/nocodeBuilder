@@ -580,6 +580,10 @@ function validatePersistedTask(value: unknown): SpecTask {
     throw new Error(`Task ${id} runId must be a non-empty string.`);
   }
 
+  if (["pending", "blocked"].includes(status) && value.runId !== undefined) {
+    throw new Error(`Task ${id} with status ${status} cannot include runId.`);
+  }
+
   if ((status === "running" || status === "passed") && value.runId === undefined) {
     throw new Error(`Task ${id} with status ${status} requires runId.`);
   }

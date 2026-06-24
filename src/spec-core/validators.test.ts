@@ -476,6 +476,23 @@ describe("Spec validators", () => {
       ),
     ).toThrow(/status passed requires runId/i);
 
+    for (const status of ["pending", "blocked"] as const) {
+      expect(() =>
+        validateDevelopmentSpec(
+          createSpec({
+            tasks: [
+              {
+                ...createGeneratedPayload().tasks[0],
+                ...(status === "blocked" ? { error: "Blocked by dependency." } : {}),
+                runId: "run-stale",
+                status,
+              },
+            ],
+          }),
+        ),
+      ).toThrow(/cannot include runId/i);
+    }
+
     expect(
       validateDevelopmentSpec(
         createSpec({

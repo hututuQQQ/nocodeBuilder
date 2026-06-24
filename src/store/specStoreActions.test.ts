@@ -2052,12 +2052,14 @@ describe("spec store actions", () => {
           blockedByTaskId: "task-1",
           dependencyIds: ["task-1"],
           error: "blocked",
+          runId: "run-stale-2",
           status: "blocked",
         }),
         createTask("task-3", {
           blockedByTaskId: "task-2",
           dependencyIds: ["task-2"],
           error: "blocked",
+          runId: "run-stale-3",
           status: "blocked",
         }),
         createTask("task-4", {
@@ -2087,8 +2089,10 @@ describe("spec store actions", () => {
     expect(taskById.get("task-1")?.runId).toBeUndefined();
     expect(taskById.get("task-2")).toMatchObject({ status: "pending" });
     expect(taskById.get("task-2")?.blockedByTaskId).toBeUndefined();
+    expect(taskById.get("task-2")?.runId).toBeUndefined();
     expect(taskById.get("task-3")).toMatchObject({ status: "pending" });
     expect(taskById.get("task-3")?.blockedByTaskId).toBeUndefined();
+    expect(taskById.get("task-3")?.runId).toBeUndefined();
     expect(taskById.get("task-4")).toMatchObject({
       runId: "run-4",
       status: "passed",

@@ -1447,6 +1447,7 @@ function restoreRetryableTaskGraph(
           ...task,
           blockedByTaskId: undefined,
           error: undefined,
+          runId: undefined,
           status: "pending" as const,
         };
       }
