@@ -430,6 +430,24 @@ describe("Spec validators", () => {
     ).toBeDefined();
   });
 
+  it("rejects building specs that contain stopped tasks", () => {
+    expect(() =>
+      validateDevelopmentSpec({
+        ...createSpec({
+          approvedAt: "2026-06-24T00:01:00Z",
+          tasks: [
+            {
+              ...createGeneratedPayload().tasks[0],
+              error: "Task failed.",
+              status: "failed",
+            },
+          ],
+        }),
+        status: "building",
+      }),
+    ).toThrow(/building spec cannot include stopped tasks/i);
+  });
+
   it("requires completed specs to have passed task run evidence", () => {
     const completedSpec = {
       ...createSpec({
