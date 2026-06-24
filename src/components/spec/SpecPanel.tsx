@@ -548,9 +548,14 @@ function BuildView({
                   key={result.criterionId}
                 >
                   <div className="flex items-start justify-between gap-3">
-                    <p className="min-w-0 text-xs leading-5 text-zinc-300">
-                      {criteriaById.get(result.criterionId)?.description ??
-                        result.criterionId}
+                    <p className="flex min-w-0 items-start gap-2 text-xs leading-5 text-zinc-300">
+                      <span className="shrink-0" aria-hidden="true">
+                        {getAcceptanceStatusSymbol(result.status)}
+                      </span>
+                      <span className="min-w-0">
+                        {criteriaById.get(result.criterionId)?.description ??
+                          result.criterionId}
+                      </span>
                     </p>
                     <StatusPill status={result.status} />
                   </div>
@@ -574,6 +579,20 @@ function BuildView({
       </div>
     </section>
   );
+}
+
+export function getAcceptanceStatusSymbol(
+  status: "passed" | "failed" | "pending",
+) {
+  if (status === "passed") {
+    return "✓";
+  }
+
+  if (status === "failed") {
+    return "✕";
+  }
+
+  return "○";
 }
 
 function SpecHistory({
