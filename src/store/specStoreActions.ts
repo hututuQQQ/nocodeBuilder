@@ -1839,6 +1839,7 @@ function isSpecWorkflowBusy(state: AppState) {
 function isNonCancellableSpecModeSwitchBusy(state: AppState) {
   return Boolean(
     state.isGeneratingSpec ||
+      state.isVerifyingSpec ||
       state.isSwitchingIterationMode,
   );
 }
