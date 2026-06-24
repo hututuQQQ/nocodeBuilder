@@ -1742,12 +1742,18 @@ async function didSpecChangePackageJson(projectId: string, tasks: SpecTask[]) {
       .getLatestCheckpoint(projectId, task.runId)
       .catch(() => null);
 
-    if (checkpoint?.packageChanged) {
+    if (checkpoint?.packageChanged || changedFilesIncludePackageJson(checkpoint?.changedFiles)) {
       return true;
     }
   }
 
   return false;
+}
+
+function changedFilesIncludePackageJson(changedFiles: string[] | undefined) {
+  return changedFiles?.some((path) =>
+    path.replace(/\\/g, "/").replace(/^\.\//, "") === "package.json",
+  ) === true;
 }
 
 async function buildFeatureSpecContext(store: StoreAccess, projectId: string) {

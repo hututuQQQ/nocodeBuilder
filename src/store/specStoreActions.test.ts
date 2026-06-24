@@ -1580,6 +1580,52 @@ describe("spec store actions", () => {
     );
   });
 
+  it("runs npm install when checkpoint changedFiles includes package.json", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-1",
+          status: "passed",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      kind: "feature",
+      revisions: [revision],
+      status: "verifying",
+    });
+    fake.agentRuns.set("run-1", createRun("run-1", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "completed",
+      status: "completed",
+    }));
+    fake.verificationReports.set("run-1", createVerificationReport("run-1", "passed"));
+    fake.checkpoints.set("run-1", {
+      changedFiles: ["app/page.tsx", "package.json"],
+      packageChanged: false,
+    });
+    const runProjectCommand = vi.fn(async (_projectId: string, command: string) => ({
+      output: `${command} ok`,
+      success: true,
+    }));
+    const store = createStore({
+      currentSpec: spec,
+      runProjectCommand,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    expect(runProjectCommand.mock.calls.map((call) => call[1])).toEqual([
+      "npm install",
+      "npm run build",
+    ]);
+    expect(store.get().currentSpec?.finalVerification?.command).toBe(
+      "npm install && npm run build",
+    );
+  });
+
   it("persists fallback evidence when final npm install fails without output", async () => {
     const revision = createExecutableRevision({
       tasks: [
