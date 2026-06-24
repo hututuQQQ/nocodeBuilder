@@ -623,6 +623,34 @@ describe("spec store actions", () => {
     );
   });
 
+  it("does not load historical specs from another conversation", async () => {
+    const foreignSpec = createSpec({
+      conversationId: "conversation-other",
+      id: "spec-history",
+      status: "completed",
+    });
+    fake.readSpec.mockResolvedValue(foreignSpec);
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: null,
+        conversationId: "conversation-1",
+        mode: "chat",
+        specIds: ["spec-history"],
+        title: "Chat iteration",
+      }),
+    });
+    const actions = createSpecActions(store as never);
+    store.set(actions as unknown as Partial<StoreState>);
+
+    await actions.loadCurrentSpec();
+
+    expect(store.get().currentSpec).toBeNull();
+    expect(store.get().historicalSpecs).toEqual([]);
+    expect(store.get().projectError).toBe(
+      "Failed to load Spec history: spec-history: Spec does not belong to the current conversation.",
+    );
+  });
+
   it("clears stale active Spec state when the active Spec cannot load", async () => {
     const staleSpec = createSpec({
       id: "spec-stale",
@@ -649,6 +677,37 @@ describe("spec store actions", () => {
     expect(store.get().currentSpec).toBeNull();
     expect(store.get().historicalSpecs).toEqual([]);
     expect(store.get().projectError).toBe("active spec file missing");
+  });
+
+  it("does not activate an active Spec from another conversation", async () => {
+    const foreignSpec = createSpec({
+      conversationId: "conversation-other",
+      id: "spec-active",
+      status: "completed",
+    });
+    fake.readSpec.mockResolvedValue(foreignSpec);
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: "spec-active",
+        conversationId: "conversation-1",
+        mode: "spec",
+        specIds: ["spec-active"],
+        title: "Spec iteration",
+      }),
+      currentSpec: null,
+      historicalSpecs: [],
+    });
+    const actions = createSpecActions(store as never);
+    store.set(actions as unknown as Partial<StoreState>);
+
+    await actions.loadCurrentSpec();
+
+    expect(fake.readSpec).toHaveBeenCalledWith("project-1", "spec-active");
+    expect(store.get().currentSpec).toBeNull();
+    expect(store.get().historicalSpecs).toEqual([]);
+    expect(store.get().projectError).toBe(
+      "Spec does not belong to the current conversation.",
+    );
   });
 
   it("does not activate a stale Spec when activeSpecId changes while loading", async () => {

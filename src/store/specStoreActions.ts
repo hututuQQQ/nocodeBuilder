@@ -94,6 +94,16 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
 
       try {
         const spec = await specApi.readSpec(project.id, conversation.activeSpecId);
+        const relationshipError = getConversationSpecRelationshipError(
+          project.id,
+          conversation,
+          spec,
+          conversation.activeSpecId,
+        );
+
+        if (relationshipError) {
+          throw new Error(relationshipError);
+        }
 
         if (!isStillCurrentSpecLoad()) {
           return;
@@ -143,20 +153,31 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
           return;
         }
 
-        const specs = results
-          .filter((result): result is PromiseFulfilledResult<DevelopmentSpec> =>
-            result.status === "fulfilled",
-          )
-          .map((result) => result.value);
-        const failedLoads = results.flatMap((result, index) =>
-          result.status === "rejected"
-            ? [
-                `${conversation.specIds[index]}: ${getProjectErrorMessage(
-                  result.reason,
-                )}`,
-              ]
-            : [],
-        );
+        const specs: DevelopmentSpec[] = [];
+        const failedLoads: string[] = [];
+
+        results.forEach((result, index) => {
+          const specId = conversation.specIds[index];
+
+          if (result.status === "rejected") {
+            failedLoads.push(`${specId}: ${getProjectErrorMessage(result.reason)}`);
+            return;
+          }
+
+          const relationshipError = getConversationSpecRelationshipError(
+            project.id,
+            conversation,
+            result.value,
+            specId,
+          );
+
+          if (relationshipError) {
+            failedLoads.push(`${specId}: ${relationshipError}`);
+            return;
+          }
+
+          specs.push(result.value);
+        });
 
         set({ historicalSpecs: specs });
 
@@ -1713,6 +1734,31 @@ function isActiveConversationSpec(
     conversation.id === spec.conversationId &&
     conversation.projectId === spec.projectId
   );
+}
+
+function getConversationSpecRelationshipError(
+  projectId: string,
+  conversation: ProjectConversation,
+  spec: DevelopmentSpec,
+  expectedSpecId: string,
+) {
+  if (spec.id !== expectedSpecId) {
+    return "Spec id does not match the conversation reference.";
+  }
+
+  if (spec.projectId !== projectId || conversation.projectId !== projectId) {
+    return "Spec does not belong to the current project.";
+  }
+
+  if (spec.conversationId !== conversation.id) {
+    return "Spec does not belong to the current conversation.";
+  }
+
+  if (!conversation.specIds.includes(spec.id)) {
+    return "Spec is not listed in the current conversation history.";
+  }
+
+  return null;
 }
 
 function isRunForSpec(
