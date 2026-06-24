@@ -125,7 +125,7 @@ export function createAgentRunActions({ get, set }: StoreAccess): AgentRunAction
     loadAgentRuns: async (projectId) => {
       try {
         const runs = await agentRuntimeApi.listRuns(projectId);
-        const currentRun = runs.find((run) => !isTerminalRun(run)) ?? runs[0] ?? null;
+        const currentRun = selectCurrentAgentRun(runs, get());
         const [events, report, approvals] = currentRun
           ? await Promise.all([
               agentRuntimeApi.listEvents(projectId, currentRun.id),
@@ -333,6 +333,15 @@ async function resolveCurrentAgentApproval(
 
 function isTerminalRun(run: AgentRun) {
   return ["completed", "failed", "cancelled", "budget_exceeded"].includes(run.status);
+}
+
+function selectCurrentAgentRun(runs: AgentRun[], state: AppState) {
+  return (
+    runs.find((run) => isCurrentSpecRun(state, run)) ??
+    runs.find((run) => !isTerminalRun(run)) ??
+    runs[0] ??
+    null
+  );
 }
 
 function validateCurrentSpecRunControl(store: StoreAccess, run: AgentRun) {

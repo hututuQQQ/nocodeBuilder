@@ -319,6 +319,33 @@ describe("agent run store actions", () => {
     });
   });
 
+  it("loads the current Spec task run before unrelated non-terminal runs", async () => {
+    const unrelatedRun = createRun("run-unrelated", {
+      conversationId: "conversation-other",
+      phase: "planning",
+      status: "planning",
+    });
+    const currentSpecRun = createRun("run-current-task", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      contract: createSpecContract("modify"),
+      conversationId: "conversation-1",
+      phase: "completed",
+      status: "completed",
+    });
+    fake.runs.set(unrelatedRun.id, unrelatedRun);
+    fake.runs.set(currentSpecRun.id, currentSpecRun);
+    const store = createStore({
+      currentConversation: createSpecConversation(),
+      currentSpec: createSpec({ runId: currentSpecRun.id }),
+    });
+    const actions = createAgentRunActions(store as never);
+
+    await actions.loadAgentRuns("project-1");
+
+    expect(store.get().currentAgentRun?.id).toBe(currentSpecRun.id);
+    expect(store.get().currentAgentRun?.conversationId).toBe("conversation-1");
+  });
+
   it("does not cancel or steer a Spec run that is not the current running task", async () => {
     const run = createRun("run-other-task", {
       contract: {
