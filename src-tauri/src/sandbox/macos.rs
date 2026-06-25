@@ -7,8 +7,7 @@ use std::{
 use super::{
     process::SandboxChild,
     types::{
-        SandboxBackendKind, SandboxError, SandboxErrorKind, SandboxHealth, SandboxNetworkPolicy,
-        SandboxRequest,
+        SandboxBackendKind, SandboxError, SandboxHealth, SandboxNetworkPolicy, SandboxRequest,
     },
 };
 use crate::sandbox::policy::SANDBOX_POLICY_VERSION;
@@ -62,20 +61,23 @@ impl MacosSeatbeltBackend {
 fn configure_process_limits(command: &mut Command, limits: super::types::SandboxResourceLimits) {
     use std::{io, os::unix::process::CommandExt};
 
-    command.pre_exec(move || {
-        if let Some(timeout_seconds) = limits.timeout_seconds {
-            set_resource_limit(
-                libc::RLIMIT_CPU,
-                timeout_seconds,
-                timeout_seconds.saturating_add(5),
-            )?;
-        }
+    // The closure only calls async-signal-safe setrlimit before exec.
+    unsafe {
+        command.pre_exec(move || {
+            if let Some(timeout_seconds) = limits.timeout_seconds {
+                set_resource_limit(
+                    libc::RLIMIT_CPU,
+                    timeout_seconds,
+                    timeout_seconds.saturating_add(5),
+                )?;
+            }
 
-        set_resource_limit(libc::RLIMIT_FSIZE, 512 * 1024 * 1024, 512 * 1024 * 1024)?;
-        set_resource_limit(libc::RLIMIT_NOFILE, 256, 256)?;
+            set_resource_limit(libc::RLIMIT_FSIZE, 512 * 1024 * 1024, 512 * 1024 * 1024)?;
+            set_resource_limit(libc::RLIMIT_NOFILE, 256, 256)?;
 
-        Ok(())
-    });
+            Ok(())
+        });
+    }
 
     fn set_resource_limit(resource: libc::c_int, soft: u64, hard: u64) -> io::Result<()> {
         let limit = libc::rlimit {
@@ -204,7 +206,7 @@ fn path_is_same_or_child(path: &Path, root: &Path) -> bool {
 impl MacosSeatbeltBackend {
     pub fn unavailable() -> SandboxError {
         SandboxError::new(
-            SandboxErrorKind::UnsupportedPlatform,
+            super::types::SandboxErrorKind::UnsupportedPlatform,
             "macOS Seatbelt backend is only available on macOS",
         )
     }
