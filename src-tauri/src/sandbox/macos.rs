@@ -332,14 +332,17 @@ mod tests {
         }
 
         let root = std::env::temp_dir().join(format!("ncb-seatbelt-smoke-{}", std::process::id()));
-        let workspace = root.join("workspace");
-        let denied_root = root.join("denied");
-        fs::create_dir_all(&workspace).unwrap();
-        fs::create_dir_all(&denied_root).unwrap();
-        let allowed_file = workspace.join("allowed.txt");
-        let denied_file = denied_root.join("secret.txt");
-        fs::write(&allowed_file, "allowed").unwrap();
-        fs::write(&denied_file, "secret").unwrap();
+        let workspace_root = root.join("workspace");
+        let denied_root_path = root.join("denied");
+        fs::create_dir_all(&workspace_root).unwrap();
+        fs::create_dir_all(&denied_root_path).unwrap();
+        fs::write(workspace_root.join("allowed.txt"), "allowed").unwrap();
+        fs::write(denied_root_path.join("secret.txt"), "secret").unwrap();
+
+        let workspace = workspace_root.canonicalize().unwrap();
+        let denied_root = denied_root_path.canonicalize().unwrap();
+        let allowed_file = workspace.join("allowed.txt").canonicalize().unwrap();
+        let denied_file = denied_root.join("secret.txt").canonicalize().unwrap();
 
         let request = SandboxRequest {
             command_label: "npm run build".to_string(),
@@ -367,9 +370,16 @@ mod tests {
             .arg("--")
             .arg("/bin/cat")
             .arg(&allowed_file)
-            .status()
+            .output()
             .unwrap();
-        assert!(allowed.success());
+        assert!(
+            allowed.status.success(),
+            "allowed read failed: status={:?}, stdout={}, stderr={}, profile=\n{}",
+            allowed.status.code(),
+            String::from_utf8_lossy(&allowed.stdout),
+            String::from_utf8_lossy(&allowed.stderr),
+            profile
+        );
 
         let denied = std::process::Command::new(SANDBOX_EXEC)
             .arg("-p")
@@ -377,9 +387,15 @@ mod tests {
             .arg("--")
             .arg("/bin/cat")
             .arg(&denied_file)
-            .status()
+            .output()
             .unwrap();
-        assert!(!denied.success());
+        assert!(
+            !denied.status.success(),
+            "denied read unexpectedly succeeded: stdout={}, stderr={}, profile=\n{}",
+            String::from_utf8_lossy(&denied.stdout),
+            String::from_utf8_lossy(&denied.stderr),
+            profile
+        );
 
         let _ = fs::remove_dir_all(root);
     }
