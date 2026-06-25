@@ -365,11 +365,12 @@ fn _policy_version() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
+    use std::ffi::OsString;
 
     #[test]
     fn denied_roots_do_not_cover_home_or_sandbox_root() {
-        with_env_lock(|| {
+        crate::test_support::with_env_lock(|| {
+            let _env = EnvGuard::capture();
             let root = std::env::temp_dir().join(format!(
                 "ncb-sandbox-denied-roots-{}",
                 chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
@@ -403,23 +404,34 @@ mod tests {
         });
     }
 
-    fn with_env_lock(run: impl FnOnce()) {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let old_home = std::env::var_os("HOME");
-        let old_userprofile = std::env::var_os("USERPROFILE");
-        let old_localappdata = std::env::var_os("LOCALAPPDATA");
-        let old_appdata = std::env::var_os("APPDATA");
-
-        run();
-
-        restore_env("HOME", old_home);
-        restore_env("USERPROFILE", old_userprofile);
-        restore_env("LOCALAPPDATA", old_localappdata);
-        restore_env("APPDATA", old_appdata);
+    struct EnvGuard {
+        old_home: Option<OsString>,
+        old_userprofile: Option<OsString>,
+        old_localappdata: Option<OsString>,
+        old_appdata: Option<OsString>,
     }
 
-    fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
+    impl EnvGuard {
+        fn capture() -> Self {
+            Self {
+                old_home: std::env::var_os("HOME"),
+                old_userprofile: std::env::var_os("USERPROFILE"),
+                old_localappdata: std::env::var_os("LOCALAPPDATA"),
+                old_appdata: std::env::var_os("APPDATA"),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            restore_env("HOME", self.old_home.take());
+            restore_env("USERPROFILE", self.old_userprofile.take());
+            restore_env("LOCALAPPDATA", self.old_localappdata.take());
+            restore_env("APPDATA", self.old_appdata.take());
+        }
+    }
+
+    fn restore_env(key: &str, value: Option<OsString>) {
         if let Some(value) = value {
             std::env::set_var(key, value);
         } else {

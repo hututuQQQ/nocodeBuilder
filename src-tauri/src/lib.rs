@@ -22,12 +22,13 @@ pub(crate) mod test_support {
         sync::{Mutex, MutexGuard, OnceLock},
     };
 
+    pub(crate) fn with_env_lock(run: impl FnOnce()) {
+        let _lock_guard = env_lock();
+        run();
+    }
+
     pub(crate) fn with_temp_home(prefix: &str, run: impl FnOnce()) {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let lock_guard = LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lock_guard = env_lock();
         let old_home = std::env::var_os("HOME");
         let root = std::env::temp_dir().join(format!(
             "{prefix}-{}",
@@ -44,6 +45,13 @@ pub(crate) mod test_support {
         };
 
         run();
+    }
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     struct TempHomeGuard {

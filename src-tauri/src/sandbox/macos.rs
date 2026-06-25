@@ -20,7 +20,7 @@ pub struct MacosSeatbeltBackend;
 
 impl MacosSeatbeltBackend {
     pub fn health_check(&self) -> Result<SandboxHealth, SandboxError> {
-        if !Path::new(SANDBOX_EXEC).is_file() {
+        if !std::path::Path::new(SANDBOX_EXEC).is_file() {
             return Err(SandboxError::unavailable(format!(
                 "{SANDBOX_EXEC} is not available; refusing host execution fallback"
             )));
@@ -215,6 +215,8 @@ mod tests {
     use super::*;
     use crate::sandbox::types::{SandboxPurpose, SandboxResourceLimits};
     use std::collections::BTreeMap;
+    #[cfg(target_os = "macos")]
+    use std::fs;
 
     #[test]
     fn generated_profile_denies_by_default_and_mentions_denied_roots() {
@@ -318,5 +320,65 @@ mod tests {
         let dev = build_profile(&request);
         assert!(dev.contains("(allow network-bind (local tcp \"127.0.0.1:5173\"))"));
         assert!(dev.contains("(allow network-inbound (local tcp \"127.0.0.1:5173\"))"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_runtime_allows_workspace_and_denies_sensitive_root() {
+        if !std::path::Path::new(SANDBOX_EXEC).is_file() {
+            panic!("{SANDBOX_EXEC} is required for the macOS Seatbelt smoke test");
+        }
+
+        let root = std::env::temp_dir().join(format!("ncb-seatbelt-smoke-{}", std::process::id()));
+        let workspace = root.join("workspace");
+        let denied_root = root.join("denied");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&denied_root).unwrap();
+        let allowed_file = workspace.join("allowed.txt");
+        let denied_file = denied_root.join("secret.txt");
+        fs::write(&allowed_file, "allowed").unwrap();
+        fs::write(&denied_file, "secret").unwrap();
+
+        let request = SandboxRequest {
+            command_label: "npm run build".to_string(),
+            purpose: SandboxPurpose::Build,
+            executable: PathBuf::from("/bin/cat"),
+            args: vec![],
+            working_dir: workspace.clone(),
+            readable_roots: vec![workspace.clone()],
+            writable_roots: vec![workspace.clone()],
+            denied_roots: vec![denied_root.clone()],
+            environment: BTreeMap::new(),
+            network: SandboxNetworkPolicy::Denied,
+            limits: SandboxResourceLimits {
+                timeout_seconds: Some(5),
+                memory_bytes: 64 * 1024 * 1024,
+                active_process_limit: 8,
+                max_output_bytes: 1024,
+            },
+        };
+        let profile = build_profile(&request);
+
+        let allowed = std::process::Command::new(SANDBOX_EXEC)
+            .arg("-p")
+            .arg(&profile)
+            .arg("--")
+            .arg("/bin/cat")
+            .arg(&allowed_file)
+            .status()
+            .unwrap();
+        assert!(allowed.success());
+
+        let denied = std::process::Command::new(SANDBOX_EXEC)
+            .arg("-p")
+            .arg(&profile)
+            .arg("--")
+            .arg("/bin/cat")
+            .arg(&denied_file)
+            .status()
+            .unwrap();
+        assert!(!denied.success());
+
+        let _ = fs::remove_dir_all(root);
     }
 }
