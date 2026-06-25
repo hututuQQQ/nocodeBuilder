@@ -699,18 +699,28 @@ fn sandbox_account_password_entry() -> Result<keyring::Entry, keyring::Error> {
 #[cfg(target_os = "windows")]
 fn generate_sandbox_account_password() -> Result<String, SandboxError> {
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!#$%+-_";
-    let mut random = [0u8; 48];
-    getrandom::fill(&mut random).map_err(|error| {
-        SandboxError::unavailable(format!(
-            "failed to generate Windows sandbox account password: {error}"
-        ))
-    })?;
 
-    let mut password = String::from("Ncb!9");
-    for byte in random {
-        password.push(ALPHABET[byte as usize % ALPHABET.len()] as char);
+    for _ in 0..16 {
+        let mut random = [0u8; 52];
+        getrandom::fill(&mut random).map_err(|error| {
+            SandboxError::unavailable(format!(
+                "failed to generate Windows sandbox account password: {error}"
+            ))
+        })?;
+
+        let mut password = String::from("Qz7!");
+        for byte in random {
+            password.push(ALPHABET[byte as usize % ALPHABET.len()] as char);
+        }
+
+        if validate_sandbox_account_password(&password) {
+            return Ok(password);
+        }
     }
-    Ok(password)
+
+    Err(SandboxError::unavailable(
+        "failed to generate a Windows sandbox account password compatible with local account policy",
+    ))
 }
 
 fn validate_sandbox_account_password(password: &str) -> bool {
@@ -721,6 +731,12 @@ fn validate_sandbox_account_password(password: &str) -> bool {
         && password.chars().any(|ch| ch.is_ascii_lowercase())
         && password.chars().any(|ch| ch.is_ascii_digit())
         && password.chars().any(|ch| !ch.is_ascii_alphanumeric())
+        && avoids_sandbox_account_name_fragments(password)
+}
+
+fn avoids_sandbox_account_name_fragments(password: &str) -> bool {
+    let lower = password.to_ascii_lowercase();
+    !lower.contains("ncb") && !lower.contains("sandbox")
 }
 
 fn resolve_sidecar(name: &str) -> Result<PathBuf, SandboxError> {

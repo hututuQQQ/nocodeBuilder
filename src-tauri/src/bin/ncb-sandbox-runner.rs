@@ -958,6 +958,13 @@ fn validate_sandbox_account_password(password: &str) -> bool {
         && password.chars().any(|ch| ch.is_ascii_lowercase())
         && password.chars().any(|ch| ch.is_ascii_digit())
         && password.chars().any(|ch| !ch.is_ascii_alphanumeric())
+        && avoids_sandbox_account_name_fragments(password)
+}
+
+#[cfg(all(target_os = "windows", not(test)))]
+fn avoids_sandbox_account_name_fragments(password: &str) -> bool {
+    let lower = password.to_ascii_lowercase();
+    !lower.contains("ncb") && !lower.contains("sandbox")
 }
 
 #[cfg(all(target_os = "windows", not(test)))]

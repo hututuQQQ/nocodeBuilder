@@ -245,13 +245,19 @@ fn validate_sandbox_account_password(password: &str) -> Result<(), String> {
         && password.chars().any(|ch| ch.is_ascii_uppercase())
         && password.chars().any(|ch| ch.is_ascii_lowercase())
         && password.chars().any(|ch| ch.is_ascii_digit())
-        && password.chars().any(|ch| !ch.is_ascii_alphanumeric());
+        && password.chars().any(|ch| !ch.is_ascii_alphanumeric())
+        && avoids_sandbox_account_name_fragments(password);
 
     if valid {
         Ok(())
     } else {
         Err("sandboxAccountPassword is invalid".to_string())
     }
+}
+
+fn avoids_sandbox_account_name_fragments(password: &str) -> bool {
+    let lower = password.to_ascii_lowercase();
+    !lower.contains("ncb") && !lower.contains("sandbox")
 }
 
 fn validate_sid_string(label: &str, sid: &str) -> Result<(), String> {
@@ -3186,6 +3192,19 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_account_password_rejects_account_name_fragments() {
+        assert!(validate_sandbox_account_password(
+            "Ncb!9abcdefghijklmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        )
+        .is_err());
+        assert!(validate_sandbox_account_password(
+            "Qz7!sandboxabcdefghijklmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        )
+        .is_err());
+        assert!(validate_sandbox_account_password(&valid_sandbox_password()).is_ok());
+    }
+
+    #[test]
     fn uninstall_removes_progress_marker_after_network_and_account_cleanup() {
         let _guard = elevation_override_lock().lock().unwrap();
         std::env::set_var("NCB_SANDBOX_TEST_ELEVATED", "1");
@@ -3292,7 +3311,7 @@ mod tests {
     }
 
     fn valid_sandbox_password() -> String {
-        "Ncb!9abcdefghijklmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        "Qz7!abcdefghijklmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
             .chars()
             .take(48)
             .collect()

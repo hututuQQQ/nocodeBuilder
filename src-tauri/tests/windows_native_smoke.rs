@@ -346,7 +346,7 @@ exit /b %ERRORLEVEL%
     }
 
     fn valid_sandbox_password() -> String {
-        "NcbSmoke!2026abcdefghijklmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        "Qz7!2026abcdefghijklmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
             .chars()
             .take(56)
             .collect()
