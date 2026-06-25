@@ -317,7 +317,9 @@ mod windows_native_smoke {
 
     fn write_fake_npm(path: &Path) {
         let script = r#"@echo off
-whoami > whoami.txt
+"%SystemRoot%\System32\whoami.exe" > whoami.txt 2>&1
+echo WHOAMI_EXIT=%ERRORLEVEL%>>whoami.txt
+echo USERDOMAIN=%USERDOMAIN%>>whoami.txt
 echo USERNAME=%USERNAME%>>whoami.txt
 "%SystemRoot%\System32\curl.exe" --connect-timeout 2 --max-time 5 --silent http://1.1.1.1/ -o NUL
 if %ERRORLEVEL% EQU 0 (
