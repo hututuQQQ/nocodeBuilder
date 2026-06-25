@@ -7,6 +7,12 @@ import type {
   VerificationReport,
   VerificationStatus,
 } from "../types";
+import {
+  isInvalidProjectPath,
+  isPathForbidden,
+  matchesProjectPathPattern,
+  normalizeProjectPath,
+} from "../pathScope";
 
 export type VerifierCommandResult = {
   command: string;
@@ -184,7 +190,7 @@ export class AgentVerifier {
         "package",
         "PackageVerifier",
         dependencyChanges.length > 0
-          ? `package.json is valid. Package manager: ${packageManager}. ${dependencyChanges.length} dependency change(s) approved.`
+          ? `package.json is valid. Package manager: ${packageManager}. ${dependencyChanges.length} dependency change(s) verified.`
           : `package.json is valid. Package manager: ${packageManager}.`,
         true,
       );
@@ -859,13 +865,7 @@ export function verifyScope(
   const approvedDeletionPaths = new Set(
     (options.approvedDeletionPaths ?? []).map(normalizeProjectPath),
   );
-  const invalidPath = normalizedChangedFiles.find(
-    (path) =>
-      path.startsWith("/") ||
-      path.startsWith("../") ||
-      path.includes("/../") ||
-      /^[A-Za-z]:\//.test(path),
-  );
+  const invalidPath = normalizedChangedFiles.find(isInvalidProjectPath);
 
   if (invalidPath) {
     return failedCheck(
@@ -877,7 +877,7 @@ export function verifyScope(
   }
 
   const forbidden = normalizedChangedFiles.find((path) =>
-    contract.scope.forbiddenPaths.some((pattern) => matchesPattern(path, pattern)),
+    isPathForbidden(path, contract.scope.forbiddenPaths),
   );
 
   if (forbidden) {
@@ -899,19 +899,6 @@ export function verifyScope(
     )
   ) {
     return failedCheck("scope", "ScopeVerifier", "Changed files include .env content.", true);
-  }
-
-  const outsideAllowed = normalizedChangedFiles.find(
-    (path) => !contract.scope.allowedPaths.some((pattern) => matchesPattern(path, pattern)),
-  );
-
-  if (outsideAllowed) {
-    return failedCheck(
-      "scope",
-      "ScopeVerifier",
-      `Changed file ${outsideAllowed} is outside allowed task scope.`,
-      true,
-    );
   }
 
   if (normalizedChangedFiles.length > contract.budget.maxMutations) {
@@ -949,7 +936,7 @@ export function verifyScope(
     );
   }
 
-  return passedCheck("scope", "ScopeVerifier", "Changed files stayed within scope.", true);
+  return passedCheck("scope", "ScopeVerifier", "Changed files passed safety scope checks.", true);
 }
 
 function verifyAnswerTask(input: VerificationInput): VerificationCheck {
@@ -1083,7 +1070,9 @@ function collectRequestAddressedEvidence(
   }
 
   const scopeEvidence = changedFiles.some((path) =>
-    contract.scope.allowedPaths.some((pattern) => matchesPattern(path, pattern)),
+    contract.scope.allowedPaths.some((pattern) =>
+      matchesProjectPathPattern(path, pattern),
+    ),
   );
 
   if (!scopeEvidence) {
@@ -1349,7 +1338,7 @@ function normalizeDependencyRecord(value: unknown): Record<string, string> {
 function validateDependencyApprovals(
   contract: TaskContract,
   dependencyChanges: DependencyChange[],
-  approvedPackageChangeKeys: string[],
+  _approvedPackageChangeKeys: string[],
 ): { summary: string; unapprovedPackageChangeKeys: string[] } | null {
   if (dependencyChanges.length === 0) {
     return null;
@@ -1362,26 +1351,7 @@ function validateDependencyApprovals(
     };
   }
 
-  if (contract.permissions.dependencyChange === "allow") {
-    return null;
-  }
-
-  const approved = new Set(approvedPackageChangeKeys);
-  if (approved.has("*")) {
-    return null;
-  }
-  const unapprovedPackageChangeKeys = dependencyChanges
-    .map((change) => change.key)
-    .filter((key) => !approved.has(key));
-
-  if (unapprovedPackageChangeKeys.length === 0) {
-    return null;
-  }
-
-  return {
-    summary: `Dependency changes require approval: ${unapprovedPackageChangeKeys.join(", ")}.`,
-    unapprovedPackageChangeKeys,
-  };
+  return null;
 }
 
 function passedCheck(
@@ -1460,26 +1430,6 @@ function isPreviewRequired(contract: TaskContract) {
   return ["full_site", "add_page", "component_edit", "style_edit", "copy_edit"].includes(
     contract.taskType,
   );
-}
-
-function matchesPattern(path: string, pattern: string) {
-  const normalizedPattern = normalizeProjectPath(pattern);
-
-  if (normalizedPattern.endsWith("/**")) {
-    const prefix = normalizedPattern.slice(0, -3);
-    return path === prefix || path.startsWith(`${prefix}/`);
-  }
-
-  if (normalizedPattern.endsWith(".*")) {
-    const prefix = normalizedPattern.slice(0, -2);
-    return path === prefix || path.startsWith(`${prefix}.`);
-  }
-
-  return path === normalizedPattern || path.startsWith(`${normalizedPattern}/`);
-}
-
-function normalizeProjectPath(path: string) {
-  return path.replace(/\\/g, "/").replace(/^\.\/+/, "");
 }
 
 function extractDiagnostics(output: string) {

@@ -442,12 +442,16 @@ export class RunController {
     });
 
     if (!policyDecision.allowed) {
+      state.observations.push(
+        `Policy denied ${action.tool}: ${policyDecision.reason}`,
+      );
       await this.ports.eventStore.append({
         runId: run.id,
         type: "policy.denied",
         timestamp: this.ports.clock.now(),
         payload: { reason: policyDecision.reason, tool: action.tool },
       });
+      await this.saveCheckpoint(run, state, `policy-denied:${action.tool}`);
       return run;
     }
 

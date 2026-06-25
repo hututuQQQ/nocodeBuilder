@@ -3,15 +3,13 @@ import {
   getProjectErrorMessage,
   projectApi,
 } from "../services/projects";
-import { generateInitialProject } from "./agentWorkflow";
 import type { AppState } from "./appStore";
-import { createChatMessage } from "./chatMessages";
 import { appendLogs } from "./commandLogs";
-import {
-  appendConversationMessage,
-  persistConversation,
-} from "./conversationState";
 import type { StoreAccess } from "./storeAccess";
+import {
+  isWorkspaceNavigationLocked,
+  WORKSPACE_NAVIGATION_LOCK_MESSAGE,
+} from "./workspaceNavigationLock";
 
 type ProjectActions = Pick<
   AppState,
@@ -64,39 +62,68 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
     },
 
     createProject: async (projectName, projectPrompt) => {
+      if (isWorkspaceNavigationLocked(get())) {
+        recordProjectNavigationBlocked(set);
+        return null;
+      }
+
       set({ isCreatingProject: true, projectError: null });
 
       try {
         const project = await projectApi.createProject(projectName);
 
-        set((state) => ({
-          projects: [
-            project,
-            ...state.projects.filter((item) => item.id !== project.id),
-          ],
-          terminalLogs: appendLogs(state.terminalLogs, [
-            `[project] Created ${project.name} at ${project.path}`,
-          ]),
-        }));
+        prepareProjectForInitialSpec({ project, set });
 
-        await get().selectProject(project.id, {
-          conversationTitle: "Initial build",
-          startDevServer: false,
-        });
-
-        const userMessage = createChatMessage("user", projectPrompt);
-        const conversation = appendConversationMessage({ get, set }, userMessage);
-        void persistConversation({ get, set }, conversation);
-
-        const didGenerateProject = await generateInitialProject(
-          { get, set },
-          project,
+        const initialConversation = await get().createInitialSpec(
+          project.id,
           projectPrompt,
+          "Initial build",
         );
 
-        if (didGenerateProject) {
-          void get().bootstrapProject(project.id);
+        if (!initialConversation) {
+          let cleanupSucceeded = false;
+
+          await projectApi.deleteUninitializedProject(project.id).then(
+            () => {
+              cleanupSucceeded = true;
+            },
+            (error) => {
+            const cleanupMessage = getProjectErrorMessage(error);
+
+            set((state) => ({
+              projectError: state.projectError
+                ? `${state.projectError}\nFailed to clean up ${project.name}: ${cleanupMessage}`
+                : `Failed to clean up ${project.name}: ${cleanupMessage}`,
+              terminalLogs: appendLogs(state.terminalLogs, [
+                `[project:error] Failed to clean up ${project.name}: ${cleanupMessage}`,
+              ]),
+            }));
+            },
+          );
+
+          if (cleanupSucceeded) {
+            set((state) => ({
+              chatMessages: [],
+              conversationSummaries: [],
+              currentAgentApproval: null,
+              currentAgentRun: null,
+              currentConversation: null,
+              currentProject:
+                state.currentProject?.id === project.id ? null : state.currentProject,
+              currentSpec: null,
+              currentVerificationReport: null,
+              historicalSpecs: [],
+              initialBuildSpec: null,
+              projects: state.projects.filter((item) => item.id !== project.id),
+            }));
+          }
+
+          return null;
         }
+
+        await get().selectProject(project.id, {
+          startDevServer: false,
+        });
 
         return project;
       } catch (error) {
@@ -143,9 +170,12 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
             currentAgentRun: null,
             currentConversation: null,
             currentProject: null,
+            initialBuildSpec: null,
+            currentSpec: null,
             currentVerificationReport: null,
             devServerStatus: "stopped",
             fileTree: null,
+            historicalSpecs: [],
             lastDeploymentUrl: null,
             previewUrl: null,
             selectedChangeFilePath: null,
@@ -216,10 +246,18 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
       const project = get().projects.find((item) => item.id === projectId);
       const previousProject = get().currentProject;
       const shouldStartDevServer = options.startDevServer ?? false;
-      const shouldEnsureConversation = options.ensureConversation ?? true;
       let didLoadFiles = false;
 
       if (!project) {
+        return;
+      }
+
+      if (isWorkspaceNavigationLocked(get()) && previousProject?.id !== projectId) {
+        recordProjectNavigationBlocked(set);
+        return;
+      }
+
+      if (isWorkspaceNavigationLocked(get()) && previousProject?.id === projectId) {
         return;
       }
 
@@ -236,10 +274,13 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
         currentAgentApproval: null,
         currentAgentRun: null,
         currentProject: project,
+        initialBuildSpec: null,
+        currentSpec: null,
         currentVerificationReport: null,
         currentConversation: null,
         devServerStatus: "stopped",
         fileTree: null,
+        historicalSpecs: [],
         isLoadingFiles: true,
         isStartingDevServer: false,
         lastDeploymentUrl: null,
@@ -253,10 +294,7 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
       });
 
       try {
-        await get().loadProjectConversations(project.id, {
-          ensureConversation: shouldEnsureConversation,
-          initialTitle: options.conversationTitle,
-        });
+        await get().loadProjectConversations(project.id);
 
         const fileTree = await projectApi.listFiles(project.id);
 
@@ -293,4 +331,54 @@ export function createProjectActions({ get, set }: StoreAccess): ProjectActions 
       }
     },
   };
+}
+
+function prepareProjectForInitialSpec({
+  project,
+  set,
+}: {
+  project: NonNullable<AppState["currentProject"]>;
+  set: StoreAccess["set"];
+}) {
+  set((state) => ({
+    agentEvents: [],
+    agentRuns: [],
+    chatMessages: [],
+    changeHistory: [],
+    conversationSummaries: [],
+    currentAgentApproval: null,
+    currentAgentRun: null,
+    currentConversation: null,
+    currentProject: project,
+    currentSpec: null,
+    currentVerificationReport: null,
+    devServerStatus: "stopped",
+    fileTree: null,
+    historicalSpecs: [],
+    initialBuildSpec: null,
+    lastDeploymentUrl: null,
+    previewUrl: null,
+    projectError: null,
+    projects: [
+      project,
+      ...state.projects.filter((item) => item.id !== project.id),
+    ],
+    selectedChangeFilePath: null,
+    selectedFileContent: "",
+    selectedFilePath: null,
+    selectedSiteNodeId: null,
+    showArchivedConversations: false,
+    terminalLogs: appendLogs(state.terminalLogs, [
+      `[project] Created ${project.name} at ${project.path}`,
+    ]),
+  }));
+}
+
+function recordProjectNavigationBlocked(set: StoreAccess["set"]) {
+  set((state) => ({
+    projectError: WORKSPACE_NAVIGATION_LOCK_MESSAGE,
+    terminalLogs: appendLogs(state.terminalLogs, [
+      `[project:error] ${WORKSPACE_NAVIGATION_LOCK_MESSAGE}`,
+    ]),
+  }));
 }

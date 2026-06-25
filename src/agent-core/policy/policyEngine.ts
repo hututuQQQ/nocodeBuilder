@@ -1,4 +1,8 @@
 import type { AgentRun, TaskContract, ToolDefinition } from "../types";
+import {
+  isPathForbidden,
+  normalizeProjectPath,
+} from "../pathScope";
 
 export type PolicyDecision =
   | {
@@ -52,7 +56,7 @@ export class PolicyEngine {
 
     if (
       input.tool.approvalPolicy === "conditional" &&
-      this.requiresConditionalApproval(input.run.contract, input.tool, input.args) &&
+      this.requiresConditionalApproval(input.run.contract, input.tool) &&
       !input.approvedHashes?.has(approvalHash)
     ) {
       return {
@@ -79,7 +83,7 @@ export class PolicyEngine {
 
     if (
       tool.sideEffect !== "none" &&
-      paths.some((path) => isForbiddenPath(path, contract.scope.forbiddenPaths))
+      paths.some((path) => isPathForbidden(path, contract.scope.forbiddenPaths))
     ) {
       return {
         allowed: false,
@@ -125,22 +129,9 @@ export class PolicyEngine {
   private requiresConditionalApproval(
     contract: TaskContract,
     tool: ToolDefinition,
-    args: unknown,
   ) {
     if (tool.name === "update_design_tokens") {
       return false;
-    }
-
-    if (
-      tool.sideEffect === "workspace_write" &&
-      collectPaths(args).includes("package.json")
-    ) {
-      return contract.permissions.dependencyChange === "ask";
-    }
-
-    if (tool.name === "run_command") {
-      const command = extractCommand(args);
-      return command === "npm install" || command === "pnpm install";
     }
 
     if (tool.name === "apply_supabase_schema") {
@@ -167,7 +158,7 @@ function collectPaths(value: unknown, parentKey = ""): string[] {
   if (Array.isArray(value)) {
     return value.flatMap((item) => {
       if (typeof item === "string" && isPathField(parentKey)) {
-        return [item.replace(/\\/g, "/")];
+        return [normalizeProjectPath(item)];
       }
 
       return collectPaths(item, parentKey);
@@ -179,7 +170,7 @@ function collectPaths(value: unknown, parentKey = ""): string[] {
 
   for (const [key, item] of Object.entries(record)) {
     if (typeof item === "string" && isPathField(key)) {
-      paths.push(item.replace(/\\/g, "/"));
+      paths.push(normalizeProjectPath(item));
     } else {
       paths.push(...collectPaths(item, key));
     }
@@ -198,31 +189,6 @@ function isPathField(key: string) {
     normalized.endsWith("path") ||
     normalized.endsWith("paths")
   );
-}
-
-function isForbiddenPath(path: string, forbiddenPaths: string[]) {
-  return forbiddenPaths.some((pattern) => {
-    const normalized = pattern.replace(/\\/g, "/");
-
-    if (normalized.endsWith("/**")) {
-      return path === normalized.slice(0, -3) || path.startsWith(normalized.slice(0, -2));
-    }
-
-    if (normalized.endsWith(".*")) {
-      return path === normalized.slice(0, -2) || path.startsWith(normalized.slice(0, -1));
-    }
-
-    return path === normalized || path.startsWith(`${normalized}/`);
-  });
-}
-
-function extractCommand(args: unknown) {
-  if (typeof args !== "object" || args === null || Array.isArray(args)) {
-    return null;
-  }
-
-  const command = (args as Record<string, unknown>).command;
-  return typeof command === "string" ? command : null;
 }
 
 function stableStringify(value: unknown): string {

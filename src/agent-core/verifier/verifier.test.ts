@@ -373,8 +373,18 @@ describe("AgentVerifier", () => {
     });
   });
 
-  it("blocks dependency additions that are not approved by package change keys", async () => {
-    const run = createRun("Change dependency setup", "full_site");
+  it("verifies dependency additions without package approval keys", async () => {
+    const baseRun = createRun("Change dependency setup", "full_site");
+    const run = {
+      ...baseRun,
+      contract: {
+        ...baseRun.contract,
+        permissions: {
+          ...baseRun.contract.permissions,
+          dependencyChange: "ask" as const,
+        },
+      },
+    };
     const verifier = new AgentVerifier({
       httpProbe: async () => ({
         ok: true,
@@ -403,29 +413,18 @@ describe("AgentVerifier", () => {
         scripts: { build: "next build" },
         dependencies: { next: "15.0.0" },
       }),
-      changedFiles: [],
+      changedFiles: ["package.json"],
       packageChanged: true,
+      previewUrl: "http://localhost:3000",
       run,
     });
 
     const packageCheck = report.checks.find((check) => check.id === "package");
-    expect(report.status).toBe("failed");
+    expect(report.status).toBe("passed");
     expect(packageCheck).toMatchObject({
-      status: "failed",
-      summary: "Dependency changes require approval: dependencies:add:framer-motion.",
-    });
-    expect(packageCheck?.details).toMatchObject({
-      unapprovedPackageChangeKeys: ["dependencies:add:framer-motion"],
-      dependencyChanges: [
-        {
-          after: "11.0.0",
-          before: null,
-          changeType: "add",
-          key: "dependencies:add:framer-motion",
-          name: "framer-motion",
-          section: "dependencies",
-        },
-      ],
+      status: "passed",
+      summary:
+        "package.json is valid. Package manager: npm. 1 dependency change(s) verified.",
     });
   });
 
@@ -997,7 +996,7 @@ describe("AgentVerifier", () => {
       });
   });
 
-  it("passes approved dependency changes after comparing baseline package.json", async () => {
+  it("passes dependency changes after comparing baseline package.json", async () => {
     const run = createRun("Change dependency setup", "full_site");
     const verifier = new AgentVerifier({
       httpProbe: async () => ({
@@ -1023,8 +1022,7 @@ describe("AgentVerifier", () => {
     });
 
     const report = await verifier.verify({
-      answerMessage: "The dependency changes are approved.",
-      approvedPackageChangeKeys: ["dependencies:add:framer-motion"],
+      answerMessage: "The dependency changes are verified.",
       baselinePackageJson: JSON.stringify({
         scripts: { build: "next build" },
         dependencies: { next: "15.0.0" },
@@ -1039,20 +1037,24 @@ describe("AgentVerifier", () => {
     expect(report.checks.find((check) => check.id === "package")).toMatchObject({
       status: "passed",
       summary:
-        "package.json is valid. Package manager: npm. 1 dependency change(s) approved.",
+        "package.json is valid. Package manager: npm. 1 dependency change(s) verified.",
     });
   });
 
-  it("enforces allowed paths, project-relative paths, and mutation budget in scope checks", () => {
+  it("treats allowed paths as soft guidance while enforcing path safety and mutation budget", () => {
     const contract = compileTaskContract({ objective: "Change hero copy" });
 
     expect(verifyScope(contract, ["README.md"])).toMatchObject({
-      status: "failed",
-      summary: "Changed file README.md is outside allowed task scope.",
+      status: "passed",
+      summary: "Changed files passed safety scope checks.",
     });
     expect(verifyScope(contract, ["../outside.ts"])).toMatchObject({
       status: "failed",
       summary: "Changed file ../outside.ts is not a valid project-relative path.",
+    });
+    expect(verifyScope(contract, [".env.local"])).toMatchObject({
+      status: "failed",
+      summary: "Changed file .env.local is forbidden by task scope.",
     });
     expect(
       verifyScope(

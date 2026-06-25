@@ -14,6 +14,7 @@ import {
 import { buildDynamicAgentContext } from "../agent/project/memory";
 import { AgentVerifier, type BaselineCommandResults } from "../agent-core/verifier/verifier";
 import { compileTaskContract } from "../agent-core/contract/taskContract";
+import type { TaskContract } from "../agent-core/types";
 import {
   RunController,
   type HeadlessModelAction,
@@ -38,11 +39,13 @@ import {
   getProjectErrorMessage,
   projectApi,
   type FileTree,
+  type PreviewProbeResult,
   type ProjectInfo,
 } from "../services/projects";
 import { agentRuntimeApi } from "../services/agentRuntime";
 import { appendLogs } from "../store/commandLogs";
 import { persistCurrentConversation } from "../store/conversationState";
+import type { AppState } from "../store/appStore";
 import {
   appendAssistantMessage,
   appendTerminalLog,
@@ -65,12 +68,20 @@ import {
 type ApplicationRuntimeMode = "generate" | "modify";
 
 type RunApplicationRuntimeInput = {
+  contract?: TaskContract;
+  conversationId?: string;
   existingRun?: AgentRun;
   mode: ApplicationRuntimeMode;
   project: ProjectInfo;
   resumeObservation?: AgentObservation;
+  runId?: string;
   store: StoreAccess;
   userRequest: string;
+};
+
+export type ApplicationRunResult = {
+  run: AgentRun | null;
+  verificationReport: VerificationReport | null;
 };
 
 type RuntimeSessionState = {
@@ -88,12 +99,14 @@ export async function generateInitialProjectRuntime(
   project: ProjectInfo,
   projectPrompt: string,
 ) {
-  return runApplicationRuntime({
+  const result = await runApplicationRuntime({
     mode: "generate",
     project,
     store,
     userRequest: projectPrompt,
   });
+
+  return result.run?.status === "completed";
 }
 
 export async function modifyCurrentProjectRuntime(
@@ -111,7 +124,7 @@ export async function modifyCurrentProjectRuntime(
     return false;
   }
 
-  return runApplicationRuntime({
+  const result = await runApplicationRuntime({
     existingRun: options.existingRun,
     mode: "modify",
     project,
@@ -119,9 +132,47 @@ export async function modifyCurrentProjectRuntime(
     store,
     userRequest,
   });
+
+  return result.run?.status === "completed";
 }
 
-async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
+export async function runSpecTaskRuntime({
+  contract,
+  conversationId,
+  executionMode,
+  existingRun,
+  project,
+  resumeObservation,
+  runId,
+  store,
+  taskObjective,
+}: {
+  contract: TaskContract;
+  conversationId: string;
+  executionMode: ApplicationRuntimeMode;
+  existingRun?: AgentRun;
+  project: ProjectInfo;
+  resumeObservation?: AgentObservation;
+  runId?: string;
+  store: StoreAccess;
+  taskObjective: string;
+}): Promise<ApplicationRunResult> {
+  return runApplicationRuntime({
+    contract,
+    conversationId,
+    existingRun,
+    mode: executionMode,
+    project,
+    resumeObservation,
+    runId,
+    store,
+    userRequest: taskObjective,
+  });
+}
+
+async function runApplicationRuntime(
+  input: RunApplicationRuntimeInput,
+): Promise<ApplicationRunResult> {
   const { existingRun, mode, project, store, userRequest } = input;
   const stream = startStreamingAgentMessage(
     store,
@@ -129,7 +180,7 @@ async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
       ? `Generating ${project.name} with the headless runtime`
       : "Working with the headless runtime",
   );
-  const controllerRunId = existingRun?.id ?? createRuntimeId("run");
+  const controllerRunId = input.runId ?? existingRun?.id ?? createRuntimeId("run");
   const runAbortController = createRunAbortController(controllerRunId);
   const session: RuntimeSessionState = {
     generationActionQueued: false,
@@ -140,7 +191,7 @@ async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
   let finalRun: AgentRun | null = null;
   const contract = existingRun
     ? existingRun.contract
-    : compileTaskContract({
+    : input.contract ?? compileTaskContract({
         objective: userRequest,
         selectedSiteNodeId: store.get().selectedSiteNodeId,
         taskType: mode === "generate" ? "full_site" : undefined,
@@ -193,7 +244,10 @@ async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
             baselineCommandResults: session.baselineCommandResults,
             baselinePackageJson: session.baselinePackageJson,
             contract,
-            conversationId: store.get().currentConversation?.id ?? "conversation-default",
+            conversationId:
+              input.conversationId ??
+              store.get().currentConversation?.id ??
+              "conversation-default",
             projectId: project.id,
             runId: controllerRunId,
           },
@@ -201,8 +255,11 @@ async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
         );
 
     await completeStreamForRun(project.id, store, stream, finalRun);
-    void persistCurrentConversation(store);
-    return finalRun.status === "completed";
+    void persistRuntimeCurrentConversation(store, finalRun);
+    return {
+      run: finalRun,
+      verificationReport: await getRunVerificationReport(project.id, finalRun),
+    };
   } catch (error) {
     const message = getProjectErrorMessage(error);
     const cleanupResult = await cleanupRunAfterRuntimeError({
@@ -216,22 +273,34 @@ async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
 
     if (cleanupResult.run?.status === "cancelled") {
       stream.completeWithTypewriter("Run cancelled.");
-      void persistCurrentConversation(store);
+      void persistRuntimeCurrentConversation(store, cleanupResult.run);
       store.set((state) => ({
         terminalLogs: appendLogs(state.terminalLogs, [
           `[agent] Run ${cleanupResult.run?.id ?? controllerRunId} cancelled.`,
         ]),
       }));
-      return false;
+      return {
+        run: cleanupResult.run,
+        verificationReport: await getRunVerificationReport(
+          project.id,
+          cleanupResult.run,
+        ),
+      };
     }
 
     stream.failWithTypewriter(`Agent run failed: ${cleanupMessage}`);
-    void persistCurrentConversation(store);
+    void persistRuntimeCurrentConversation(store, cleanupResult.run);
     store.set((state) => ({
       projectError: cleanupMessage,
       terminalLogs: appendLogs(state.terminalLogs, [`[agent:error] ${cleanupMessage}`]),
     }));
-    return false;
+    return {
+      run: cleanupResult.run,
+      verificationReport: await getRunVerificationReport(
+        project.id,
+        cleanupResult.run,
+      ),
+    };
   } finally {
     if (finalRun) {
       releaseRunAbortController(finalRun.id);
@@ -244,6 +313,21 @@ async function runApplicationRuntime(input: RunApplicationRuntimeInput) {
       isModifyingProject: false,
       previewVerificationSession: null,
     });
+  }
+}
+
+async function getRunVerificationReport(
+  projectId: string,
+  run: AgentRun | null,
+) {
+  if (!run) {
+    return null;
+  }
+
+  try {
+    return await agentRuntimeApi.getLatestVerificationReport(projectId, run.id);
+  } catch {
+    return null;
   }
 }
 
@@ -285,7 +369,12 @@ function createApplicationPorts({
     eventStore: {
       append: async (event) => {
         const record = await agentRuntimeApi.appendEvent(project.id, event);
-        store.set((state) => ({ agentEvents: [...state.agentEvents, record] }));
+        store.set((state) => ({
+          agentEvents:
+            state.currentAgentRun?.id === record.runId
+              ? [...state.agentEvents, record]
+              : state.agentEvents,
+        }));
         return record;
       },
       list: (runId) => agentRuntimeApi.listEvents(project.id, runId),
@@ -308,11 +397,18 @@ function createApplicationPorts({
         const created = await agentRuntimeApi.createRun(project.id, run);
         await writeBaselineArtifact(project.id, created.id, session);
         const events = await agentRuntimeApi.listEvents(project.id, created.id);
-        store.set((state) => ({
-          agentEvents: events,
-          agentRuns: [created, ...state.agentRuns.filter((item) => item.id !== created.id)],
-          currentAgentRun: created,
-        }));
+        store.set((state) => {
+          const canProject = canProjectRunToCurrentUi(state, created);
+
+          return {
+            agentEvents: canProject ? events : state.agentEvents,
+            agentRuns: [
+              created,
+              ...state.agentRuns.filter((item) => item.id !== created.id),
+            ],
+            currentAgentRun: canProject ? created : state.currentAgentRun,
+          };
+        });
         return created;
       },
       get: (runId) => agentRuntimeApi.getRun(project.id, runId),
@@ -362,7 +458,14 @@ function createApplicationPorts({
           store,
           stream,
         });
-        store.set({ currentVerificationReport: report });
+        store.set((state) => ({
+          currentVerificationReport: canProjectRunToCurrentUi(
+            state,
+            verificationInput.run,
+          )
+            ? report
+            : state.currentVerificationReport,
+        }));
         await agentRuntimeApi.saveVerificationReport(project.id, report);
         return report;
       },
@@ -586,7 +689,12 @@ async function verifyRunPort({
     title: "Verification",
   });
   const verifier = new AgentVerifier({
-    httpProbe: (url) => projectApi.probePreviewUrl(url),
+    httpProbe: (url) =>
+      probePreviewWithDevServerRecovery({
+        project,
+        store,
+        url,
+      }),
     readFile: (path) => projectApi.readFile(project.id, path),
     readSiteSpec: () => agentRuntimeApi.readSiteSpec(project.id),
     recordArtifact: async ({ content, relativePath, runId }) => {
@@ -630,6 +738,44 @@ async function verifyRunPort({
     status: report.status === "passed" ? "succeeded" : "failed",
   });
   return report;
+}
+
+async function probePreviewWithDevServerRecovery({
+  project,
+  store,
+  url,
+}: {
+  project: ProjectInfo;
+  store: StoreAccess;
+  url: string;
+}): Promise<PreviewProbeResult> {
+  const firstProbe = await projectApi.probePreviewUrl(url);
+
+  if (!isPreviewServerError(firstProbe)) {
+    return firstProbe;
+  }
+
+  appendTerminalLog(
+    store,
+    `[preview] Probe returned HTTP ${firstProbe.status}; restarting preview server and retrying once.`,
+  );
+
+  try {
+    await store.get().stopDevServer(project.id);
+    await store.get().startDevServer(project.id);
+    const retryUrl = store.get().previewUrl ?? url;
+    return await projectApi.probePreviewUrl(retryUrl);
+  } catch (error) {
+    appendTerminalLog(
+      store,
+      `[preview:error] Failed to restart preview after HTTP ${firstProbe.status}: ${getProjectErrorMessage(error)}`,
+    );
+    return firstProbe;
+  }
+}
+
+function isPreviewServerError(result: PreviewProbeResult) {
+  return !result.ok && result.status >= 500 && result.status < 600;
 }
 
 async function buildAgentStepContext({
@@ -711,14 +857,18 @@ function createApprovalPort(
       const created = await agentRuntimeApi.createApproval(projectId, approval);
       const run = await agentRuntimeApi.getRun(projectId, created.runId);
       const events = await agentRuntimeApi.listEvents(projectId, created.runId);
-      store.set((state) => ({
-        agentEvents: events,
-        agentRuns: run
-          ? [run, ...state.agentRuns.filter((item) => item.id !== run.id)]
-          : state.agentRuns,
-        currentAgentApproval: created,
-        currentAgentRun: run ?? state.currentAgentRun,
-      }));
+      store.set((state) => {
+        const canProject = run ? canProjectRunToCurrentUi(state, run) : false;
+
+        return {
+          agentEvents: canProject ? events : state.agentEvents,
+          agentRuns: run
+            ? [run, ...state.agentRuns.filter((item) => item.id !== run.id)]
+            : state.agentRuns,
+          currentAgentApproval: canProject ? created : state.currentAgentApproval,
+          currentAgentRun: canProject && run ? run : state.currentAgentRun,
+        };
+      });
       return created;
     },
     getLatestResolved: async (runId) => {
@@ -992,11 +1142,70 @@ function flattenFileTree(fileTree: FileTree): FileTree[] {
 }
 
 function projectRunToStore(store: StoreAccess, run: AgentRun, event: AgentEvent) {
-  store.set((state) => ({
-    agentEvents: [...state.agentEvents, event],
-    agentRuns: [run, ...state.agentRuns.filter((item) => item.id !== run.id)],
-    currentAgentRun: run,
-  }));
+  store.set((state) => {
+    const canProject = canProjectRunToCurrentUi(state, run);
+
+    return {
+      agentEvents: canProject ? [...state.agentEvents, event] : state.agentEvents,
+      agentRuns: [run, ...state.agentRuns.filter((item) => item.id !== run.id)],
+      currentAgentRun: canProject ? run : state.currentAgentRun,
+    };
+  });
+}
+
+function canProjectRunToCurrentUi(state: AppState, run: AgentRun) {
+  if (
+    state.currentProject?.id !== run.projectId ||
+    state.currentConversation?.id !== run.conversationId
+  ) {
+    return false;
+  }
+
+  const source = run.contract.source;
+
+  if (source?.mode !== "spec") {
+    return state.currentConversation.mode !== "spec";
+  }
+
+  const spec = state.currentSpec;
+
+  if (
+    state.currentConversation.mode !== "spec" ||
+    !spec ||
+    state.currentConversation.activeSpecId !== spec.id ||
+    source.specId !== spec.id ||
+    source.revisionId !== spec.currentRevisionId
+  ) {
+    return false;
+  }
+
+  const revision = spec.revisions.find((item) => item.id === source.revisionId);
+  const runningTask = revision?.tasks.find((task) => task.id === source.taskId);
+
+  return Boolean(
+    revision &&
+      runningTask &&
+      runningTask.runId === run.id &&
+      source.taskId === runningTask.id,
+  );
+}
+
+function persistRuntimeCurrentConversation(
+  store: StoreAccess,
+  run: AgentRun | null,
+) {
+  if (!run) {
+    return;
+  }
+
+  const state = store.get();
+
+  if (
+    state.currentProject?.id === run.projectId &&
+    state.currentConversation?.id === run.conversationId
+  ) {
+    return persistCurrentConversation(store);
+  }
 }
 
 function collectReadSnapshots(runState: AgentRunState) {
@@ -1088,7 +1297,11 @@ async function completeStreamForRun(
   run: AgentRun,
 ) {
   if (run.status === "completed") {
-    const report = store.get().currentVerificationReport;
+    const report = canProjectRunToCurrentUi(store.get(), run)
+      ? store.get().currentVerificationReport
+      : await agentRuntimeApi
+          .getLatestVerificationReport(projectId, run.id)
+          .catch(() => null);
     const checkpoint = await agentRuntimeApi.getLatestCheckpoint(projectId, run.id);
     const metadata = checkpoint
       ? readRunDriveStateMetadata(checkpoint.plan)

@@ -482,6 +482,38 @@ describe("Headless RunController", () => {
     expect(ports.events.filter((event) => event.type === "tool.completed")).toHaveLength(1);
   });
 
+  it("surfaces forbidden-path policy denials to the next model turn", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        {
+          type: "tool_call",
+          tool: "write_files",
+          args: {
+            files: [{ content: "SECRET=value", path: ".env.local" }],
+            summary: "Write env file",
+          },
+        },
+        { type: "answer", message: "I cannot write env files." },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    const controller = new RunController(ports);
+    const contract = compileTaskContract({ objective: "Change scoped files" });
+
+    const run = await controller.start({
+      contract,
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-policy-denied",
+    });
+
+    expect(run.status).toBe("completed");
+    expect(ports.contexts[1]?.observations).toContain(
+      "Policy denied write_files: Tool target is inside a forbidden path such as .aibuilder or .env.",
+    );
+    expect(ports.events.map((event) => event.type)).toContain("policy.denied");
+  });
+
   it("stops before executing a write tool after maxMutations is reached", async () => {
     const ports = createFakePorts({
       modelActions: [

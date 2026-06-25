@@ -109,6 +109,11 @@ pub struct ProjectConversation {
     pub id: String,
     pub project_id: String,
     pub title: String,
+    pub kind: String,
+    pub mode: String,
+    pub active_spec_id: Option<String>,
+    pub spec_ids: Vec<String>,
+    pub mode_changed_at: String,
     pub created_at: String,
     pub updated_at: String,
     pub last_message_at: String,
@@ -122,9 +127,32 @@ pub struct ProjectConversationSummary {
     pub id: String,
     pub project_id: String,
     pub title: String,
+    pub kind: String,
+    pub mode: String,
+    pub active_spec_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub last_message_at: String,
     pub archived_at: Option<String>,
     pub message_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateProjectConversationInput {
+    pub title: Option<String>,
+    pub kind: String,
+    pub mode: String,
+    pub conversation_id: Option<String>,
+    pub active_spec_id: Option<String>,
+    pub spec_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchProjectConversationModeInput {
+    pub conversation_id: String,
+    pub target_mode: String,
+    pub active_spec_id: Option<String>,
+    pub spec_ids: Vec<String>,
 }

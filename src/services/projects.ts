@@ -84,6 +84,9 @@ export type ProjectConversationSummary = {
   id: string;
   projectId: string;
   title: string;
+  kind: IterationKind;
+  mode: IterationMode;
+  activeSpecId: string | null;
   createdAt: string;
   updatedAt: string;
   lastMessageAt: string;
@@ -91,11 +94,33 @@ export type ProjectConversationSummary = {
   messageCount: number;
 };
 
+export type IterationMode = "chat" | "spec";
+
+export type IterationKind = "initial_build" | "iteration";
+
 export type ProjectConversation = Omit<
   ProjectConversationSummary,
   "messageCount"
 > & {
+  specIds: string[];
+  modeChangedAt: string;
   messages: ProjectChatMessage[];
+};
+
+export type CreateProjectConversationInput = {
+  title?: string;
+  kind: IterationKind;
+  mode: IterationMode;
+  conversationId?: string;
+  activeSpecId?: string | null;
+  specIds?: string[];
+};
+
+export type SwitchProjectConversationModeInput = {
+  conversationId: string;
+  targetMode: IterationMode;
+  activeSpecId: string | null;
+  specIds: string[];
 };
 
 export type CommandResult = {
@@ -172,6 +197,10 @@ export const projectApi = {
     return invoke<ProjectInfo>("create_project", { projectName });
   },
 
+  deleteUninitializedProject(projectId: string) {
+    return invoke<void>("delete_uninitialized_project", { projectId });
+  },
+
   listProjects() {
     return invoke<ProjectInfo[]>("list_projects");
   },
@@ -220,10 +249,13 @@ export const projectApi = {
     });
   },
 
-  createProjectConversation(projectId: string, title?: string) {
+  createProjectConversation(
+    projectId: string,
+    input: CreateProjectConversationInput,
+  ) {
     return invoke<ProjectConversation>("create_project_conversation", {
+      input,
       projectId,
-      title,
     });
   },
 
@@ -240,6 +272,16 @@ export const projectApi = {
   ) {
     return invoke<ProjectConversation>("save_project_conversation", {
       conversation,
+      projectId,
+    });
+  },
+
+  switchProjectConversationMode(
+    projectId: string,
+    input: SwitchProjectConversationModeInput,
+  ) {
+    return invoke<ProjectConversation>("switch_project_conversation_mode", {
+      input,
       projectId,
     });
   },

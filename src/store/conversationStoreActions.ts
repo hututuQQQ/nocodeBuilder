@@ -1,4 +1,5 @@
 import {
+  type CreateProjectConversationInput,
   getProjectErrorMessage,
   projectApi,
   type ProjectConversation,
@@ -10,7 +11,20 @@ import {
   conversationToSummary,
   upsertConversationSummary,
 } from "./conversationState";
+import {
+  ensureInitialBuildCompletedForIteration,
+  hasCompletedInitialBuildSpecForSummary,
+  INITIAL_BUILD_ITERATION_GATE_ERROR,
+  readInitialBuildSpecForGate,
+} from "./initialBuildGate";
 import type { StoreAccess } from "./storeAccess";
+import {
+  isWorkspaceNavigationLocked,
+  WORKSPACE_NAVIGATION_LOCK_MESSAGE,
+} from "./workspaceNavigationLock";
+
+const INITIAL_BUILD_ARCHIVE_GATE_ERROR =
+  "conversation: initial build must complete before archiving";
 
 type ConversationActions = Pick<
   AppState,
@@ -23,56 +37,69 @@ type ConversationActions = Pick<
   | "unarchiveConversation"
 >;
 
-type LoadConversationOptions = {
-  ensureConversation?: boolean;
-  initialTitle?: string;
-};
-
 export function createConversationActions({
   get,
   set,
 }: StoreAccess): ConversationActions {
   return {
-    loadProjectConversations: async (projectId, options = {}) => {
+    loadProjectConversations: async (projectId) => {
       set({ isLoadingConversations: true, projectError: null });
 
       try {
-        const includeArchived = get().showArchivedConversations;
         const summaries = await projectApi.listProjectConversations(
           projectId,
-          includeArchived,
+          true,
         );
         const currentConversation = get().currentConversation;
-        const canKeepCurrent =
-          currentConversation?.projectId === projectId &&
-          summaries.some((summary) => summary.id === currentConversation.id);
         const activeSummaries = summaries.filter(
           (summary) => !summary.archivedAt,
         );
+        const initialBuildSummary =
+          summaries.find((summary) => summary.kind === "initial_build") ?? null;
+        const initialBuildSpec = await readInitialBuildSpecForGate(
+          projectId,
+          initialBuildSummary,
+        );
+        const initialBuildCompleted = hasCompletedInitialBuildSpecForSummary(
+          projectId,
+          initialBuildSummary,
+          initialBuildSpec,
+        );
+        const currentSummary = currentConversation
+          ? summaries.find((summary) => summary.id === currentConversation.id) ??
+            null
+          : null;
+        const canKeepCurrent =
+          currentConversation?.projectId === projectId &&
+          Boolean(currentSummary) &&
+          (currentConversation.kind !== "iteration" || initialBuildCompleted) &&
+          (currentSummary?.kind !== "iteration" || initialBuildCompleted);
 
         set({
           conversationSummaries: summaries,
+          initialBuildSpec,
         });
 
         if (canKeepCurrent) {
           return;
         }
 
-        const summaryToOpen = activeSummaries[0] ?? null;
+        const summaryToOpen = initialBuildCompleted
+          ? activeSummaries[0] ?? null
+          : activeSummaries.find(
+              (summary) => summary.kind === "initial_build",
+            ) ?? null;
 
         if (summaryToOpen) {
           await get().selectConversation(summaryToOpen.id);
           return;
         }
 
-        if (options.ensureConversation) {
-          await get().createConversation(projectId, options.initialTitle);
-          return;
-        }
-
         set({
           chatMessages: [],
           currentConversation: null,
+          currentSpec: null,
+          historicalSpecs: initialBuildSpec ? [initialBuildSpec] : [],
         });
       } catch (error) {
         const message = getProjectErrorMessage(error);
@@ -88,11 +115,57 @@ export function createConversationActions({
       }
     },
 
-    createConversation: async (projectId, title) => {
+    createConversation: async (projectId, input) => {
       const targetProjectId = projectId ?? get().currentProject?.id;
 
       if (!targetProjectId) {
         return null;
+      }
+
+      const conversationInput: CreateProjectConversationInput =
+        typeof input === "object" && input
+          ? input
+          : {
+              kind: "iteration",
+              mode: "chat",
+              title: input,
+            };
+
+      if (isSpecWorkflowBusy(get())) {
+        const message =
+          "Wait for the current Spec operation to finish before creating a new iteration.";
+
+        set((state) => ({
+          projectError: message,
+          terminalLogs: appendLogs(state.terminalLogs, [
+            "[conversation] New iteration blocked while Spec operation is in progress.",
+          ]),
+        }));
+
+        return null;
+      }
+
+      if (isWorkspaceNavigationLocked(get())) {
+        recordWorkspaceNavigationBlocked(set, "conversation");
+        return null;
+      }
+
+      if (conversationInput.kind === "iteration") {
+        try {
+          await ensureInitialBuildCompletedForIteration(
+            targetProjectId,
+            get(),
+          );
+        } catch {
+          set((state) => ({
+            projectError: INITIAL_BUILD_ITERATION_GATE_ERROR,
+            terminalLogs: appendLogs(state.terminalLogs, [
+              "[conversation] New iteration blocked until Initial Spec completes.",
+            ]),
+          }));
+
+          return null;
+        }
       }
 
       set({ isCreatingConversation: true, projectError: null });
@@ -100,20 +173,28 @@ export function createConversationActions({
       try {
         const conversation = await projectApi.createProjectConversation(
           targetProjectId,
-          title,
+          conversationInput,
         );
 
         set((state) => ({
+          agentEvents: [],
           chatMessages: conversation.messages,
           conversationSummaries: upsertConversationSummary(
-            state.conversationSummaries.filter(
-              (summary) => !summary.archivedAt,
-            ),
+            state.conversationSummaries,
             conversationToSummary(conversation),
           ),
+          currentAgentApproval: null,
+          currentAgentRun: null,
           currentConversation: conversation,
+          currentVerificationReport: null,
+          initialBuildSpec: state.initialBuildSpec,
+          currentSpec: null,
+          historicalSpecs: [],
           showArchivedConversations: false,
         }));
+
+        await get().loadCurrentSpec();
+        await get().loadAgentRuns(targetProjectId);
 
         return conversation;
       } catch (error) {
@@ -134,8 +215,18 @@ export function createConversationActions({
 
     selectConversation: async (conversationId) => {
       const project = get().currentProject;
+      const currentConversation = get().currentConversation;
 
       if (!project) {
+        return;
+      }
+
+      if (isWorkspaceNavigationLocked(get())) {
+        if (currentConversation?.id === conversationId) {
+          return;
+        }
+
+        recordWorkspaceNavigationBlocked(set, "conversation");
         return;
       }
 
@@ -147,14 +238,24 @@ export function createConversationActions({
           conversationId,
         );
 
+        if (conversation.kind === "iteration") {
+          await ensureInitialBuildCompletedForIteration(project.id, get());
+        }
+
         set((state) => ({
+          agentEvents: [],
           chatMessages: conversation.messages,
           conversationSummaries: upsertConversationSummary(
             state.conversationSummaries,
             conversationToSummary(conversation),
           ),
+          currentAgentApproval: null,
+          currentAgentRun: null,
           currentConversation: conversation,
+          currentVerificationReport: null,
         }));
+        await get().loadCurrentSpec();
+        await get().loadAgentRuns(project.id);
       } catch (error) {
         const message = getProjectErrorMessage(error);
 
@@ -178,6 +279,34 @@ export function createConversationActions({
         return;
       }
 
+      if (isWorkspaceNavigationLocked(get()) && isCurrentConversation) {
+        recordWorkspaceNavigationBlocked(set, "conversation");
+        return;
+      }
+
+      const summary = get().conversationSummaries.find(
+        (item) => item.id === conversationId,
+      ) ?? (
+        currentConversation?.id === conversationId
+          ? conversationToSummary(currentConversation)
+          : null
+      );
+      const isInitialBuildArchive = summary?.kind === "initial_build";
+
+      if (isInitialBuildArchive) {
+        const spec = await readInitialBuildSpecForGate(project.id, summary);
+
+        if (!hasCompletedInitialBuildSpecForSummary(project.id, summary, spec)) {
+          set((state) => ({
+            projectError: INITIAL_BUILD_ARCHIVE_GATE_ERROR,
+            terminalLogs: appendLogs(state.terminalLogs, [
+              `[conversation:error] ${INITIAL_BUILD_ARCHIVE_GATE_ERROR}`,
+            ]),
+          }));
+          return;
+        }
+      }
+
       set({ projectError: null });
 
       try {
@@ -196,26 +325,22 @@ export function createConversationActions({
 
         if (!isCurrentConversation) {
           set({
-            conversationSummaries: get().showArchivedConversations
-              ? nextSummaries
-              : nextSummaries.filter((summary) => !summary.archivedAt),
+            conversationSummaries: nextSummaries,
           });
           return;
         }
 
         set({
           chatMessages: [],
-          conversationSummaries: nextSummaries.filter(
-            (summary) => !summary.archivedAt,
-          ),
+          conversationSummaries: nextSummaries,
           currentConversation: null,
+          currentSpec: null,
+          historicalSpecs: [],
           showArchivedConversations: false,
         });
 
         if (nextActiveConversation) {
           await get().selectConversation(nextActiveConversation.id);
-        } else {
-          await get().createConversation(project.id);
         }
       } catch (error) {
         const message = getProjectErrorMessage(error);
@@ -263,6 +388,7 @@ export function createConversationActions({
           currentConversation: conversation,
           showArchivedConversations: false,
         }));
+        await get().loadCurrentSpec();
       } catch (error) {
         const message = getProjectErrorMessage(error);
 
@@ -281,13 +407,11 @@ export function createConversationActions({
       set({ showArchivedConversations: showArchived });
 
       if (!project) {
-        set({ conversationSummaries: [] });
+        set({ conversationSummaries: [], initialBuildSpec: null });
         return;
       }
 
-      await get().loadProjectConversations(project.id, {
-        ensureConversation: !showArchived,
-      });
+      await get().loadProjectConversations(project.id);
     },
   };
 }
@@ -301,4 +425,26 @@ export function selectConversationList(
   );
 }
 
-export type { LoadConversationOptions, ProjectConversation };
+function isSpecWorkflowBusy(state: AppState) {
+  return Boolean(
+    state.isGeneratingSpec ||
+      state.isRevisingSpec ||
+      state.isExecutingSpec ||
+      state.isVerifyingSpec ||
+      state.isSwitchingIterationMode,
+  );
+}
+
+function recordWorkspaceNavigationBlocked(
+  set: StoreAccess["set"],
+  source: "conversation",
+) {
+  set((state) => ({
+    projectError: WORKSPACE_NAVIGATION_LOCK_MESSAGE,
+    terminalLogs: appendLogs(state.terminalLogs, [
+      `[${source}:error] ${WORKSPACE_NAVIGATION_LOCK_MESSAGE}`,
+    ]),
+  }));
+}
+
+export type { ProjectConversation };

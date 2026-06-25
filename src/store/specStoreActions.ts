@@ -1,0 +1,2408 @@
+import { formatProjectFileTree, getContextFilePaths } from "../agent/projectModifier";
+import { runSpecTaskRuntime } from "../agent-runtime/runController";
+import { agentRuntimeApi } from "../services/agentRuntime";
+import { keyStore } from "../services/keyStore";
+import {
+  getProjectErrorMessage,
+  projectApi,
+  type FileTree,
+  type ProjectConversation,
+} from "../services/projects";
+import { specApi } from "../services/specs";
+import { compileSpecTaskContract } from "../spec-core/taskCompiler";
+import type {
+  DevelopmentSpec,
+  GeneratedSpecRevisionPayload,
+  SpecRevision,
+  SpecStatus,
+  SpecTask,
+} from "../spec-core/types";
+import {
+  canRetrySpecVerification,
+  getCurrentSpecRevision,
+  computeAcceptanceResults,
+  validateSpecForApproval,
+} from "../spec-core/validators";
+import {
+  isTerminalSpecStatus,
+  markSpecBlocked,
+  markSpecCancelled,
+  transitionSpecStatus,
+} from "../spec-core/specStateMachine";
+import {
+  requestFeatureSpec,
+  requestInitialSpec,
+  requestSpecRevision,
+} from "../spec-runtime/requests";
+import {
+  clearSpecExecutionCancellation,
+  getSpecExecutionCancellationRequest,
+  requestSpecExecutionCancellation,
+} from "../spec-runtime/executionCancellation";
+import type { AppState } from "./appStore";
+import { createChatMessage } from "./chatMessages";
+import { appendLogs } from "./commandLogs";
+import {
+  appendConversationMessage,
+  conversationToSummary,
+  persistConversation,
+  upsertConversationSummary,
+} from "./conversationState";
+import { ensureInitialBuildCompletedForIteration } from "./initialBuildGate";
+import type { StoreAccess } from "./storeAccess";
+
+type SpecActions = Pick<
+  AppState,
+  | "approveAndExecuteCurrentSpec"
+  | "continueCurrentSpecExecution"
+  | "createFeatureSpecIteration"
+  | "createInitialSpec"
+  | "loadConversationSpecHistory"
+  | "loadCurrentSpec"
+  | "retrySpecTask"
+  | "retrySpecVerification"
+  | "reviseCurrentSpec"
+  | "switchCurrentIterationToChat"
+  | "switchCurrentIterationToSpec"
+>;
+
+const SPEC_TASK_AUTO_RETRY_LIMIT = 2;
+
+export function createSpecActions({ get, set }: StoreAccess): SpecActions {
+  const store = { get, set };
+
+  return {
+    loadCurrentSpec: async () => {
+      const project = get().currentProject;
+      const conversation = get().currentConversation;
+
+      if (!project || !conversation) {
+        set({ currentSpec: null, historicalSpecs: [] });
+        return;
+      }
+
+      if (!conversation.activeSpecId) {
+        set({ currentSpec: null });
+        await get().loadConversationSpecHistory();
+        return;
+      }
+
+      const isStillCurrentSpecLoad = () => {
+        const state = get();
+
+        return (
+          state.currentProject?.id === project.id &&
+          state.currentConversation?.id === conversation.id &&
+          state.currentConversation?.activeSpecId === conversation.activeSpecId
+        );
+      };
+
+      set({ isLoadingSpec: true, projectError: null });
+
+      try {
+        const spec = await specApi.readSpec(project.id, conversation.activeSpecId);
+        const relationshipError = getConversationSpecRelationshipError(
+          project.id,
+          conversation,
+          spec,
+          conversation.activeSpecId,
+        );
+
+        if (relationshipError) {
+          throw new Error(relationshipError);
+        }
+
+        if (!isStillCurrentSpecLoad()) {
+          return;
+        }
+
+        set({
+          currentSpec: spec,
+          initialBuildSpec:
+            spec.kind === "initial_build" ? spec : get().initialBuildSpec,
+        });
+        await get().loadConversationSpecHistory();
+        if (["approved", "building", "verifying"].includes(spec.status)) {
+          void get().continueCurrentSpecExecution();
+        }
+      } catch (error) {
+        if (!isStillCurrentSpecLoad()) {
+          return;
+        }
+
+        set({ currentSpec: null, historicalSpecs: [] });
+        recordSpecError(set, error);
+      } finally {
+        if (isStillCurrentSpecLoad()) {
+          set({ isLoadingSpec: false });
+        }
+      }
+    },
+
+    loadConversationSpecHistory: async () => {
+      const project = get().currentProject;
+      const conversation = get().currentConversation;
+
+      if (!project || !conversation) {
+        set({ historicalSpecs: [] });
+        return;
+      }
+
+      try {
+        const results = await Promise.allSettled(
+          conversation.specIds.map((specId) => specApi.readSpec(project.id, specId)),
+        );
+
+        if (
+          get().currentProject?.id !== project.id ||
+          get().currentConversation?.id !== conversation.id
+        ) {
+          return;
+        }
+
+        const specs: DevelopmentSpec[] = [];
+        const failedLoads: string[] = [];
+
+        results.forEach((result, index) => {
+          const specId = conversation.specIds[index];
+
+          if (result.status === "rejected") {
+            failedLoads.push(`${specId}: ${getProjectErrorMessage(result.reason)}`);
+            return;
+          }
+
+          const relationshipError = getConversationSpecRelationshipError(
+            project.id,
+            conversation,
+            result.value,
+            specId,
+          );
+
+          if (relationshipError) {
+            failedLoads.push(`${specId}: ${relationshipError}`);
+            return;
+          }
+
+          specs.push(result.value);
+        });
+
+        set({ historicalSpecs: specs });
+
+        if (failedLoads.length > 0) {
+          recordSpecError(
+            set,
+            new Error(`Failed to load Spec history: ${failedLoads.join("; ")}`),
+          );
+        }
+      } catch (error) {
+        set({ historicalSpecs: [] });
+        recordSpecError(set, error);
+      }
+    },
+
+    createInitialSpec: async (projectId, projectBrief, conversationTitle) => {
+      const project = get().projects.find((item) => item.id === projectId);
+
+      if (!project) {
+        return null;
+      }
+
+      const config = await keyStore.getAiProviderConfig();
+
+      if (!config) {
+        set({ projectError: "Configure your AI provider first." });
+        return null;
+      }
+
+      const conversationId = createId("conv");
+      const specId = createId("spec");
+
+      set({ isGeneratingSpec: true, projectError: null });
+
+      try {
+        const payload = await requestInitialSpec({
+          config,
+          projectBrief,
+          projectName: project.name,
+        });
+        const spec = createDevelopmentSpecFromPayload({
+          conversationId,
+          kind: "initial_build",
+          payload,
+          projectId: project.id,
+          specId,
+        });
+
+        await specApi.createSpec(project.id, spec);
+
+        let conversation: ProjectConversation | null = null;
+
+        try {
+          conversation = await projectApi.createProjectConversation(project.id, {
+            activeSpecId: spec.id,
+            conversationId,
+            kind: "initial_build",
+            mode: "spec",
+            specIds: [spec.id],
+            title: conversationTitle ?? "Initial build",
+          });
+        } catch (error) {
+          await cleanupUnattachedSpec(store, project.id, spec.id);
+          throw error;
+        }
+
+        set((state) => ({
+          chatMessages: conversation.messages,
+          conversationSummaries: upsertConversationSummary(
+            state.conversationSummaries,
+            conversationToSummary(conversation),
+          ),
+          currentConversation: conversation,
+          initialBuildSpec: spec,
+          currentSpec: spec,
+          historicalSpecs: [spec],
+          showArchivedConversations: false,
+          terminalLogs: appendLogs(state.terminalLogs, [
+            "[spec] Initial Spec review is ready.",
+          ]),
+        }));
+
+        const userMessage = createChatMessage("user", projectBrief);
+        const updatedConversation = appendConversationMessage(store, userMessage);
+        void persistConversation(store, updatedConversation);
+
+        return updatedConversation ?? conversation;
+      } catch (error) {
+        recordSpecError(set, error);
+        return null;
+      } finally {
+        set({ isGeneratingSpec: false });
+      }
+    },
+
+    createFeatureSpecIteration: async (projectId, title, brief) => {
+      const project = get().projects.find((item) => item.id === projectId);
+      const trimmedTitle = title.trim();
+      const message = brief.trim();
+
+      if (!project || !message) {
+        return null;
+      }
+
+      if (isSpecWorkflowBusy(get()) || get().isCreatingConversation) {
+        set({
+          projectError:
+            "Wait for the current Spec operation to finish before creating a new iteration.",
+        });
+        return null;
+      }
+
+      try {
+        await ensureInitialBuildCompletedForIteration(project.id, get());
+      } catch (error) {
+        recordSpecError(set, error);
+        return null;
+      }
+
+      const config = await keyStore.getAiProviderConfig();
+
+      if (!config) {
+        set({ projectError: "Configure your AI provider first." });
+        return null;
+      }
+
+      const conversationId = createId("conv");
+      const specId = createId("spec");
+
+      set({
+        isCreatingConversation: true,
+        isGeneratingSpec: true,
+        projectError: null,
+      });
+
+      try {
+        const context = await buildFeatureSpecContext(store, project.id);
+        const payload = await requestFeatureSpec({
+          brief: message,
+          config,
+          context,
+        });
+        const spec = createDevelopmentSpecFromPayload({
+          conversationId,
+          kind: "feature",
+          payload,
+          projectId: project.id,
+          specId,
+        });
+
+        await specApi.createSpec(project.id, spec);
+
+        let conversation: ProjectConversation | null = null;
+
+        try {
+          conversation = await projectApi.createProjectConversation(project.id, {
+            activeSpecId: spec.id,
+            conversationId,
+            kind: "iteration",
+            mode: "spec",
+            specIds: [spec.id],
+            title: trimmedTitle || spec.revisions[0]?.brief || "Spec iteration",
+          });
+        } catch (error) {
+          await cleanupUnattachedSpec(store, project.id, spec.id);
+          throw error;
+        }
+
+        set((state) => ({
+          chatMessages: conversation.messages,
+          conversationSummaries: upsertConversationSummary(
+            state.conversationSummaries.filter((summary) => !summary.archivedAt),
+            conversationToSummary(conversation),
+          ),
+          currentConversation: conversation,
+          currentSpec: spec,
+          historicalSpecs: [spec],
+          showArchivedConversations: false,
+          terminalLogs: appendLogs(state.terminalLogs, [
+            "[spec] Feature Spec review is ready.",
+          ]),
+        }));
+
+        const userMessage = createChatMessage("user", message);
+        const updatedConversation = appendConversationMessage(store, userMessage);
+        void persistConversation(store, updatedConversation);
+
+        return updatedConversation ?? conversation;
+      } catch (error) {
+        recordSpecError(set, error);
+        return null;
+      } finally {
+        set({
+          isCreatingConversation: false,
+          isGeneratingSpec: false,
+        });
+      }
+    },
+
+    continueCurrentSpecExecution: async () => {
+      const spec = get().currentSpec;
+      const conversation = get().currentConversation;
+
+      if (
+        !spec ||
+        !conversation ||
+        get().isExecutingSpec ||
+        !["approved", "building", "verifying"].includes(spec.status)
+      ) {
+        return;
+      }
+
+      if (!isActiveConversationSpec(conversation, spec)) {
+        set({
+          projectError: "Active Spec does not belong to the current conversation.",
+        });
+        return;
+      }
+
+      set({ isExecutingSpec: true, projectError: null });
+
+      try {
+        await reconcileAndContinueSpecExecution(store, spec.id);
+      } catch (error) {
+        recordSpecError(set, error);
+      } finally {
+        set({ isExecutingSpec: false });
+      }
+    },
+
+    reviseCurrentSpec: async (feedback) => {
+      const project = get().currentProject;
+      const conversation = get().currentConversation;
+      const spec = get().currentSpec;
+      const message = feedback.trim();
+
+      if (
+        !project ||
+        !conversation ||
+        !spec ||
+        conversation.mode !== "spec" ||
+        conversation.activeSpecId !== spec.id ||
+        spec.status !== "review" ||
+        isSpecWorkflowBusy(get()) ||
+        !message
+      ) {
+        return false;
+      }
+
+      if (!isActiveConversationSpec(conversation, spec)) {
+        set({
+          projectError: "Active Spec does not belong to the current conversation.",
+        });
+        return false;
+      }
+
+      const config = await keyStore.getAiProviderConfig();
+
+      if (!config) {
+        set({ projectError: "Configure your AI provider first." });
+        return false;
+      }
+
+      set({ isRevisingSpec: true, projectError: null });
+      const revisionSnapshot = {
+        conversationId: conversation.id,
+        currentRevisionId: spec.currentRevisionId,
+        modeChangedAt: conversation.modeChangedAt,
+        projectId: project.id,
+        specId: spec.id,
+      };
+
+      try {
+        const revisingSpec = transitionSpecStatus(spec, "revising");
+        await saveSpecToStore(store, revisingSpec);
+
+        const currentRevision = getCurrentSpecRevision(spec);
+        const payload = await requestSpecRevision({
+          config,
+          currentRevision,
+          feedback: message,
+        });
+
+        if (!isCurrentSpecSnapshot(store, revisionSnapshot, "revising")) {
+          return false;
+        }
+
+        const nextRevision = createRevisionFromPayload(
+          payload,
+          currentRevision.version + 1,
+        );
+        const nextSpec = transitionSpecStatus(
+          {
+            ...revisingSpec,
+            currentRevisionId: nextRevision.id,
+            revisions: [...revisingSpec.revisions, nextRevision],
+          },
+          "review",
+        );
+
+        await saveSpecToStore(store, nextSpec);
+        return true;
+      } catch (error) {
+        if (isCurrentSpecSnapshot(store, revisionSnapshot, "revising")) {
+          await saveSpecToStore(store, spec).catch(() => undefined);
+        }
+        recordSpecError(set, error);
+        return false;
+      } finally {
+        set({ isRevisingSpec: false });
+      }
+    },
+
+    approveAndExecuteCurrentSpec: async () => {
+      const project = get().currentProject;
+      const conversation = get().currentConversation;
+      const spec = get().currentSpec;
+
+      if (
+        !project ||
+        !conversation ||
+        !spec ||
+        conversation.mode !== "spec" ||
+        conversation.activeSpecId !== spec.id ||
+        isSpecWorkflowBusy(get())
+      ) {
+        return;
+      }
+
+      if (!isActiveConversationSpec(conversation, spec)) {
+        set({
+          projectError: "Active Spec does not belong to the current conversation.",
+        });
+        return;
+      }
+
+      set({ isExecutingSpec: true, projectError: null });
+
+      try {
+        const revision = validateSpecForApproval(spec);
+        const now = new Date().toISOString();
+        const approvedRevision: SpecRevision = {
+          ...revision,
+          approvedAt: now,
+        };
+        const approvedSpec = transitionSpecStatus(
+          {
+            ...spec,
+            revisions: spec.revisions.map((item) =>
+              item.id === revision.id ? approvedRevision : item,
+            ),
+          },
+          "approved",
+          { now },
+        );
+
+        await saveSpecToStore(store, approvedSpec);
+        await executeSpecTasks(store, approvedSpec.id);
+      } catch (error) {
+        recordSpecError(set, error);
+      } finally {
+        set({ isExecutingSpec: false });
+      }
+    },
+
+    retrySpecTask: async (taskId) => {
+      const spec = get().currentSpec;
+      const conversation = get().currentConversation;
+
+      if (
+        !spec ||
+        !conversation ||
+        isSpecWorkflowBusy(get()) ||
+        spec.status !== "blocked"
+      ) {
+        return;
+      }
+
+      if (!isActiveConversationSpec(conversation, spec)) {
+        set({
+          projectError: "Active Spec does not belong to the current conversation.",
+        });
+        return;
+      }
+
+      const revision = getCurrentSpecRevision(spec);
+      const target = revision.tasks.find((task) => task.id === taskId);
+
+      if (
+        !target ||
+        !canRetrySpecTaskTarget(revision, target)
+      ) {
+        return;
+      }
+
+      const resetRevision = restoreRetryableTaskGraph(revision, taskId);
+      const resetBase = {
+        ...spec,
+        currentRevisionId: resetRevision.id,
+        finalVerification: undefined,
+        failureMessage: undefined,
+        revisions: spec.revisions.map((item) =>
+          item.id === resetRevision.id ? resetRevision : item,
+        ),
+        updatedAt: new Date().toISOString(),
+      };
+      const resetSpec =
+        resetBase.status === "blocked"
+          ? transitionSpecStatus(resetBase, "building")
+          : resetBase;
+
+      set({ isExecutingSpec: true, projectError: null });
+
+      try {
+        await saveSpecToStore(store, resetSpec);
+        await executeSpecTasks(store, resetSpec.id);
+      } catch (error) {
+        recordSpecError(set, error);
+      } finally {
+        set({ isExecutingSpec: false });
+      }
+    },
+
+    retrySpecVerification: async () => {
+      const spec = get().currentSpec;
+      const conversation = get().currentConversation;
+
+      if (
+        !spec ||
+        !conversation ||
+        isSpecWorkflowBusy(get()) ||
+        !canRetrySpecVerification(spec)
+      ) {
+        return;
+      }
+
+      if (!isActiveConversationSpec(conversation, spec)) {
+        set({
+          projectError: "Active Spec does not belong to the current conversation.",
+        });
+        return;
+      }
+
+      set({ isVerifyingSpec: true, projectError: null });
+
+      try {
+        const retryBase = {
+          ...spec,
+          failureMessage: undefined,
+          finalVerification: undefined,
+        };
+
+        await verifyCompletedTasks(
+          store,
+          transitionSpecStatus(retryBase, "verifying"),
+        );
+      } catch (error) {
+        recordSpecError(set, error);
+      } finally {
+        set({ isVerifyingSpec: false });
+      }
+    },
+
+    switchCurrentIterationToSpec: async (brief) => {
+      const project = get().currentProject;
+      const conversation = get().currentConversation;
+      const message = brief.trim();
+
+      if (
+        !project ||
+        !conversation ||
+        conversation.kind !== "iteration" ||
+        conversation.mode !== "chat" ||
+        !message ||
+        get().isSwitchingIterationMode ||
+        isSpecWorkflowBusy(get()) ||
+        hasActiveRun(get())
+      ) {
+        return;
+      }
+
+      const config = await keyStore.getAiProviderConfig();
+
+      if (!config) {
+        set({ projectError: "Configure your AI provider first." });
+        return;
+      }
+
+      const specId = createId("spec");
+
+      set({
+        isGeneratingSpec: true,
+        isSwitchingIterationMode: true,
+        projectError: null,
+      });
+
+      try {
+        const modeSnapshot = {
+          conversationId: conversation.id,
+          modeChangedAt: conversation.modeChangedAt,
+          projectId: project.id,
+        };
+        const context = await buildFeatureSpecContext(store, project.id);
+        const payload = await requestFeatureSpec({
+          brief: message,
+          config,
+          context,
+        });
+
+        if (!isCurrentModeSnapshot(store, modeSnapshot, "chat")) {
+          return;
+        }
+
+        const spec = createDevelopmentSpecFromPayload({
+          conversationId: conversation.id,
+          kind: "feature",
+          payload,
+          projectId: project.id,
+          specId,
+        });
+
+        await specApi.createSpec(project.id, spec);
+
+        try {
+          const updatedConversation =
+            await projectApi.switchProjectConversationMode(project.id, {
+              activeSpecId: spec.id,
+              conversationId: conversation.id,
+              specIds: appendUnique(conversation.specIds, spec.id),
+              targetMode: "spec",
+            });
+
+          applyConversationAndSpec(store, updatedConversation, spec);
+        } catch (error) {
+          await cleanupUnattachedSpec(store, project.id, spec.id);
+          throw error;
+        }
+      } catch (error) {
+        recordSpecError(set, error);
+      } finally {
+        set({
+          isGeneratingSpec: false,
+          isSwitchingIterationMode: false,
+        });
+      }
+    },
+
+    switchCurrentIterationToChat: async (options = {}) => {
+      const project = get().currentProject;
+      const conversation = get().currentConversation;
+      const spec = get().currentSpec;
+
+      if (
+        !project ||
+        !conversation ||
+        conversation.kind !== "iteration" ||
+        conversation.mode !== "spec" ||
+        !spec
+      ) {
+        return;
+      }
+
+      if (!isActiveConversationSpec(conversation, spec)) {
+        set({
+          projectError: "Active Spec does not belong to the current conversation.",
+        });
+        return;
+      }
+
+      if (spec.status === "revising" || get().isRevisingSpec) {
+        set({
+          projectError: "Wait for the Spec revision to finish before switching modes.",
+        });
+        return;
+      }
+
+      const isVerifyingCancelSwitch =
+        spec.status === "verifying" && options.cancelActiveSpec;
+
+      if (isNonCancellableSpecModeSwitchBusy(get()) && !isVerifyingCancelSwitch) {
+        set({
+          projectError:
+            "Wait for the active Spec operation to finish before switching modes.",
+        });
+        return;
+      }
+
+      const activeRun = get().currentAgentRun;
+      const activeSpecRun =
+        activeRun &&
+        !isTerminalRunStatus(activeRun.status) &&
+        isRunForSpec(activeRun, spec)
+          ? activeRun
+          : null;
+      const executionLocked =
+        ["approved", "building", "verifying"].includes(spec.status) ||
+        Boolean(activeSpecRun);
+
+      if (executionLocked && !options.cancelActiveSpec) {
+        set({
+          projectError:
+            "Cancel the active Spec execution before switching to Chat.",
+        });
+        return;
+      }
+
+      if (isVerifyingCancelSwitch) {
+        requestSpecExecutionCancellation({
+          conversationId: conversation.id,
+          modeChangedAt: conversation.modeChangedAt,
+          projectId: project.id,
+          specId: spec.id,
+        });
+        set((state) => ({
+          terminalLogs: appendLogs(state.terminalLogs, [
+            "[spec] Verification cancellation requested. No further verification step will start after the current command boundary.",
+          ]),
+        }));
+
+        if (!get().isExecutingSpec) {
+          set({ isExecutingSpec: true });
+          try {
+            await reconcileAndContinueSpecExecution(store, spec.id);
+          } finally {
+            set({ isExecutingSpec: false });
+          }
+        }
+
+        return;
+      }
+
+      set({ isSwitchingIterationMode: true, projectError: null });
+
+      try {
+        let nextSpec = spec;
+
+        if (executionLocked) {
+          const runForCancellation =
+            activeSpecRun ?? await loadRunningSpecRun(store, project.id, spec);
+
+          if (runForCancellation) {
+            if (!isRunForSpec(runForCancellation, spec)) {
+              throw new Error("Active AgentRun does not belong to the current Spec task.");
+            }
+
+            if (
+              isTerminalRunStatus(runForCancellation.status) &&
+              runForCancellation.status !== "cancelled"
+            ) {
+              throw new Error("AgentRun cancellation did not reach cancelled state.");
+            }
+
+            const latestRun = runForCancellation.status === "cancelled"
+              ? runForCancellation
+              : await get().cancelCurrentAgentRunAndWait();
+
+            if (latestRun?.status !== "cancelled") {
+              throw new Error("AgentRun cancellation did not reach cancelled state.");
+            }
+
+            if (
+              latestRun.id !== runForCancellation.id ||
+              !isRunForSpec(latestRun, spec)
+            ) {
+              throw new Error("Cancelled AgentRun does not belong to the current Spec task.");
+            }
+          }
+
+          nextSpec = cancelRunningTasks(spec);
+        }
+
+        if (["drafting", "review", "revising", "blocked"].includes(nextSpec.status)) {
+          nextSpec = markSpecCancelled(nextSpec);
+        }
+
+        if (nextSpec !== spec) {
+          await saveSpecToStore(store, nextSpec);
+        }
+
+        const updatedConversation =
+          await projectApi.switchProjectConversationMode(project.id, {
+            activeSpecId: null,
+            conversationId: conversation.id,
+            specIds: conversation.specIds,
+            targetMode: "chat",
+          });
+
+        applyConversationAndSpec(store, updatedConversation, null);
+        store.set((state) => ({
+          historicalSpecs: upsertSpec(state.historicalSpecs, nextSpec),
+        }));
+      } catch (error) {
+        recordSpecError(set, error);
+      } finally {
+        set({ isSwitchingIterationMode: false });
+      }
+    },
+  };
+}
+
+async function loadRunningSpecRun(
+  store: StoreAccess,
+  projectId: string,
+  spec: DevelopmentSpec,
+) {
+  const revision = getCurrentSpecRevision(spec);
+  const runningTask = revision.tasks.find((task) => task.status === "running");
+
+  if (!runningTask) {
+    return null;
+  }
+
+  if (!runningTask.runId) {
+    throw new Error("Running task is missing its AgentRun id.");
+  }
+
+  const run = await agentRuntimeApi.getRun(projectId, runningTask.runId);
+
+  if (!run) {
+    throw new Error(`AgentRun ${runningTask.runId} was not found.`);
+  }
+
+  store.set((state) => ({
+    agentRuns: [run, ...state.agentRuns.filter((item) => item.id !== run.id)],
+    currentAgentRun: run,
+  }));
+
+  return run;
+}
+
+async function executeSpecTasks(store: StoreAccess, specId: string) {
+  const project = store.get().currentProject;
+
+  if (!project) {
+    return;
+  }
+
+  let spec = store.get().currentSpec;
+
+  if (!spec || spec.id !== specId) {
+    return;
+  }
+
+  if (spec.status === "approved") {
+    spec = transitionSpecStatus(spec, "building");
+    await saveSpecToStore(store, spec);
+  }
+
+  while (true) {
+    spec = store.get().currentSpec;
+
+    if (!spec || spec.id !== specId || spec.status !== "building") {
+      return;
+    }
+
+    const revision = getCurrentSpecRevision(spec);
+    const task = selectNextRunnableTask(revision.tasks);
+
+    if (!task) {
+      const pendingTasks = revision.tasks.filter((item) => item.status === "pending");
+
+      if (pendingTasks.length > 0) {
+        const blockedSpec = markSpecBlocked(
+          spec,
+          "Task dependencies could not advance.",
+        );
+        await saveSpecToStore(store, markBlockedPendingTasks(blockedSpec));
+        return;
+      }
+
+      const verifyingSpec = transitionSpecStatus(spec, "verifying");
+      await saveSpecToStore(store, verifyingSpec);
+      await verifyCompletedTasks(store, verifyingSpec);
+      return;
+    }
+
+    const runId = createId("run");
+    const runningSpec = updateTask(spec, task.id, {
+      error: undefined,
+      runId,
+      status: "running",
+    });
+    await saveSpecToStore(store, runningSpec);
+
+    const runningRevision = getCurrentSpecRevision(runningSpec);
+    const runningTask = runningRevision.tasks.find((item) => item.id === task.id);
+
+    if (!runningTask) {
+      throw new Error(`Spec task ${task.id} was not found.`);
+    }
+
+    const executionMode =
+      runningSpec.kind === "initial_build" && isFirstTask(runningRevision, runningTask)
+        ? "generate"
+        : "modify";
+    const contract = compileSpecTaskContract({
+      executionMode,
+      revision: runningRevision,
+      spec: runningSpec,
+      task: runningTask,
+    });
+    const executionIdentity = {
+      conversationId: runningSpec.conversationId,
+      projectId: runningSpec.projectId,
+      revisionId: runningRevision.id,
+      runId,
+      specId: runningSpec.id,
+      taskId: runningTask.id,
+    };
+    const result = await runSpecTaskRuntime({
+      contract,
+      conversationId: runningSpec.conversationId,
+      executionMode,
+      project,
+      runId,
+      store,
+      taskObjective: runningTask.objective,
+    }).catch(async (error: unknown) => {
+      const message = getProjectErrorMessage(error);
+      const latestExecutionSpec = await loadExecutionSpecById(executionIdentity);
+      const latestTask = findSpecTask(latestExecutionSpec, task.id);
+
+      if (
+        latestTask &&
+        await saveAutoRetrySpecTask(
+          store,
+          latestExecutionSpec,
+          latestTask,
+          message,
+        )
+      ) {
+        return "auto_retry" as const;
+      }
+
+      const failedTaskSpec = updateTask(latestExecutionSpec, task.id, {
+        error: message,
+        runId,
+        status: "failed",
+      });
+      await saveSpecToStore(
+        store,
+        markSpecBlocked(
+          markBlockedDownstreamTasks(failedTaskSpec, task.id),
+          `Task ${task.title} failed.`,
+        ),
+      );
+      return null;
+    });
+
+    if (result === "auto_retry") {
+      continue;
+    }
+
+    if (!result) {
+      return;
+    }
+
+    const run = result.run;
+    const report = result.verificationReport;
+
+    if (run && ["waiting_approval", "paused"].includes(run.status)) {
+      return;
+    }
+
+    if (run?.status === "completed" && report?.status === "passed") {
+      const latestExecutionSpec = await loadExecutionSpecById({
+        ...executionIdentity,
+        runId: run.id,
+      });
+      await saveSpecToStore(
+        store,
+        updateTask(latestExecutionSpec, task.id, {
+          error: undefined,
+          runId: run.id,
+          status: "passed",
+        }),
+      );
+      continue;
+    }
+
+    const latestExecutionSpec = await loadExecutionSpecById({
+      ...executionIdentity,
+      runId: run?.id ?? runId,
+    });
+    const latestTask = findSpecTask(latestExecutionSpec, task.id);
+    const failureMessage = getFailedSpecRunMessage(run?.status, report);
+
+    if (
+      run?.status !== "cancelled" &&
+      latestTask &&
+      await saveAutoRetrySpecTask(
+        store,
+        latestExecutionSpec,
+        latestTask,
+        failureMessage,
+      )
+    ) {
+      continue;
+    }
+
+    const failedTaskSpec = updateTask(latestExecutionSpec, task.id, {
+      error: failureMessage,
+      runId: run?.id ?? runId,
+      status: run?.status === "cancelled" ? "cancelled" : "failed",
+    });
+    if (run?.status === "cancelled") {
+      await saveSpecToStore(
+        store,
+        markSpecCancelled(markBlockedDownstreamTasks(failedTaskSpec, task.id)),
+      );
+      return;
+    }
+
+    const failedSpec = markSpecBlocked(
+      markBlockedDownstreamTasks(failedTaskSpec, task.id),
+      `Task ${task.title} failed.`,
+    );
+    await saveSpecToStore(store, failedSpec);
+    return;
+  }
+}
+
+async function reconcileAndContinueSpecExecution(
+  store: StoreAccess,
+  specId: string,
+) {
+  const project = store.get().currentProject;
+  let spec = store.get().currentSpec;
+
+  if (!project || !spec || spec.id !== specId) {
+    return;
+  }
+
+  if (spec.status === "verifying") {
+    await verifyCompletedTasks(store, spec);
+    return;
+  }
+
+  if (spec.status === "approved") {
+    await executeSpecTasks(store, spec.id);
+    return;
+  }
+
+  if (spec.status !== "building") {
+    return;
+  }
+
+  const revision = getCurrentSpecRevision(spec);
+  const runningTask = revision.tasks.find((task) => task.status === "running");
+
+  if (!runningTask) {
+    await executeSpecTasks(store, spec.id);
+    return;
+  }
+
+  if (!runningTask.runId) {
+    await saveSpecToStore(
+      store,
+      markSpecBlocked(
+        markBlockedDownstreamTasks(
+          updateTask(spec, runningTask.id, {
+            error: "Running task is missing its AgentRun id.",
+            status: "failed",
+          }),
+          runningTask.id,
+        ),
+        `Task ${runningTask.title} failed.`,
+      ),
+    );
+    return;
+  }
+
+  const run = await agentRuntimeApi.getRun(project.id, runningTask.runId);
+
+  if (!run) {
+    await saveSpecToStore(
+      store,
+      markSpecBlocked(
+        markBlockedDownstreamTasks(
+          updateTask(spec, runningTask.id, {
+            error: `AgentRun ${runningTask.runId} was not found.`,
+            status: "failed",
+          }),
+          runningTask.id,
+        ),
+        `Task ${runningTask.title} failed.`,
+      ),
+    );
+    return;
+  }
+
+  if (!isTerminalRunStatus(run.status)) {
+    await syncCurrentAgentRunState(store, project.id, run);
+    return;
+  }
+
+  const report = await agentRuntimeApi
+    .getLatestVerificationReport(project.id, run.id)
+    .catch(() => null);
+
+  if (run.status === "completed" && report?.status === "passed") {
+    await saveSpecToStore(
+      store,
+      updateTask(spec, runningTask.id, {
+        error: undefined,
+        runId: run.id,
+        status: "passed",
+      }),
+    );
+    await executeSpecTasks(store, spec.id);
+    return;
+  }
+
+  const failureMessage = getFailedSpecRunMessage(run.status, report);
+
+  if (
+    run.status !== "cancelled" &&
+    await saveAutoRetrySpecTask(store, spec, runningTask, failureMessage)
+  ) {
+    await executeSpecTasks(store, spec.id);
+    return;
+  }
+
+  const failedTaskSpec = updateTask(spec, runningTask.id, {
+    error: failureMessage,
+    runId: run.id,
+    status: run.status === "cancelled" ? "cancelled" : "failed",
+  });
+
+  if (run.status === "cancelled") {
+    await saveSpecToStore(
+      store,
+      markSpecCancelled(
+        markBlockedDownstreamTasks(failedTaskSpec, runningTask.id),
+      ),
+    );
+    return;
+  }
+
+  await saveSpecToStore(
+    store,
+    markSpecBlocked(
+      markBlockedDownstreamTasks(failedTaskSpec, runningTask.id),
+      `Task ${runningTask.title} failed.`,
+    ),
+  );
+}
+
+async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
+  const project = store.get().currentProject;
+
+  if (!project) {
+    return;
+  }
+
+  if (await cancelVerificationIfRequested(store, spec)) {
+    return;
+  }
+
+  const revision = getCurrentSpecRevision(spec);
+
+  if (revision.tasks.some((task) => task.status !== "passed" || !task.runId)) {
+    await saveSpecToStore(
+      store,
+      markSpecBlocked(spec, "All tasks must pass before final verification."),
+    );
+    return;
+  }
+
+  const verificationReports = new Map<string, "passed" | "failed" | "pending">();
+
+  for (const task of revision.tasks) {
+    if (!task.runId) {
+      continue;
+    }
+
+    const run = await agentRuntimeApi
+      .getRun(project.id, task.runId)
+      .catch(() => null);
+
+    if (run?.status !== "completed") {
+      verificationReports.set(task.runId, "pending");
+      continue;
+    }
+
+    const report = await agentRuntimeApi
+      .getLatestVerificationReport(project.id, task.runId)
+      .catch(() => null);
+    verificationReports.set(
+      task.runId,
+      report?.status === "passed" || report?.status === "failed"
+        ? report.status
+        : "pending",
+    );
+  }
+
+  const acceptanceResults = computeAcceptanceResults(
+    revision,
+    verificationReports,
+  );
+  const requiredCriteria = revision.requirements.acceptanceCriteria.filter(
+    (criterion) => criterion.required,
+  );
+  const failedCriteria = requiredCriteria.filter((criterion) => {
+    const result = acceptanceResults.find(
+      (item) => item.criterionId === criterion.id,
+    );
+    return result?.status !== "passed";
+  });
+
+  if (failedCriteria.length > 0) {
+    const retryTask = findAutoRetryableTaskForFailedCriteria(
+      revision,
+      failedCriteria.map((criterion) => criterion.id),
+      verificationReports,
+    );
+
+    if (
+      retryTask &&
+      await saveAutoRetrySpecTask(
+        store,
+        spec,
+        retryTask,
+        `Acceptance criteria are not passing: ${failedCriteria
+          .map((criterion) => criterion.id)
+          .join(", ")}.`,
+      )
+    ) {
+      await executeSpecTasks(store, spec.id);
+      return;
+    }
+
+    const output = `Required acceptance criteria are not all passing: ${failedCriteria
+      .map((criterion) => criterion.id)
+      .join(", ")}.`;
+    await saveSpecToStore(
+      store,
+      markSpecBlocked(
+        markFinalVerificationFailed(
+          markTasksWithIncompleteVerificationReports(spec, verificationReports),
+          "acceptance criteria",
+          output,
+        ),
+        output,
+      ),
+    );
+    return;
+  }
+
+  const incompleteTaskReports = revision.tasks.filter((task) => {
+    if (!task.runId) {
+      return true;
+    }
+
+    return verificationReports.get(task.runId) !== "passed";
+  });
+
+  if (incompleteTaskReports.length > 0) {
+    const retryTask = incompleteTaskReports.find((task) =>
+      canAutoRetrySpecTask(task),
+    );
+
+    if (retryTask) {
+      await saveAutoRetrySpecTask(
+        store,
+        spec,
+        retryTask,
+        `Task verification report did not pass for ${retryTask.id}.`,
+      );
+      await executeSpecTasks(store, spec.id);
+      return;
+    }
+
+    const output = `Task verification reports are not all passing: ${incompleteTaskReports
+      .map((task) => task.id)
+      .join(", ")}.`;
+    await saveSpecToStore(
+      store,
+      markSpecBlocked(
+        markFinalVerificationFailed(
+          markTasksWithIncompleteVerificationReports(spec, verificationReports),
+          "task verification reports",
+          output,
+        ),
+        output,
+      ),
+    );
+    return;
+  }
+
+  const installRequired =
+    spec.kind === "initial_build" ||
+    (await didSpecChangePackageJson(project.id, revision.tasks));
+
+  if (await cancelVerificationIfRequested(store, spec)) {
+    return;
+  }
+
+  const installResult = installRequired
+    ? await runFinalProjectCommand(store, project.id, "npm install")
+    : null;
+
+  if (await cancelVerificationIfRequested(store, spec)) {
+    return;
+  }
+
+  if (installResult && !installResult.success) {
+    const output = normalizeFinalVerificationOutput(installResult.output);
+    await saveSpecToStore(
+      store,
+      markSpecBlocked(
+        markFinalVerificationFailed(spec, "npm install", output),
+        `Final npm install failed:\n${output}`,
+      ),
+    );
+    return;
+  }
+
+  const buildResult = await runFinalProjectCommand(
+    store,
+    project.id,
+    "npm run build",
+  );
+
+  if (await cancelVerificationIfRequested(store, spec)) {
+    return;
+  }
+
+  if (!buildResult?.success) {
+    const output = normalizeFinalVerificationOutput(buildResult?.output);
+    await saveSpecToStore(
+      store,
+      markSpecBlocked(
+        markFinalVerificationFailed(
+          spec,
+          installRequired ? "npm install && npm run build" : "npm run build",
+          output,
+        ),
+        `Final npm run build failed:\n${output}`,
+      ),
+    );
+    return;
+  }
+
+  if (await cancelVerificationIfRequested(store, spec)) {
+    return;
+  }
+
+  await saveSpecToStore(
+    store,
+    transitionSpecStatus(
+      {
+        ...spec,
+        finalVerification: {
+          checkedAt: new Date().toISOString(),
+          command: installRequired ? "npm install && npm run build" : "npm run build",
+          output: formatSuccessfulFinalVerificationOutput(
+            installRequired,
+            installResult?.output,
+            buildResult.output,
+          ),
+          success: true,
+        },
+      },
+      "completed",
+    ),
+  );
+}
+
+async function runFinalProjectCommand(
+  store: StoreAccess,
+  projectId: string,
+  command: string,
+): Promise<Awaited<ReturnType<AppState["runProjectCommand"]>>> {
+  try {
+    return await store.get().runProjectCommand(projectId, command);
+  } catch (error) {
+    const now = new Date().toISOString();
+
+    return {
+      command,
+      exitCode: null,
+      finishedAt: now,
+      output: getProjectErrorMessage(error),
+      projectId,
+      startedAt: now,
+      success: false,
+    };
+  }
+}
+
+async function cancelVerificationIfRequested(
+  store: StoreAccess,
+  spec: DevelopmentSpec,
+) {
+  const request = getSpecExecutionCancellationRequest({
+    conversationId: spec.conversationId,
+    projectId: spec.projectId,
+    specId: spec.id,
+  });
+
+  if (!request) {
+    return false;
+  }
+
+  const cancelledSpec = markSpecCancelled({
+    ...spec,
+    updatedAt: new Date().toISOString(),
+  });
+
+  await saveSpecToStore(store, cancelledSpec);
+
+  try {
+    const state = store.get();
+
+    if (
+      state.currentProject?.id === request.projectId &&
+      state.currentConversation?.id === request.conversationId &&
+      state.currentConversation.mode === "spec" &&
+      state.currentConversation.activeSpecId === request.specId &&
+      state.currentConversation.modeChangedAt === request.modeChangedAt
+    ) {
+      const updatedConversation =
+        await projectApi.switchProjectConversationMode(request.projectId, {
+          activeSpecId: null,
+          conversationId: request.conversationId,
+          specIds: state.currentConversation.specIds,
+          targetMode: "chat",
+        });
+
+      applyConversationAndSpec(store, updatedConversation, null);
+      store.set((currentState) => ({
+        historicalSpecs: upsertSpec(currentState.historicalSpecs, cancelledSpec),
+      }));
+    }
+  } catch (error) {
+    recordSpecError(store.set, error);
+  } finally {
+    clearSpecExecutionCancellation(spec.id);
+  }
+
+  return true;
+}
+
+type ExecutionIdentity = {
+  conversationId: string;
+  projectId: string;
+  revisionId: string;
+  runId: string;
+  specId: string;
+  taskId: string;
+};
+
+async function loadExecutionSpecById(
+  identity: ExecutionIdentity,
+): Promise<DevelopmentSpec> {
+  const spec = await specApi.readSpec(identity.projectId, identity.specId);
+
+  assertExecutionIdentity(spec, identity);
+  return spec;
+}
+
+function assertExecutionIdentity(
+  spec: DevelopmentSpec,
+  identity: ExecutionIdentity,
+) {
+  if (
+    spec.projectId !== identity.projectId ||
+    spec.conversationId !== identity.conversationId ||
+    spec.id !== identity.specId ||
+    spec.currentRevisionId !== identity.revisionId
+  ) {
+    throw new Error("Stale Spec execution result does not match the target Spec.");
+  }
+
+  const revision = spec.revisions.find((item) => item.id === identity.revisionId);
+  const task = revision?.tasks.find((item) => item.id === identity.taskId);
+
+  if (!revision || !task || task.runId !== identity.runId) {
+    throw new Error("Stale Spec execution result does not match the target task.");
+  }
+}
+
+async function saveSpecToStore(store: StoreAccess, spec: DevelopmentSpec) {
+  const saved = await specApi.saveSpec(spec.projectId, spec);
+
+  store.set((state) => ({
+    currentSpec: isSavedSpecCurrentUi(state, saved) ? saved : state.currentSpec,
+    initialBuildSpec:
+      saved.kind === "initial_build" && state.currentProject?.id === saved.projectId
+        ? saved
+        : state.initialBuildSpec,
+    historicalSpecs: upsertSpec(state.historicalSpecs, saved),
+  }));
+
+  return saved;
+}
+
+function isSavedSpecCurrentUi(state: AppState, spec: DevelopmentSpec) {
+  return (
+    state.currentProject?.id === spec.projectId &&
+    state.currentConversation?.id === spec.conversationId &&
+    state.currentConversation.activeSpecId === spec.id &&
+    state.currentSpec?.id === spec.id
+  );
+}
+
+async function cleanupUnattachedSpec(
+  store: StoreAccess,
+  projectId: string,
+  specId: string,
+) {
+  try {
+    await specApi.deleteUnattachedSpec(projectId, specId);
+  } catch (error) {
+    const message = getProjectErrorMessage(error);
+
+    store.set((state) => ({
+      terminalLogs: appendLogs(state.terminalLogs, [
+        `[spec:error] Failed to clean up unattached Spec ${specId}: ${message}`,
+      ]),
+    }));
+  }
+}
+
+function markFinalVerificationFailed(
+  spec: DevelopmentSpec,
+  command: string,
+  output: string,
+): DevelopmentSpec {
+  return {
+    ...spec,
+    finalVerification: {
+      checkedAt: new Date().toISOString(),
+      command,
+      output: normalizeFinalVerificationOutput(output),
+      success: false,
+    },
+  };
+}
+
+function normalizeFinalVerificationOutput(output: string | null | undefined) {
+  return output?.trim() ? output : "No command output.";
+}
+
+function formatSuccessfulFinalVerificationOutput(
+  installRequired: boolean,
+  installOutput: string | null | undefined,
+  buildOutput: string | null | undefined,
+) {
+  const output = [
+    installOutput?.trim() ? installOutput : null,
+    buildOutput?.trim() ? buildOutput : null,
+  ].filter(Boolean).join("\n");
+
+  if (output) {
+    return output;
+  }
+
+  return installRequired
+    ? "npm install and npm run build completed successfully without command output."
+    : "npm run build completed successfully without command output.";
+}
+
+async function syncCurrentAgentRunState(
+  store: StoreAccess,
+  projectId: string,
+  run: NonNullable<AppState["currentAgentRun"]>,
+) {
+  const [report, approvals] = await Promise.all([
+    agentRuntimeApi
+      .getLatestVerificationReport(projectId, run.id)
+      .catch(() => null),
+    run.status === "waiting_approval"
+      ? agentRuntimeApi.listApprovals(projectId, run.id).catch(() => [])
+      : Promise.resolve([]),
+  ]);
+
+  store.set((state) => ({
+    agentRuns: [run, ...state.agentRuns.filter((item) => item.id !== run.id)],
+    currentAgentApproval: isRunCurrentUi(state, run)
+      ? selectPendingApproval(approvals)
+      : state.currentAgentApproval,
+    currentAgentRun: isRunCurrentUi(state, run) ? run : state.currentAgentRun,
+    currentVerificationReport: isRunCurrentUi(state, run)
+      ? report
+      : state.currentVerificationReport,
+  }));
+}
+
+function isRunCurrentUi(state: AppState, run: NonNullable<AppState["currentAgentRun"]>) {
+  if (
+    state.currentProject?.id !== run.projectId ||
+    state.currentConversation?.id !== run.conversationId
+  ) {
+    return false;
+  }
+
+  const source = run.contract.source;
+
+  if (source?.mode !== "spec") {
+    return state.currentConversation.mode !== "spec";
+  }
+
+  const spec = state.currentSpec;
+
+  if (
+    state.currentConversation.mode !== "spec" ||
+    !spec ||
+    state.currentConversation.activeSpecId !== spec.id ||
+    source.specId !== spec.id ||
+    source.revisionId !== spec.currentRevisionId
+  ) {
+    return false;
+  }
+
+  const revision = spec.revisions.find((item) => item.id === source.revisionId);
+  const runningTask = revision?.tasks.find((task) => task.id === source.taskId);
+
+  return Boolean(runningTask && runningTask.runId === run.id);
+}
+
+function selectPendingApproval(
+  approvals: Array<NonNullable<AppState["currentAgentApproval"]>>,
+) {
+  return (
+    approvals
+      .filter((approval) => !approval.consumedAt)
+      .sort((left, right) => {
+        const leftTime = new Date(left.createdAt).getTime();
+        const rightTime = new Date(right.createdAt).getTime();
+
+        if (leftTime !== rightTime) {
+          return rightTime - leftTime;
+        }
+
+        return right.id.localeCompare(left.id);
+      })[0] ?? null
+  );
+}
+
+function markTasksWithIncompleteVerificationReports(
+  spec: DevelopmentSpec,
+  verificationReports: Map<string, "passed" | "failed" | "pending">,
+): DevelopmentSpec {
+  const revision = getCurrentSpecRevision(spec);
+  const nextRevision = {
+    ...revision,
+    tasks: revision.tasks.map((task) => {
+      if (task.runId && verificationReports.get(task.runId) === "passed") {
+        return task;
+      }
+
+      return {
+        ...task,
+        error: task.runId
+          ? `Verification report for AgentRun ${task.runId} did not pass.`
+          : "Task is missing its AgentRun id.",
+        status: "failed" as const,
+      };
+    }),
+  };
+
+  return {
+    ...spec,
+    revisions: spec.revisions.map((item) =>
+      item.id === nextRevision.id ? nextRevision : item,
+    ),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function applyConversationAndSpec(
+  store: StoreAccess,
+  conversation: ProjectConversation,
+  spec: DevelopmentSpec | null,
+) {
+  store.set((state) => ({
+    chatMessages: conversation.messages,
+    conversationSummaries: upsertConversationSummary(
+      state.conversationSummaries,
+      conversationToSummary(conversation),
+    ),
+    currentConversation: conversation,
+    initialBuildSpec:
+      spec?.kind === "initial_build" ? spec : state.initialBuildSpec,
+    currentSpec: spec,
+    historicalSpecs: spec ? upsertSpec(state.historicalSpecs, spec) : state.historicalSpecs,
+  }));
+}
+
+function createDevelopmentSpecFromPayload({
+  conversationId,
+  kind,
+  payload,
+  projectId,
+  specId,
+}: {
+  conversationId: string;
+  kind: DevelopmentSpec["kind"];
+  payload: GeneratedSpecRevisionPayload;
+  projectId: string;
+  specId: string;
+}): DevelopmentSpec {
+  const revision = createRevisionFromPayload(payload, 1);
+  const now = new Date().toISOString();
+
+  return {
+    conversationId,
+    createdAt: now,
+    currentRevisionId: revision.id,
+    id: specId,
+    kind,
+    projectId,
+    revisions: [revision],
+    status: "review",
+    updatedAt: now,
+  };
+}
+
+function createRevisionFromPayload(
+  payload: GeneratedSpecRevisionPayload,
+  version: number,
+): SpecRevision {
+  return {
+    brief: payload.brief,
+    createdAt: new Date().toISOString(),
+    design: payload.design,
+    id: createId("rev"),
+    requirements: payload.requirements,
+    tasks: payload.tasks.map((task) => ({
+      ...task,
+      status: "pending",
+    })),
+    version,
+  };
+}
+
+function updateTask(
+  spec: DevelopmentSpec,
+  taskId: string,
+  patch: Partial<SpecTask>,
+): DevelopmentSpec {
+  const revision = getCurrentSpecRevision(spec);
+  const nextRevision = {
+    ...revision,
+    tasks: revision.tasks.map((task) =>
+      task.id === taskId ? { ...task, ...patch } : task,
+    ),
+  };
+
+  return {
+    ...spec,
+    revisions: spec.revisions.map((item) =>
+      item.id === nextRevision.id ? nextRevision : item,
+    ),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function findSpecTask(spec: DevelopmentSpec, taskId: string) {
+  return getCurrentSpecRevision(spec).tasks.find((task) => task.id === taskId);
+}
+
+function canAutoRetrySpecTask(task: SpecTask) {
+  return (task.autoRetryCount ?? 0) < SPEC_TASK_AUTO_RETRY_LIMIT;
+}
+
+async function saveAutoRetrySpecTask(
+  store: StoreAccess,
+  spec: DevelopmentSpec,
+  task: SpecTask,
+  reason: string,
+) {
+  if (!canAutoRetrySpecTask(task)) {
+    return false;
+  }
+
+  const retryCount = (task.autoRetryCount ?? 0) + 1;
+  const retrySpec = prepareSpecForAutoRetry(
+    updateTask(spec, task.id, {
+      autoRetryCount: retryCount,
+      blockedByTaskId: undefined,
+      error: undefined,
+      runId: undefined,
+      status: "pending",
+    }),
+    task,
+  );
+
+  await saveSpecToStore(store, retrySpec);
+  store.set((state) => ({
+    terminalLogs: appendLogs(state.terminalLogs, [
+      `[spec] Auto-retrying task ${task.id} (${retryCount}/${SPEC_TASK_AUTO_RETRY_LIMIT}) after: ${reason}`,
+    ]),
+  }));
+
+  return true;
+}
+
+function prepareSpecForAutoRetry(spec: DevelopmentSpec, task: SpecTask) {
+  if (spec.status === "building") {
+    return {
+      ...spec,
+      failureMessage: undefined,
+      finalVerification: undefined,
+    };
+  }
+
+  if (spec.status === "approved" || spec.status === "blocked") {
+    return transitionSpecStatus(spec, "building");
+  }
+
+  if (spec.status === "verifying") {
+    return transitionSpecStatus(
+      markSpecBlocked(spec, `Retrying ${task.title}.`),
+      "building",
+    );
+  }
+
+  return spec;
+}
+
+function getFailedSpecRunMessage(
+  runStatus: string | undefined,
+  report: {
+    missingEvidence: string[];
+    repairFeedback: string[];
+  } | null | undefined,
+) {
+  return (
+    report?.repairFeedback.join("\n") ||
+    report?.missingEvidence.join("\n") ||
+    (runStatus
+      ? `AgentRun ended with status ${runStatus}.`
+      : "AgentRun ended without a passed verification report.")
+  );
+}
+
+function findAutoRetryableTaskForFailedCriteria(
+  revision: SpecRevision,
+  failedCriterionIds: string[],
+  verificationReports: Map<string, "passed" | "failed" | "pending">,
+) {
+  const failedCriterionIdSet = new Set(failedCriterionIds);
+
+  return revision.tasks.find((task) => {
+    if (!canAutoRetrySpecTask(task)) {
+      return false;
+    }
+
+    if (
+      !task.acceptanceCriteriaIds.some((criterionId) =>
+        failedCriterionIdSet.has(criterionId),
+      )
+    ) {
+      return false;
+    }
+
+    return !task.runId || verificationReports.get(task.runId) !== "passed";
+  });
+}
+
+function restoreRetryableTaskGraph(
+  revision: SpecRevision,
+  taskId: string,
+): SpecRevision {
+  const restoreIds = new Set([taskId]);
+  const tasksById = new Map(revision.tasks.map((task) => [task.id, task]));
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+
+    for (const task of revision.tasks) {
+      if (
+        task.status === "blocked" &&
+        task.blockedByTaskId &&
+        restoreIds.has(task.blockedByTaskId) &&
+        canRestoreBlockedTask(task, tasksById, restoreIds) &&
+        !restoreIds.has(task.id)
+      ) {
+        restoreIds.add(task.id);
+        changed = true;
+      }
+    }
+  }
+
+  return {
+    ...revision,
+    tasks: revision.tasks.map((task) => {
+      if (task.id === taskId) {
+        return {
+          ...task,
+          autoRetryCount: undefined,
+          blockedByTaskId: undefined,
+          error: undefined,
+          runId: undefined,
+          status: "pending" as const,
+        };
+      }
+
+      if (restoreIds.has(task.id) && task.status === "blocked") {
+        return {
+          ...task,
+          autoRetryCount: undefined,
+          blockedByTaskId: undefined,
+          error: undefined,
+          runId: undefined,
+          status: "pending" as const,
+        };
+      }
+
+      return task;
+    }),
+  };
+}
+
+function canRetrySpecTaskTarget(revision: SpecRevision, target: SpecTask) {
+  if (target.status === "failed" || target.status === "cancelled") {
+    return true;
+  }
+
+  if (target.status !== "blocked") {
+    return false;
+  }
+
+  return target.dependencyIds.every((dependencyId) =>
+    revision.tasks.some(
+      (task) => task.id === dependencyId && task.status === "passed",
+    ),
+  );
+}
+
+function canRestoreBlockedTask(
+  task: SpecTask,
+  tasksById: Map<string, SpecTask>,
+  restoreIds: Set<string>,
+) {
+  return task.dependencyIds.every((dependencyId) => {
+    if (restoreIds.has(dependencyId)) {
+      return true;
+    }
+
+    const dependency = tasksById.get(dependencyId);
+
+    if (!dependency) {
+      return false;
+    }
+
+    return !["failed", "cancelled", "blocked"].includes(dependency.status);
+  });
+}
+
+function markBlockedDownstreamTasks(
+  spec: DevelopmentSpec,
+  failedTaskId: string,
+): DevelopmentSpec {
+  const revision = getCurrentSpecRevision(spec);
+  const blockedIds = new Set([failedTaskId]);
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+
+    for (const task of revision.tasks) {
+      if (
+        task.status === "pending" &&
+        task.dependencyIds.some((dependencyId) => blockedIds.has(dependencyId)) &&
+        !blockedIds.has(task.id)
+      ) {
+        blockedIds.add(task.id);
+        changed = true;
+      }
+    }
+  }
+
+  const nextRevision = {
+    ...revision,
+    tasks: revision.tasks.map((task) => {
+      if (task.id === failedTaskId || !blockedIds.has(task.id) || task.status !== "pending") {
+        return task;
+      }
+
+      const blockingDependency =
+        task.dependencyIds.find((dependencyId) => blockedIds.has(dependencyId)) ??
+        failedTaskId;
+
+      return {
+        ...task,
+        blockedByTaskId: blockingDependency,
+        error: `Blocked because dependency ${blockingDependency} failed.`,
+        status: "blocked" as const,
+      };
+    }),
+  };
+
+  return {
+    ...spec,
+    revisions: spec.revisions.map((item) =>
+      item.id === nextRevision.id ? nextRevision : item,
+    ),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function markBlockedPendingTasks(spec: DevelopmentSpec): DevelopmentSpec {
+  const revision = getCurrentSpecRevision(spec);
+  const nextRevision = {
+    ...revision,
+    tasks: revision.tasks.map((task) =>
+      task.status === "pending"
+        ? {
+            ...task,
+            error: "Blocked because dependencies could not advance.",
+            status: "blocked" as const,
+          }
+        : task,
+    ),
+  };
+
+  return {
+    ...spec,
+    revisions: spec.revisions.map((item) =>
+      item.id === nextRevision.id ? nextRevision : item,
+    ),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function cancelRunningTasks(spec: DevelopmentSpec): DevelopmentSpec {
+  const revision = getCurrentSpecRevision(spec);
+  const nextRevision = {
+    ...revision,
+    tasks: revision.tasks.map((task) => {
+      if (task.status === "running") {
+        return {
+          ...task,
+          error: "Cancelled while switching to Chat.",
+          status: "cancelled" as const,
+        };
+      }
+
+      if (task.status === "pending") {
+        return {
+          ...task,
+          error: "Cancelled while switching to Chat.",
+          status: "cancelled" as const,
+        };
+      }
+
+      return task;
+    }),
+  };
+
+  return markSpecCancelled({
+    ...spec,
+    revisions: spec.revisions.map((item) =>
+      item.id === nextRevision.id ? nextRevision : item,
+    ),
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+function selectNextRunnableTask(tasks: SpecTask[]) {
+  return tasks.find(
+    (task) =>
+      task.status === "pending" &&
+      task.dependencyIds.every((dependencyId) =>
+        tasks.some(
+          (candidate) =>
+            candidate.id === dependencyId && candidate.status === "passed",
+        ),
+      ),
+  );
+}
+
+function isFirstTask(revision: SpecRevision, task: SpecTask) {
+  return revision.tasks[0]?.id === task.id;
+}
+
+async function didSpecChangePackageJson(projectId: string, tasks: SpecTask[]) {
+  for (const task of tasks) {
+    if (!task.runId) {
+      continue;
+    }
+
+    const checkpoint = await agentRuntimeApi
+      .getLatestCheckpoint(projectId, task.runId)
+      .catch(() => null);
+
+    if (checkpoint?.packageChanged || changedFilesIncludePackageJson(checkpoint?.changedFiles)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function changedFilesIncludePackageJson(changedFiles: string[] | undefined) {
+  return changedFiles?.some((path) =>
+    path.replace(/\\/g, "/").replace(/^\.\//, "") === "package.json",
+  ) === true;
+}
+
+async function buildFeatureSpecContext(store: StoreAccess, projectId: string) {
+  const state = store.get();
+  const isCurrentProject = state.currentProject?.id === projectId;
+  const fileTree =
+    isCurrentProject && state.fileTree
+      ? state.fileTree
+      : await projectApi.listFiles(projectId);
+  const contextPaths = getContextFilePaths(fileTree).slice(0, 12);
+  const files = await readContextFiles(projectId, fileTree, contextPaths);
+  const [siteSpec, sourceMap] = await Promise.all([
+    agentRuntimeApi.readSiteSpec(projectId).catch(() => null),
+    agentRuntimeApi.readSiteSourceMap(projectId).catch(() => null),
+  ]);
+  const currentConversation = isCurrentProject ? state.currentConversation : null;
+
+  return {
+    changeHistory: isCurrentProject ? state.changeHistory.slice(0, 8) : [],
+    currentConversation: {
+      id: currentConversation?.id,
+      messages: currentConversation?.messages.slice(-12) ?? [],
+      title: currentConversation?.title,
+    },
+    fileTree: formatProjectFileTree(fileTree),
+    files,
+    siteSpec,
+    sourceMap,
+  };
+}
+
+async function readContextFiles(
+  projectId: string,
+  fileTree: FileTree,
+  paths: string[],
+) {
+  const readablePaths = paths.length > 0 ? paths : getContextFilePaths(fileTree).slice(0, 8);
+  const entries = await Promise.all(
+    readablePaths.map(async (path) => {
+      try {
+        return {
+          content: await projectApi.readFile(projectId, path),
+          path,
+        };
+      } catch (error) {
+        return {
+          error: getProjectErrorMessage(error),
+          path,
+        };
+      }
+    }),
+  );
+
+  return entries;
+}
+
+function appendUnique(values: string[], value: string) {
+  return values.includes(value) ? values : [...values, value];
+}
+
+function upsertSpec(specs: DevelopmentSpec[], spec: DevelopmentSpec) {
+  return [spec, ...specs.filter((item) => item.id !== spec.id)].sort((left, right) =>
+    right.updatedAt.localeCompare(left.updatedAt),
+  );
+}
+
+function hasActiveRun(state: AppState) {
+  const run = state.currentAgentRun;
+  return Boolean(run && !isTerminalRunStatus(run.status));
+}
+
+function isSpecWorkflowBusy(state: AppState) {
+  return Boolean(
+    state.isGeneratingSpec ||
+      state.isRevisingSpec ||
+      state.isExecutingSpec ||
+      state.isVerifyingSpec ||
+      state.isSwitchingIterationMode,
+  );
+}
+
+function isNonCancellableSpecModeSwitchBusy(state: AppState) {
+  return Boolean(
+    state.isGeneratingSpec ||
+      state.isVerifyingSpec ||
+      state.isSwitchingIterationMode,
+  );
+}
+
+function isActiveConversationSpec(
+  conversation: ProjectConversation,
+  spec: DevelopmentSpec,
+) {
+  return (
+    conversation.mode === "spec" &&
+    conversation.activeSpecId === spec.id &&
+    conversation.specIds.includes(spec.id) &&
+    conversation.id === spec.conversationId &&
+    conversation.projectId === spec.projectId
+  );
+}
+
+function getConversationSpecRelationshipError(
+  projectId: string,
+  conversation: ProjectConversation,
+  spec: DevelopmentSpec,
+  expectedSpecId: string,
+) {
+  if (spec.id !== expectedSpecId) {
+    return "Spec id does not match the conversation reference.";
+  }
+
+  if (spec.projectId !== projectId || conversation.projectId !== projectId) {
+    return "Spec does not belong to the current project.";
+  }
+
+  if (spec.conversationId !== conversation.id) {
+    return "Spec does not belong to the current conversation.";
+  }
+
+  if (!conversation.specIds.includes(spec.id)) {
+    return "Spec is not listed in the current conversation history.";
+  }
+
+  return null;
+}
+
+function isRunForSpec(
+  run: AppState["currentAgentRun"],
+  spec: DevelopmentSpec,
+) {
+  if (!run || run.contract.source?.mode !== "spec") {
+    return false;
+  }
+
+  const revision = getCurrentSpecRevision(spec);
+  const runningTask = revision.tasks.find((task) => task.status === "running");
+
+  return (
+    run.conversationId === spec.conversationId &&
+    run.contract.source.specId === spec.id &&
+    run.contract.source.revisionId === revision.id &&
+    Boolean(runningTask) &&
+    runningTask?.runId === run.id &&
+    runningTask?.id === run.contract.source.taskId
+  );
+}
+
+function isTerminalRunStatus(status: string) {
+  return ["completed", "failed", "cancelled", "budget_exceeded"].includes(status);
+}
+
+function isCurrentSpecSnapshot(
+  store: StoreAccess,
+  snapshot: {
+    conversationId?: string;
+    currentRevisionId: string;
+    modeChangedAt?: string;
+    projectId: string;
+    specId: string;
+  },
+  expectedStatus?: SpecStatus,
+) {
+  const state = store.get();
+
+  return (
+    state.currentProject?.id === snapshot.projectId &&
+    state.currentConversation?.id === snapshot.conversationId &&
+    state.currentConversation?.mode === "spec" &&
+    state.currentConversation?.activeSpecId === snapshot.specId &&
+    state.currentConversation?.modeChangedAt === snapshot.modeChangedAt &&
+    state.currentSpec?.id === snapshot.specId &&
+    state.currentSpec.currentRevisionId === snapshot.currentRevisionId &&
+    state.currentSpec.status !== "cancelled" &&
+    (!expectedStatus || state.currentSpec.status === expectedStatus)
+  );
+}
+
+function isCurrentModeSnapshot(
+  store: StoreAccess,
+  snapshot: {
+    conversationId: string;
+    modeChangedAt: string;
+    projectId: string;
+  },
+  expectedMode: "chat" | "spec",
+) {
+  const state = store.get();
+
+  return (
+    state.currentProject?.id === snapshot.projectId &&
+    state.currentConversation?.id === snapshot.conversationId &&
+    state.currentConversation.mode === expectedMode &&
+    state.currentConversation.modeChangedAt === snapshot.modeChangedAt
+  );
+}
+
+function recordSpecError(set: StoreAccess["set"], error: unknown) {
+  const message = getProjectErrorMessage(error);
+
+  set((state) => ({
+    projectError: message,
+    terminalLogs: appendLogs(state.terminalLogs, [`[spec:error] ${message}`]),
+  }));
+}
+
+function createId(prefix: string) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+export function canSwitchSpecStatusToChat(spec: DevelopmentSpec | null) {
+  return !spec || isTerminalSpecStatus(spec.status) || ["drafting", "review"].includes(spec.status);
+}
+
+export const __specStoreActionsTestUtils = {
+  markBlockedDownstreamTasks,
+  restoreRetryableTaskGraph,
+};

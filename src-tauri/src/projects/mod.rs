@@ -7,8 +7,8 @@ mod types;
 mod workspace;
 
 use types::{
-    FileTree, ProjectChangeRecord, ProjectConversation, ProjectConversationSummary,
-    ProjectFileInput, ProjectInfo,
+    CreateProjectConversationInput, FileTree, ProjectChangeRecord, ProjectConversation,
+    ProjectConversationSummary, ProjectFileInput, ProjectInfo, SwitchProjectConversationModeInput,
 };
 
 pub(crate) use workspace::resolve_project_dir;
@@ -16,6 +16,11 @@ pub(crate) use workspace::resolve_project_dir;
 #[tauri::command]
 pub fn create_project(project_name: String) -> Result<ProjectInfo, String> {
     project_commands::create_project(project_name)
+}
+
+#[tauri::command]
+pub fn delete_uninitialized_project(project_id: String) -> Result<(), String> {
+    project_commands::delete_uninitialized_project(project_id)
 }
 
 #[tauri::command]
@@ -77,9 +82,9 @@ pub fn list_project_conversations(
 #[tauri::command]
 pub fn create_project_conversation(
     project_id: String,
-    title: Option<String>,
+    input: CreateProjectConversationInput,
 ) -> Result<ProjectConversation, String> {
-    conversation_commands::create_project_conversation(project_id, title)
+    conversation_commands::create_project_conversation(project_id, input)
 }
 
 #[tauri::command]
@@ -90,12 +95,24 @@ pub fn read_project_conversation(
     conversation_commands::read_project_conversation(project_id, conversation_id)
 }
 
+pub(crate) fn project_contains_spec_id(project_id: &str, spec_id: &str) -> Result<bool, String> {
+    conversation_commands::project_contains_spec_id(project_id, spec_id)
+}
+
 #[tauri::command]
 pub fn save_project_conversation(
     project_id: String,
     conversation: ProjectConversation,
 ) -> Result<ProjectConversation, String> {
     conversation_commands::save_project_conversation(project_id, conversation)
+}
+
+#[tauri::command]
+pub fn switch_project_conversation_mode(
+    project_id: String,
+    input: SwitchProjectConversationModeInput,
+) -> Result<ProjectConversation, String> {
+    conversation_commands::switch_project_conversation_mode(project_id, input)
 }
 
 #[tauri::command]

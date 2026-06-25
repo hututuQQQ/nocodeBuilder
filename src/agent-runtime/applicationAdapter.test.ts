@@ -16,10 +16,13 @@ const fake = vi.hoisted(() => ({
   completedMessages: [] as string[],
   commandCalls: [] as string[],
   commandThrows: false,
+  devServerStarts: 0,
+  devServerStops: 0,
   events: [] as AgentEvent[],
   failedMessages: [] as string[],
   generationFiles: [] as Array<{ content: string; path: string }>,
   modelContexts: [] as unknown[],
+  previewProbeResults: [] as Array<{ ok: boolean; status: number; summary: string }>,
   previewProbeUrls: [] as string[],
   projectFiles: {} as Record<string, string>,
   requireReadBeforeWrite: false,
@@ -143,7 +146,7 @@ vi.mock("../services/projects", () => ({
     })),
     probePreviewUrl: vi.fn(async (url: string) => {
       fake.previewProbeUrls.push(url);
-      return {
+      return fake.previewProbeResults.shift() ?? {
         ok: true,
         status: 200,
         summary: "ok",
@@ -301,15 +304,26 @@ vi.mock("../store/agentToolExecutor", () => ({
       "read_files",
       "resolve_node_source",
     ]);
+    const writtenFiles =
+      step.tool === "write_files" &&
+      typeof step.args === "object" &&
+      step.args !== null &&
+      Array.isArray((step.args as { files?: unknown }).files)
+        ? (step.args as { files: Array<{ path?: unknown }> }).files
+            .map((file) => file.path)
+            .filter((path): path is string => typeof path === "string")
+        : [];
     const changedFiles = step.tool === "delete_files"
       ? ["components/Old.tsx"]
-      : ["app/page.tsx"];
+      : writtenFiles.length > 0
+        ? writtenFiles
+        : ["app/page.tsx"];
 
     return {
       changedFiles,
       deletedFiles: step.tool === "delete_files" ? ["components/Old.tsx"] : undefined,
       didChangeFiles: !readOnlyTools.has(step.tool),
-      didChangePackage: false,
+      didChangePackage: changedFiles.some((path) => path.replace(/\\/g, "/") === "package.json"),
       observation: {
         content: `ran ${step.tool}`,
         ok: true,
@@ -349,6 +363,7 @@ const {
   generateInitialProjectRuntime,
   modifyCurrentProjectRuntime,
 } = await import("./applicationAdapter");
+const conversationState = await import("../store/conversationState");
 
 describe("Application runtime adapter", () => {
   beforeEach(() => {
@@ -358,10 +373,13 @@ describe("Application runtime adapter", () => {
     fake.completedMessages = [];
     fake.commandCalls = [];
     fake.commandThrows = false;
+    fake.devServerStarts = 0;
+    fake.devServerStops = 0;
     fake.events = [];
     fake.failedMessages = [];
     fake.generationFiles = [];
     fake.modelContexts = [];
+    fake.previewProbeResults = [];
     fake.previewProbeUrls = [];
     fake.projectFiles = {};
     fake.requireReadBeforeWrite = false;
@@ -374,6 +392,7 @@ describe("Application runtime adapter", () => {
     fake.verifierInputs = [];
     fake.verifierPorts = [];
     fake.verificationStatuses = [];
+    vi.mocked(conversationState.persistCurrentConversation).mockClear();
   });
 
   it("completes a simple answer through the production adapter", async () => {
@@ -467,6 +486,72 @@ describe("Application runtime adapter", () => {
     expect(fake.toolNames).toEqual(["read_files", "edit_file"]);
     expect(fake.verifierInputs).toHaveLength(2);
     expect(fake.events.map((event) => event.type)).toContain("run.completed");
+  });
+
+  it("restarts preview and retries once when the verifier probe sees HTTP 500", async () => {
+    fake.actions = [
+      {
+        type: "finish_candidate",
+        summary: "Change completed",
+      },
+    ];
+    fake.previewProbeResults = [
+      { ok: false, status: 500, summary: "Internal Server Error" },
+      { ok: true, status: 200, summary: "ok" },
+    ];
+    const store = createFakeStore();
+
+    const result = await modifyCurrentProjectRuntime(store, "Change hero copy");
+
+    expect(result).toBe(true);
+    expect(fake.previewProbeUrls).toEqual([
+      "http://localhost:3000",
+      "http://localhost:3000",
+    ]);
+    expect(fake.devServerStops).toBe(1);
+    expect(fake.devServerStarts).toBe(1);
+  });
+
+  it("does not project stale run results into another conversation", async () => {
+    let store: FakeStore;
+    fake.actions = [
+      () => {
+        store.set({
+          agentEvents: [],
+          currentAgentRun: null,
+          currentConversation: {
+            id: "conversation-2",
+            messages: [],
+            mode: "chat",
+            projectId: "project-1",
+          },
+          currentVerificationReport: null,
+        });
+
+        return {
+          type: "answer",
+          message: "Finished after the user switched conversations.",
+        };
+      },
+    ];
+    fake.verificationStatuses = ["passed"];
+    store = createFakeStore() as unknown as FakeStore;
+
+    const result = await modifyCurrentProjectRuntime(
+      store as never,
+      "Answer after context switch",
+    );
+    const run = [...fake.runs.values()][0];
+
+    expect(result).toBe(true);
+    expect(run.status).toBe("completed");
+    expect(store.get().currentConversation).toMatchObject({
+      id: "conversation-2",
+    });
+    expect(store.get().currentAgentRun).toBeNull();
+    expect(store.get().agentEvents).toEqual([]);
+    expect(store.get().currentVerificationReport).toBeNull();
+    expect(conversationState.persistCurrentConversation).not.toHaveBeenCalled();
   });
 
   it("repairs after failed auto-verification and then completes", async () => {
@@ -580,10 +665,16 @@ describe("Application runtime adapter", () => {
     });
   });
 
-  it("shows approval UI during initial generation when write_files includes package.json", async () => {
+  it("continues initial generation without approval when write_files includes package.json", async () => {
     fake.generationFiles = [
       { path: "package.json", content: "{\"scripts\":{\"build\":\"next build\"}}" },
       { path: "app/page.tsx", content: "export default function Page() { return null; }" },
+    ];
+    fake.actions = [
+      {
+        type: "finish_candidate",
+        summary: "Initial project generated",
+      },
     ];
     const store = createFakeStore();
     const project = (store as { get: () => { currentProject: ProjectInfo } })
@@ -596,11 +687,14 @@ describe("Application runtime adapter", () => {
       currentAgentRun: AgentRun | null;
     } }).get();
 
-    expect(result).toBe(false);
-    expect(state.currentAgentRun?.status).toBe("waiting_approval");
-    expect(state.currentAgentApproval).toMatchObject({
-      targetResources: expect.arrayContaining(["package.json"]),
-      toolName: "write_files",
+    expect(result).toBe(true);
+    expect(state.currentAgentRun?.status).toBe("completed");
+    expect(state.currentAgentApproval).toBeNull();
+    expect(fake.approvals).toHaveLength(0);
+    expect(fake.toolNames).toEqual(["write_files"]);
+    expect(fake.verifierInputs[0]).toMatchObject({
+      changedFiles: expect.arrayContaining(["package.json", "app/page.tsx"]),
+      packageChanged: true,
     });
   });
 
@@ -1437,6 +1531,11 @@ function hashText(content: string) {
   return `${content.length}:${(hash >>> 0).toString(16)}`;
 }
 
+type FakeStore = {
+  get: () => Record<string, unknown>;
+  set: (patch: Record<string, unknown>) => void;
+};
+
 function createFakeStore() {
   let state: Record<string, unknown> = {
     agentEvents: [],
@@ -1478,8 +1577,22 @@ function createFakeStore() {
       };
     },
     selectedSiteNodeId: null,
-    startDevServer: async () => undefined,
-    stopDevServer: async () => undefined,
+    startDevServer: async () => {
+      fake.devServerStarts += 1;
+      state = {
+        ...state,
+        devServerStatus: "running",
+        previewUrl: "http://localhost:3000",
+      };
+    },
+    stopDevServer: async () => {
+      fake.devServerStops += 1;
+      state = {
+        ...state,
+        devServerStatus: "stopped",
+        previewUrl: null,
+      };
+    },
     terminalLogs: [],
   };
 
