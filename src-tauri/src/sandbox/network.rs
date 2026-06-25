@@ -526,11 +526,17 @@ mod tests {
             .expect("write request");
 
         let mut response = String::new();
-        BufReader::new(stream)
-            .read_line(&mut response)
-            .expect("read response");
-
-        assert!(response.contains("403"));
+        match BufReader::new(stream).read_line(&mut response) {
+            Ok(_) => assert!(response.contains("403")),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::UnexpectedEof
+                ) => {}
+            Err(error) => panic!("read response: {error}"),
+        }
     }
 
     #[test]

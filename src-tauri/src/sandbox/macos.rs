@@ -14,10 +14,24 @@ use crate::sandbox::policy::SANDBOX_POLICY_VERSION;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const SYSTEM_READ_ROOTS: &[&str] = &[
+    "/Library/Apple",
+    "/Library/Filesystems/NetFSPlugins",
+    "/Library/Preferences",
+    "/Library/Preferences/Logging",
+    "/Library/Apple/System/Library",
+    "/Library/Apple/usr/lib",
     "/System/Library",
+    "/System/Library/CoreServices",
     "/System/Volumes/Preboot/Cryptexes/OS",
     "/System/Cryptexes/OS",
+    "/etc",
+    "/private/etc",
+    "/private/var/db/DarwinDirectory",
+    "/private/var/db/timezone",
+    "/sbin",
     "/usr/lib",
+    "/usr/libexec",
+    "/usr/sbin",
     "/usr/share",
     "/bin",
     "/usr/bin",
@@ -136,11 +150,20 @@ fn build_profile(request: &SandboxRequest) -> String {
         "(allow ipc-posix-sem)".to_string(),
         "(allow ipc-posix-shm-read* (ipc-posix-name-prefix \"apple.cfprefs.\"))".to_string(),
         "(allow user-preference-read)".to_string(),
-        "(allow mach-lookup (global-name \"com.apple.bsd.dirhelper\") (global-name \"com.apple.cfprefsd.agent\") (global-name \"com.apple.cfprefsd.daemon\") (global-name \"com.apple.system.DirectoryService.libinfo_v1\") (global-name \"com.apple.system.logger\") (global-name \"com.apple.system.opendirectoryd.libinfo\") (local-name \"com.apple.cfprefsd.agent\"))"
+        "(allow mach-lookup (global-name \"com.apple.analyticsd\") (global-name \"com.apple.analyticsd.messagetracer\") (global-name \"com.apple.appsleep\") (global-name \"com.apple.bsd.dirhelper\") (global-name \"com.apple.cfprefsd.agent\") (global-name \"com.apple.cfprefsd.daemon\") (global-name \"com.apple.diagnosticd\") (global-name \"com.apple.logd\") (global-name \"com.apple.logd.events\") (global-name \"com.apple.PowerManagement.control\") (global-name \"com.apple.runningboard\") (global-name \"com.apple.secinitd\") (global-name \"com.apple.system.DirectoryService.libinfo_v1\") (global-name \"com.apple.system.logger\") (global-name \"com.apple.system.notification_center\") (global-name \"com.apple.system.opendirectoryd.libinfo\") (global-name \"com.apple.system.opendirectoryd.membership\") (global-name \"com.apple.trustd\") (global-name \"com.apple.trustd.agent\") (global-name \"com.apple.xpc.activity.unmanaged\") (local-name \"com.apple.cfprefsd.agent\"))"
             .to_string(),
+        "(allow file-read* file-test-existence (literal \"/\"))".to_string(),
+        "(allow file-read-metadata file-test-existence (literal \"/etc\") (literal \"/tmp\") (literal \"/var\") (literal \"/private/etc/localtime\"))"
+            .to_string(),
+        "(allow file-read-metadata file-test-existence (path-ancestors \"/System/Volumes/Data/private\"))"
+            .to_string(),
+        "(allow file-read-metadata (subpath \"/var\") (subpath \"/private/var\"))".to_string(),
+        "(allow system-fsctl (fsctl-command FSIOC_CAS_BSDFLAGS))".to_string(),
         "(allow file-read* file-test-existence file-write-data (literal \"/dev/null\"))"
             .to_string(),
         "(allow file-read* file-test-existence (literal \"/dev/random\") (literal \"/dev/urandom\") (literal \"/private/etc/passwd\") (literal \"/private/etc/master.passwd\") (literal \"/private/etc/localtime\"))"
+            .to_string(),
+        "(allow file-read* file-test-existence file-write-data file-ioctl (literal \"/dev/dtracehelper\"))"
             .to_string(),
         "(allow file-read-data file-test-existence file-write-data (subpath \"/dev/fd\"))"
             .to_string(),
