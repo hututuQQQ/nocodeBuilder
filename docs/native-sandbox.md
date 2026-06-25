@@ -120,6 +120,8 @@ On Windows, `initialize_windows_sandbox` provisions app-owned directories, the h
 
 ## Platform Verification Status
 
+Windows automated target-OS Rust verification: passed in GitHub Actions PR run `28188467784` (`Platform Rust (windows-latest)`, `cargo test --manifest-path src-tauri/Cargo.toml`, completed 2026-06-25 17:33 UTC).
+
 Windows clean-machine verification: not executed in this environment.
 
 | Check | Command or action | Expected result | Actual result |
@@ -131,10 +133,13 @@ Windows clean-machine verification: not executed in this environment.
 | Public network block | Malicious script opens a public outbound connection | Connection fails under WFP policy | Not executed on a clean Windows host |
 | Process-tree cleanup | Malicious script spawns descendants, then stop/cancel | Job Object kills descendants | Not executed on a clean Windows host |
 
-macOS Seatbelt verification: not executed in this environment.
+macOS automated Seatbelt verification: passed in GitHub Actions PR run `28188467784` (`Platform Rust (macos-14)`, `cargo test --manifest-path src-tauri/Cargo.toml`, completed 2026-06-25 17:30 UTC). The runtime smoke test invokes `/usr/bin/sandbox-exec`, verifies that the generated profile can read an allowed sandbox workspace file, and verifies that a denied sensitive root remains unreadable.
+
+macOS full install/build/dev verification: not executed in this environment.
 
 | Check | Command or action | Expected result | Actual result |
 | --- | --- | --- | --- |
+| Seatbelt runtime smoke | GitHub Actions `Platform Rust (macos-14)` | Workspace read succeeds and denied root read fails under `/usr/bin/sandbox-exec` | Passed in PR run `28188467784` |
 | Install through proxy | Run sandboxed `npm install` | Fetches succeed only through managed proxy | Not executed on a macOS host |
 | Build | Run sandboxed `npm run build` | Build succeeds without public network | Not executed on a macOS host |
 | Dev server | Run sandboxed `npm run dev` | Server binds only localhost and readiness uses HTTP probe | Not executed on a macOS host |
@@ -148,7 +153,7 @@ macOS Seatbelt verification: not executed in this environment.
 - Windows setup now manages local LSA account rights for the sandbox account. Domain Group Policy can still override those rights; status reports `repair-required` when the effective local rights drift from the expected batch-only configuration.
 - The Windows credentialed batch-token runner launch compiles and is covered by request/validation tests, but elevated setup and account logon have not passed clean-machine verification yet.
 - The managed allowlist proxy currently supports HTTPS CONNECT only; plain HTTP package fetches are rejected.
-- macOS Seatbelt and memory-watchdog behavior have not passed macOS host verification yet.
+- Full macOS install/build/dev, credential-isolation, public-network-denial, and memory-watchdog verification has not been executed on a macOS host yet; only the automated Seatbelt allow/deny runtime smoke has passed on GitHub Actions `macos-14`.
 - Linux is compile-only and intentionally unsupported at runtime.
 
 No incomplete path falls back to bare host npm/pnpm execution.
