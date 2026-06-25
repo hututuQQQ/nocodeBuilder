@@ -1551,14 +1551,16 @@ mod windows_acl {
     use windows_sys::Win32::{
         Foundation::{GetLastError, LocalFree, ERROR_INSUFFICIENT_BUFFER},
         Security::{
+            AclSizeInformation,
             Authorization::{
                 ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
-                ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW,
-                SetNamedSecurityInfoW, SE_FILE_OBJECT,
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
+                GetNamedSecurityInfoW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
             },
-            GetSecurityDescriptorControl, GetSecurityDescriptorDacl, LookupAccountNameW,
-            DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-            PSID, SE_DACL_PROTECTED, SID_NAME_USE,
+            EqualSid, GetAce, GetAclInformation, GetSecurityDescriptorControl,
+            GetSecurityDescriptorDacl, LookupAccountNameW, ACCESS_ALLOWED_ACE,
+            ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+            PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SID_NAME_USE,
         },
     };
 
@@ -1566,6 +1568,7 @@ mod windows_acl {
 
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
     const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0x00;
     const FILE_READ_EXECUTE: &str = "0x1200a9";
     const FILE_MODIFY: &str = "0x1301bf";
 
@@ -1687,24 +1690,36 @@ mod windows_acl {
             ));
         }
 
-        let sddl = security_descriptor.to_sddl(path)?;
-
-        if !sddl.contains(current_user_sid) {
+        if !security_descriptor.dacl_contains_sid(current_user_sid, path)? {
+            let sddl = security_descriptor
+                .to_sddl(path)
+                .unwrap_or_else(|_| "<unavailable>".into());
             return Err(format!(
-                "Windows sandbox ACL on '{}' does not include the launching app user SID",
-                path.display()
+                "Windows sandbox ACL on '{}' does not include the launching app user SID; actual DACL: {sddl}",
+                path.display(),
             ));
         }
 
+        let has_sandbox_group = security_descriptor.dacl_contains_sid(sandbox_group_sid, path)?;
         match sandbox_group_expected {
-            true if !sddl.contains(sandbox_group_sid) => Err(format!(
-                "Windows sandbox ACL on '{}' does not include the sandbox group SID",
-                path.display()
-            )),
-            false if sddl.contains(sandbox_group_sid) => Err(format!(
-                "Windows sandbox ACL on '{}' unexpectedly includes the sandbox group SID",
-                path.display()
-            )),
+            true if !has_sandbox_group => {
+                let sddl = security_descriptor
+                    .to_sddl(path)
+                    .unwrap_or_else(|_| "<unavailable>".into());
+                Err(format!(
+                    "Windows sandbox ACL on '{}' does not include the sandbox group SID; actual DACL: {sddl}",
+                    path.display()
+                ))
+            }
+            false if has_sandbox_group => {
+                let sddl = security_descriptor
+                    .to_sddl(path)
+                    .unwrap_or_else(|_| "<unavailable>".into());
+                Err(format!(
+                    "Windows sandbox ACL on '{}' unexpectedly includes the sandbox group SID; actual DACL: {sddl}",
+                    path.display()
+                ))
+            }
             true | false => Ok(()),
         }
     }
@@ -1815,6 +1830,72 @@ mod windows_acl {
             }
         }
 
+        fn dacl_contains_sid(&self, sid: &str, path: &Path) -> Result<bool, String> {
+            let target_sid = OwnedSid::from_string(sid)?;
+            let mut dacl_present = 0;
+            let mut dacl_defaulted = 0;
+            let mut dacl = std::ptr::null_mut();
+            let got_dacl = unsafe {
+                GetSecurityDescriptorDacl(
+                    self.ptr,
+                    &mut dacl_present,
+                    &mut dacl,
+                    &mut dacl_defaulted,
+                )
+            };
+
+            if got_dacl == 0 || dacl_present == 0 || dacl.is_null() {
+                return Err(format!(
+                    "failed to inspect Windows sandbox ACL entries on '{}': {}",
+                    path.display(),
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            let mut acl_info: ACL_SIZE_INFORMATION = unsafe { std::mem::zeroed() };
+            let got_info = unsafe {
+                GetAclInformation(
+                    dacl,
+                    &mut acl_info as *mut _ as *mut _,
+                    std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                    AclSizeInformation,
+                )
+            };
+
+            if got_info == 0 {
+                return Err(format!(
+                    "failed to read Windows sandbox ACL entry count on '{}': {}",
+                    path.display(),
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            for index in 0..acl_info.AceCount {
+                let mut ace = std::ptr::null_mut();
+                let got_ace = unsafe { GetAce(dacl, index, &mut ace) };
+                if got_ace == 0 || ace.is_null() {
+                    return Err(format!(
+                        "failed to read Windows sandbox ACL entry {index} on '{}': {}",
+                        path.display(),
+                        std::io::Error::last_os_error()
+                    ));
+                }
+
+                let allowed_ace = unsafe { &*(ace as *const ACCESS_ALLOWED_ACE) };
+                if allowed_ace.Header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+                    continue;
+                }
+
+                let ace_sid =
+                    (&allowed_ace.SidStart as *const u32).cast::<core::ffi::c_void>() as PSID;
+                if unsafe { EqualSid(ace_sid, target_sid.ptr) } != 0 {
+                    return Ok(true);
+                }
+            }
+
+            Ok(false)
+        }
+
         fn to_sddl(&self, path: &Path) -> Result<String, String> {
             let mut value = std::ptr::null_mut();
             let converted = unsafe {
@@ -1841,6 +1922,35 @@ mod windows_acl {
                 LocalFree(value.cast());
             }
             result
+        }
+    }
+
+    struct OwnedSid {
+        ptr: PSID,
+    }
+
+    impl OwnedSid {
+        fn from_string(sid: &str) -> Result<Self, String> {
+            let sid_wide = wide_null(sid);
+            let mut ptr = std::ptr::null_mut();
+            let converted = unsafe { ConvertStringSidToSidW(sid_wide.as_ptr(), &mut ptr) };
+
+            if converted == 0 || ptr.is_null() {
+                Err(format!(
+                    "failed to parse Windows sandbox SID '{sid}': {}",
+                    std::io::Error::last_os_error()
+                ))
+            } else {
+                Ok(Self { ptr })
+            }
+        }
+    }
+
+    impl Drop for OwnedSid {
+        fn drop(&mut self) {
+            unsafe {
+                LocalFree(self.ptr.cast());
+            }
         }
     }
 
