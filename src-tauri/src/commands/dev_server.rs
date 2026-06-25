@@ -1,19 +1,23 @@
 use std::{
     collections::HashMap,
+    io::{Read, Write},
+    net::{TcpStream, ToSocketAddrs},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
+        Arc, Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tauri::AppHandle;
 
 use crate::{
     projects::resolve_project_dir,
-    sandbox::{SandboxChild, SandboxManager, SandboxWorkspace, SandboxedProcess},
+    sandbox::{
+        SandboxChild, SandboxManager, SandboxNetworkPolicy, SandboxWorkspace, SandboxedProcess,
+    },
 };
 
 use super::{
@@ -57,8 +61,7 @@ pub fn start_dev_server(
     let command_label = allowed.label.to_string();
     let started_at = current_timestamp();
     let url_state = Arc::new(Mutex::new(None));
-    let (url_sender, url_receiver) = mpsc::channel::<String>();
-    let (child, pid, stdout, stderr) = {
+    let (child, pid, stdout, stderr, url) = {
         let mut servers = lock_servers(&registry)?;
 
         if let Some(server) = servers.get(&project_id) {
@@ -82,8 +85,9 @@ pub fn start_dev_server(
         }
 
         let mut prepared = sandbox_manager
-            .spawn_command(&project_id, &project_dir, allowed)
+            .spawn_dev_server(&project_id, &project_dir, allowed)
             .map_err(|error| error.to_string())?;
+        let url = dev_server_url_from_policy(&prepared.policy.network)?;
         let pid = prepared.child.native_pid().unwrap_or_default();
         let stdout = prepared.child.take_stdout();
         let stderr = prepared.child.take_stderr();
@@ -110,7 +114,7 @@ pub fn start_dev_server(
             },
         );
 
-        (child, pid, stdout, stderr)
+        (child, pid, stdout, stderr, url)
     };
 
     emit_status(
@@ -131,8 +135,8 @@ pub fn start_dev_server(
             "stdout",
             stdout,
             None,
-            Some(url_sender.clone()),
-            Some(url_state.clone()),
+            None,
+            None,
             None,
             None,
         );
@@ -146,8 +150,8 @@ pub fn start_dev_server(
             "stderr",
             stderr,
             None,
-            Some(url_sender),
-            Some(url_state.clone()),
+            None,
+            None,
             None,
             None,
         );
@@ -159,11 +163,12 @@ pub fn start_dev_server(
         project_id.clone(),
         command_label.clone(),
         pid,
-        child,
+        child.clone(),
     );
 
-    match url_receiver.recv_timeout(DEV_SERVER_START_TIMEOUT) {
-        Ok(url) => {
+    match wait_for_dev_server_http_ready(&url, &child, DEV_SERVER_START_TIMEOUT) {
+        Ok(()) => {
+            set_dev_server_url(&url_state, url.clone())?;
             emit_status(
                 &app,
                 &project_id,
@@ -183,7 +188,7 @@ pub fn start_dev_server(
                 url,
             })
         }
-        Err(_) => {
+        Err(error) => {
             let is_still_running = lock_servers(&registry)?.contains_key(&project_id);
 
             if is_still_running {
@@ -191,7 +196,7 @@ pub fn start_dev_server(
             }
 
             Err(format!(
-                "command: timed out waiting for {command_label} to print a local URL"
+                "command: timed out waiting for {command_label} to become reachable at {url}: {error}"
             ))
         }
     }
@@ -214,7 +219,7 @@ pub fn stop_dev_server(
             .map_err(|_| "command: failed to lock dev server process".to_string())
             .and_then(|mut process| process.terminate_tree().map_err(|error| error.to_string()));
         server.source_sync.stop();
-        server.workspace.cleanup_tmp();
+        server.workspace.cleanup_after_dev_server();
         terminate_result?;
         emit_status(
             &app,
@@ -244,7 +249,7 @@ pub fn stop_all_dev_servers(app: AppHandle, registry: &DevServerRegistry) -> Res
             .and_then(|mut process| process.terminate_tree().map_err(|error| error.to_string()));
 
         server.source_sync.stop();
-        server.workspace.cleanup_tmp();
+        server.workspace.cleanup_after_dev_server();
 
         match result {
             Ok(()) => emit_status(
@@ -311,7 +316,7 @@ fn spawn_dev_server_watcher(
             return;
         };
         server.source_sync.stop();
-        server.workspace.cleanup_tmp();
+        server.workspace.cleanup_after_dev_server();
 
         match exit_status {
             Ok(status) => emit_status(
@@ -378,6 +383,118 @@ fn spawn_source_sync(
     }
 }
 
+fn dev_server_url_from_policy(network: &SandboxNetworkPolicy) -> Result<String, String> {
+    match network {
+        SandboxNetworkPolicy::LocalServer { port } if *port > 0 => {
+            Ok(format!("http://127.0.0.1:{port}/"))
+        }
+        _ => {
+            Err("command: dev server sandbox policy did not allocate a localhost port".to_string())
+        }
+    }
+}
+
+fn set_dev_server_url(url_state: &Arc<Mutex<Option<String>>>, url: String) -> Result<(), String> {
+    let mut current = url_state
+        .lock()
+        .map_err(|_| "command: failed to store dev server URL".to_string())?;
+    *current = Some(url);
+    Ok(())
+}
+
+fn wait_for_dev_server_http_ready(
+    url: &str,
+    child: &Arc<Mutex<SandboxChild>>,
+    timeout: Duration,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let mut last_error = "not probed yet".to_string();
+
+    while started.elapsed() < timeout {
+        match probe_local_http_url(url) {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = error,
+        }
+
+        let exited = child
+            .lock()
+            .map_err(|_| "failed to lock dev server process".to_string())?
+            .try_wait()
+            .map_err(|error| error.to_string())?;
+
+        if let Some(status) = exited {
+            return Err(format!(
+                "process exited before readiness probe succeeded (code {:?})",
+                status.code
+            ));
+        }
+
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    Err(last_error)
+}
+
+fn probe_local_http_url(url: &str) -> Result<(), String> {
+    let (host, port) = parse_local_http_url(url)?;
+    let mut stream = TcpStream::connect_timeout(
+        &(host.as_str(), port)
+            .to_socket_addrs()
+            .map_err(|error| format!("invalid readiness probe address: {error}"))?
+            .next()
+            .ok_or_else(|| "readiness probe address did not resolve".to_string())?,
+        Duration::from_millis(500),
+    )
+    .map_err(|error| format!("HTTP probe connect failed: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .map_err(|error| format!("HTTP probe read timeout setup failed: {error}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .map_err(|error| format!("HTTP probe write timeout setup failed: {error}"))?;
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .map_err(|error| format!("HTTP probe write failed: {error}"))?;
+
+    let mut buffer = [0u8; 12];
+    let read = stream
+        .read(&mut buffer)
+        .map_err(|error| format!("HTTP probe read failed: {error}"))?;
+
+    if read > 0 && buffer[..read].starts_with(b"HTTP/") {
+        Ok(())
+    } else {
+        Err("HTTP probe did not receive an HTTP response".to_string())
+    }
+}
+
+fn parse_local_http_url(url: &str) -> Result<(String, u16), String> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| "dev server URL must use http://".to_string())?;
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let (host, port) = authority
+        .rsplit_once(':')
+        .ok_or_else(|| "dev server URL must include a port".to_string())?;
+
+    if !matches!(host, "127.0.0.1" | "localhost" | "[::1]") {
+        return Err("dev server URL must be localhost-only".to_string());
+    }
+
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| "dev server URL port is invalid".to_string())?;
+
+    Ok((
+        if host == "[::1]" {
+            "::1".to_string()
+        } else {
+            host.to_string()
+        },
+        port,
+    ))
+}
+
 fn sleep_until_next_sync(shutdown: &AtomicBool) {
     let mut slept = Duration::ZERO;
 
@@ -408,6 +525,44 @@ impl Drop for SourceSyncHandle {
     }
 }
 
+impl DevServerRegistry {
+    pub fn is_project_running(&self, project_id: &str) -> Result<bool, String> {
+        Ok(lock_servers(self)?.contains_key(project_id)
+            || test_project_is_marked_running(self, project_id))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_project_running_for_test(&self, project_id: &str) {
+        test_running_projects(self)
+            .lock()
+            .unwrap()
+            .insert(project_id.to_string());
+    }
+}
+
+#[cfg(test)]
+fn test_project_is_marked_running(registry: &DevServerRegistry, project_id: &str) -> bool {
+    test_running_projects(registry)
+        .lock()
+        .unwrap()
+        .contains(project_id)
+}
+
+#[cfg(not(test))]
+fn test_project_is_marked_running(_registry: &DevServerRegistry, _project_id: &str) -> bool {
+    false
+}
+
+#[cfg(test)]
+fn test_running_projects(
+    _registry: &DevServerRegistry,
+) -> &'static Mutex<std::collections::HashSet<String>> {
+    use std::sync::OnceLock;
+
+    static RUNNING: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    RUNNING.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
 fn lock_servers<'a>(
     registry: &'a DevServerRegistry,
 ) -> Result<std::sync::MutexGuard<'a, HashMap<String, DevServerProcess>>, String> {
@@ -415,4 +570,33 @@ fn lock_servers<'a>(
         .servers
         .lock()
         .map_err(|_| "command: failed to lock dev server registry".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn readiness_probe_rejects_public_hosts() {
+        assert!(parse_local_http_url("http://0.0.0.0:5173/").is_err());
+        assert!(parse_local_http_url("http://192.168.1.10:5173/").is_err());
+    }
+
+    #[test]
+    fn readiness_probe_accepts_local_http_response() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 128];
+            let _ = stream.read(&mut buffer);
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+
+        probe_local_http_url(&format!("http://127.0.0.1:{port}/")).unwrap();
+        handle.join().unwrap();
+    }
 }

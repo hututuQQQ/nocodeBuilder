@@ -1610,6 +1610,96 @@ mod tests {
     }
 
     #[test]
+    fn accepts_workspace_under_user_profile_when_only_sensitive_home_paths_are_denied() {
+        let root = fixture_root();
+        let home = root.join("home");
+        let workspace_root = home
+            .join("AppData")
+            .join("Local")
+            .join("nocodeBuilder")
+            .join("sandbox")
+            .join("workspaces")
+            .join("project")
+            .join("runs")
+            .join("run-1");
+        let cache_root = home
+            .join("AppData")
+            .join("Local")
+            .join("nocodeBuilder")
+            .join("sandbox")
+            .join("cache")
+            .join("project");
+        let tmp_root = home
+            .join("AppData")
+            .join("Local")
+            .join("nocodeBuilder")
+            .join("sandbox")
+            .join("tmp")
+            .join("project")
+            .join("run-1");
+        let node_root = root.join("node");
+        let node_bin = node_root.join("bin");
+        let path = std::env::join_paths([
+            node_bin.clone(),
+            workspace_root.join("node_modules").join(".bin"),
+        ])
+        .unwrap();
+        let mut request = valid_request();
+        request.executable = node_bin.join(if cfg!(target_os = "windows") {
+            "npm.cmd"
+        } else {
+            "npm"
+        });
+        request.working_dir = workspace_root.clone();
+        request.readable_roots = vec![node_root.clone(), node_bin, workspace_root.clone()];
+        request.writable_roots = vec![workspace_root, cache_root.clone(), tmp_root.clone()];
+        request.denied_roots = vec![home.join(".ssh"), root.join("real-project")];
+        request
+            .environment
+            .insert("PATH".to_string(), os_to_string(path));
+        request
+            .environment
+            .insert("HOME".to_string(), path_to_string(tmp_root.join("home")));
+        request.environment.insert(
+            "USERPROFILE".to_string(),
+            path_to_string(tmp_root.join("home")),
+        );
+        request
+            .environment
+            .insert("TEMP".to_string(), path_to_string(tmp_root.join("tmp")));
+        request
+            .environment
+            .insert("TMP".to_string(), path_to_string(tmp_root.join("tmp")));
+        request.environment.insert(
+            "NPM_CONFIG_CACHE".to_string(),
+            path_to_string(cache_root.join("npm")),
+        );
+        request.environment.insert(
+            "COREPACK_HOME".to_string(),
+            path_to_string(cache_root.join("corepack")),
+        );
+
+        assert!(validate_request(&request).is_ok());
+    }
+
+    #[test]
+    fn rejects_path_entries_inside_sensitive_home_denied_roots() {
+        let root = fixture_root();
+        let home = root.join("home");
+        let mut request = valid_request();
+        request.denied_roots = vec![home.join(".ssh")];
+        let ssh_tool_dir = home.join(".ssh").join("bin");
+        request.readable_roots.push(ssh_tool_dir.clone());
+        let bad_path =
+            std::env::join_paths([fixture_root().join("node").join("bin"), ssh_tool_dir]).unwrap();
+        request
+            .environment
+            .insert("PATH".to_string(), os_to_string(bad_path));
+
+        assert!(validate_request(&request).is_err());
+    }
+
+    #[test]
     fn file_invocation_reads_runner_request_and_response_path() {
         let root = unique_fixture_root("file-invocation");
         fs::create_dir_all(&root).unwrap();
@@ -1699,7 +1789,7 @@ mod tests {
             working_dir: workspace_root.clone(),
             readable_roots: vec![node_root.clone(), node_bin.clone(), workspace_root.clone()],
             writable_roots: vec![workspace_root.clone(), cache_root.clone(), tmp_root.clone()],
-            denied_roots: vec![root.join("real-project"), root.join("home")],
+            denied_roots: vec![root.join("real-project"), root.join("home").join(".ssh")],
             environment: BTreeMap::from([
                 ("PATH".to_string(), os_to_string(path)),
                 ("HOME".to_string(), path_to_string(tmp_root.join("home"))),

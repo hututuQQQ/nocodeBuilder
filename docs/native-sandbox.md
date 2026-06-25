@@ -6,7 +6,7 @@ nocodeBuilder routes generated project commands through a native sandbox boundar
 
 - Rust validates the command against the fixed whitelist.
 - `SandboxManager` resolves the platform backend and fails closed when no safe backend is available.
-- `SandboxWorkspaceManager` copies the project into an app-managed run workspace before execution.
+- `SandboxWorkspaceManager` copies the project into an app-managed per-command or per-dev-server workspace before execution.
 - Managed Node is resolved from a pinned manifest and exposed to the sandbox as read-only input.
 - `CommandResult.sandbox` records backend, policy version, network mode, and termination reason.
 
@@ -25,7 +25,7 @@ Windows bundles include these helpers through Tauri `externalBin` in `src-tauri/
 
 The Windows backend invokes `ncb-sandbox-setup.exe` for status, initialize, and repair requests. Status uses stdin/stdout. Initialize and repair use Windows `runas` elevation: the backend writes a versioned JSON request file under the app-owned sandbox `state/setup-ipc` directory, launches the helper through UAC, waits for completion, and reads a structured response file. It only reports ready when the helper returns `ok: true`, `state: ready`, the current policy version, and the user's credential store contains a valid sandbox account password. Mutating setup actions require an elevated token; non-elevated initialize/repair/upgrade/uninstall requests fail before writing setup progress. When elevated, the setup helper provisions app-owned sandbox/runtime directories, creates or verifies the hidden sandbox account and local group, grants `SeBatchLogonRight`, denies interactive/RDP/network logon rights, applies app-owned ACLs, and installs persistent Windows Filtering Platform provider/sublayer/filter objects. The WFP policy allows only loopback `127.0.0.1` and `::1` outbound connects for the sandbox account, then blocks other outbound IPv4 and IPv6 ALE connect traffic scoped to the current `NCB_Sandbox` account SID. Setup records progress in `state/windows-setup-progress.json`; that file is not a readiness marker. Status actively verifies the account/group, account logon rights, ACL, loopback-allow, and outbound-block stages when the marker claims them, returning `repair-required` if those resources are missing or drifted. Elevated uninstall removes the progress marker, WFP filters, managed logon rights, hidden-account registry value, sandbox account, and sandbox local group; app-owned sandbox directories are left in place for project reset/manual cache cleanup.
 
-The runner helper independently validates the command label, exact argv shape, executable/package-manager pairing, resource limits, absolute paths, readable/writable/denied roots, and the minimal environment. It rejects executables outside the managed read roots, working directories outside writable sandbox roots, PATH entries outside readable/writable roots, cache/home/temp values outside writable roots, public proxy/dev-server environment values, and secret-like or unexpected environment variables. If the helper starts as the normal app user, it reads the sandbox account password from the user's credential store, obtains a `LOGON32_LOGON_BATCH` token with `LogonUserW`, and relaunches itself with `CreateProcessWithTokenW` as `NCB_Sandbox`, passing the validated request through app-owned request/response files. The child helper refuses execution unless its process token belongs to the `NCB_Sandbox` account. Once running as that identity, the helper starts the allowlisted command with inherited stdout/stderr and a Job Object enforcing kill-on-close, active-process, and memory limits. No path falls back to current-user npm/pnpm execution.
+The runner helper independently validates the command label, exact argv shape, executable/package-manager pairing, resource limits, absolute paths, readable/writable/denied roots, and the minimal environment. It rejects executables outside the managed read roots, working directories outside writable sandbox roots, PATH entries outside readable/writable roots, cache/home/temp values outside writable roots, public proxy/dev-server environment values, and secret-like or unexpected environment variables. Denied roots are explicit sensitive paths, not whole `HOME`, `USERPROFILE`, `APPDATA`, or `LOCALAPPDATA`, so app-owned sandbox workspaces under those directories remain usable while `HOME/.ssh`, cloud credential directories, the real project, `.env`, and `.aibuilder` stay denied. If the helper starts as the normal app user, it reads the sandbox account password from the user's credential store, obtains a `LOGON32_LOGON_BATCH` token with `LogonUserW`, and relaunches itself with `CreateProcessWithTokenW` as `NCB_Sandbox`, passing the validated request through app-owned request/response files. The child helper refuses execution unless its process token belongs to the `NCB_Sandbox` account. Once running as that identity, the helper starts the allowlisted command with inherited stdout/stderr and a Job Object enforcing kill-on-close, active-process, and memory limits. No path falls back to current-user npm/pnpm execution.
 
 ## macOS
 
@@ -35,9 +35,10 @@ macOS uses the system Seatbelt executable at `/usr/bin/sandbox-exec`. The backen
 - read access for managed Node and necessary system paths,
 - write access for the sandbox workspace/cache/tmp roots,
 - explicit denies for the real project and user credential roots,
+- no deny rule that covers the sandbox workspace/cache/tmp roots,
 - denied network by default.
 
-Dev-server mode allocates a localhost port and exposes it through `HOST`, `HOSTNAME`, and `PORT`. Install mode starts the managed allowlist proxy in the trusted Tauri process; when that proxy is unavailable, install fails closed.
+Dev-server mode allocates a localhost port, exposes it through `HOST`, `HOSTNAME`, and `PORT`, and waits for an HTTP readiness probe against `http://127.0.0.1:<port>/` instead of trusting stdout alone. Install mode starts the managed allowlist proxy in the trusted Tauri process; when that proxy is unavailable, install fails closed.
 
 Resource enforcement uses macOS `setrlimit` for CPU time, file size, and file descriptors. A trusted-process watchdog also polls sandbox process-group RSS and terminates the full process group when it exceeds the command policy memory limit, reporting `memory-limit` as the sandbox termination reason.
 
@@ -54,7 +55,19 @@ Downloads are written to a temporary file, verified with SHA-256, extracted into
 
 ## Workspace Copy
 
-Sandboxed commands run from an app-managed copy, not the real project. The copy excludes:
+Sandboxed commands run from an app-managed copy, not the real project. Ordinary commands use a unique short-lived workspace:
+
+```text
+workspaces/<project-id>/runs/<run-id>
+```
+
+Dev servers use a separate long-lived workspace for the lifetime of that server:
+
+```text
+workspaces/<project-id>/dev/<dev-run-id>
+```
+
+Command cleanup removes only that command's tmp/run workspace and source manifest. It does not touch active dev-server workspaces. Dev-server stop/cancel/shutdown terminates the sandbox process tree and removes that dev workspace/tmp data. The copy excludes:
 
 ```text
 .aibuilder/**
@@ -74,7 +87,7 @@ Symlinks, Windows reparse points, and paths that canonicalize outside the projec
 - `pnpm-lock.yaml`
 - `next-env.d.ts`
 
-While a dev server is running, the trusted Tauri process polls the real project and incrementally mirrors legal source changes into the sandbox workspace for HMR. It tracks copied source files in a per-run manifest under sandbox state, outside the workspace/cache/tmp roots exposed to the sandbox. Deletes only remove files that the trusted process previously copied; generated directories such as `node_modules`, `.next`, `dist`, `build`, and `coverage` are left alone.
+While a dev server is running, the trusted Tauri process polls the real project and incrementally mirrors legal source changes into the dev workspace for HMR. It tracks copied source files in a per-run manifest under sandbox state, outside the workspace/cache/tmp roots exposed to the sandbox. Deletes only remove files that the trusted process previously copied; generated directories such as `node_modules`, `.next`, `dist`, `build`, and `coverage` are left alone.
 
 ## Network Policy
 
@@ -103,15 +116,39 @@ Use the Tauri APIs:
 - `repair_sandbox`
 - `reset_project_sandbox`
 
-On Windows, `initialize_windows_sandbox` provisions app-owned directories, the hidden sandbox account/group, restricted account logon rights, app-owned ACLs, loopback-only WFP allow filters, default outbound WFP block filters, and the credential-store password used for sandbox-account runner launch. On Linux, status is `unsupported` and command execution fails closed.
+On Windows, `initialize_windows_sandbox` provisions app-owned directories, the hidden sandbox account/group, restricted account logon rights, app-owned ACLs, loopback-only WFP allow filters, default outbound WFP block filters, and the credential-store password used for sandbox-account runner launch. `get_sandbox_status` reports ready only when those real resources verify successfully; progress markers alone are insufficient. `reset_project_sandbox(projectId)` refuses to delete project sandbox data while that project's dev server is running. On Linux, status is `unsupported` and command execution fails closed.
+
+## Platform Verification Status
+
+Windows clean-machine verification: not executed in this environment.
+
+| Check | Command or action | Expected result | Actual result |
+| --- | --- | --- | --- |
+| First UAC setup | Launch app, call `initialize_windows_sandbox` | UAC helper creates account/group, ACLs, WFP filters, credential-store password, and status moves from `setup-required` to `ready` | Not executed on a clean Windows host |
+| Build identity | Run sandboxed `npm run build` | Runner command executes as `NCB_Sandbox`, not the interactive user | Not executed on a clean Windows host |
+| Install network | Run sandboxed `npm install` | Only managed proxy loopback traffic is allowed | Not executed on a clean Windows host |
+| Credential isolation | Malicious script reads `USERPROFILE/.ssh` or real project `.env` | Read fails | Not executed on a clean Windows host |
+| Public network block | Malicious script opens a public outbound connection | Connection fails under WFP policy | Not executed on a clean Windows host |
+| Process-tree cleanup | Malicious script spawns descendants, then stop/cancel | Job Object kills descendants | Not executed on a clean Windows host |
+
+macOS Seatbelt verification: not executed in this environment.
+
+| Check | Command or action | Expected result | Actual result |
+| --- | --- | --- | --- |
+| Install through proxy | Run sandboxed `npm install` | Fetches succeed only through managed proxy | Not executed on a macOS host |
+| Build | Run sandboxed `npm run build` | Build succeeds without public network | Not executed on a macOS host |
+| Dev server | Run sandboxed `npm run dev` | Server binds only localhost and readiness uses HTTP probe | Not executed on a macOS host |
+| Credential isolation | Attempt to read `HOME/.ssh` | Read fails | Not executed on a macOS host |
+| Real project isolation | Attempt to read real project `.env` | Read fails | Not executed on a macOS host |
+| Public network block | Build/test attempts public network | Connection fails | Not executed on a macOS host |
 
 ## Known Limits
 
 - Windows WFP setup currently allows sandbox-account loopback for the managed proxy/dev-server surface and blocks other outbound connects; per-command public network openings are intentionally absent.
 - Windows setup now manages local LSA account rights for the sandbox account. Domain Group Policy can still override those rights; status reports `repair-required` when the effective local rights drift from the expected batch-only configuration.
-- The Windows credentialed batch-token runner launch compiles and is covered by request/validation tests, but elevated setup and account logon still need manual verification on a clean Windows host.
+- The Windows credentialed batch-token runner launch compiles and is covered by request/validation tests, but elevated setup and account logon have not passed clean-machine verification yet.
 - The managed allowlist proxy currently supports HTTPS CONNECT only; plain HTTP package fetches are rejected.
-- macOS Seatbelt and memory-watchdog behavior must be verified on macOS hosts.
+- macOS Seatbelt and memory-watchdog behavior have not passed macOS host verification yet.
 - Linux is compile-only and intentionally unsupported at runtime.
 
 No incomplete path falls back to bare host npm/pnpm execution.

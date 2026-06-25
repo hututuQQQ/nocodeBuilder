@@ -176,7 +176,7 @@ pub(crate) fn run_command_blocking(
         output.push('\n');
     }
 
-    prepared.workspace.cleanup_tmp();
+    prepared.workspace.cleanup_after_command();
 
     Ok(CommandResult {
         project_id,

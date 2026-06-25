@@ -3,6 +3,7 @@ use std::{
     fs,
     io::ErrorKind,
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::UNIX_EPOCH,
 };
 
@@ -19,10 +20,17 @@ const WRITE_BACK_FILES: [&str; 3] = ["package-lock.json", "pnpm-lock.yaml", "nex
 #[derive(Clone, Debug)]
 pub struct SandboxWorkspace {
     pub project_id: String,
+    pub kind: SandboxWorkspaceKind,
     pub workspace_root: PathBuf,
     pub cache_root: PathBuf,
     pub tmp_root: PathBuf,
     pub source_manifest_path: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SandboxWorkspaceKind {
+    Run,
+    DevServer,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -48,18 +56,41 @@ impl SandboxWorkspaceManager {
         project_id: &str,
         project_dir: &Path,
     ) -> Result<SandboxWorkspace, SandboxError> {
+        self.prepare_workspace(project_id, project_dir, SandboxWorkspaceKind::Run)
+    }
+
+    pub fn prepare_dev_server(
+        &self,
+        project_id: &str,
+        project_dir: &Path,
+    ) -> Result<SandboxWorkspace, SandboxError> {
+        self.prepare_workspace(project_id, project_dir, SandboxWorkspaceKind::DevServer)
+    }
+
+    fn prepare_workspace(
+        &self,
+        project_id: &str,
+        project_dir: &Path,
+        kind: SandboxWorkspaceKind,
+    ) -> Result<SandboxWorkspace, SandboxError> {
         validate_project_id(project_id)?;
         let sandbox_root = sandbox_root_dir()?;
         fs::create_dir_all(&sandbox_root)?;
         let sandbox_root = sandbox_root.canonicalize()?;
-        let run_id = format!(
-            "{}-{}",
-            project_id,
-            Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        );
-        let workspace_root = sandbox_root.join("workspaces").join(project_id);
+        let run_id = unique_workspace_id(match kind {
+            SandboxWorkspaceKind::Run => "run",
+            SandboxWorkspaceKind::DevServer => "dev",
+        });
+        let workspace_root = sandbox_root
+            .join("workspaces")
+            .join(project_id)
+            .join(match kind {
+                SandboxWorkspaceKind::Run => "runs",
+                SandboxWorkspaceKind::DevServer => "dev",
+            })
+            .join(&run_id);
         let cache_root = sandbox_root.join("cache").join(project_id);
-        let tmp_root = sandbox_root.join("tmp").join(&run_id);
+        let tmp_root = sandbox_root.join("tmp").join(project_id).join(&run_id);
         let state_root = sandbox_root.join("state").join(project_id);
         let source_manifest_path = state_root.join(format!("{run_id}-source-manifest.json"));
 
@@ -71,6 +102,7 @@ impl SandboxWorkspaceManager {
 
         let workspace = SandboxWorkspace {
             project_id: project_id.to_string(),
+            kind,
             workspace_root,
             cache_root,
             tmp_root,
@@ -90,6 +122,7 @@ impl SandboxWorkspaceManager {
         for child in [
             sandbox_root.join("workspaces").join(project_id),
             sandbox_root.join("cache").join(project_id),
+            sandbox_root.join("tmp").join(project_id),
             sandbox_root.join("state").join(project_id),
         ] {
             remove_child_dir_if_exists(&sandbox_root, &child)?;
@@ -106,6 +139,21 @@ impl SandboxWorkspace {
         if let Some(parent) = self.source_manifest_path.parent() {
             let _ = fs::remove_dir(parent);
         }
+    }
+
+    pub fn cleanup_after_command(&self) {
+        self.cleanup_tmp();
+
+        if self.kind == SandboxWorkspaceKind::Run {
+            let _ = fs::remove_dir_all(&self.workspace_root);
+            remove_empty_workspace_ancestors(&self.workspace_root);
+        }
+    }
+
+    pub fn cleanup_after_dev_server(&self) {
+        self.cleanup_tmp();
+        let _ = fs::remove_dir_all(&self.workspace_root);
+        remove_empty_workspace_ancestors(&self.workspace_root);
     }
 
     pub fn sync_source_changes_from(&self, project_dir: &Path) -> Result<(), SandboxError> {
@@ -540,6 +588,38 @@ fn remove_child_dir_if_exists(parent: &Path, child: &Path) -> Result<(), Sandbox
     Ok(())
 }
 
+fn remove_empty_workspace_ancestors(workspace_root: &Path) {
+    let mut current = workspace_root.parent();
+
+    while let Some(path) = current {
+        let Some(file_name) = path.file_name().and_then(|part| part.to_str()) else {
+            break;
+        };
+
+        if !matches!(file_name, "runs" | "dev") {
+            break;
+        }
+
+        if fs::remove_dir(path).is_err() {
+            break;
+        }
+
+        current = path.parent();
+    }
+}
+
+fn unique_workspace_id(prefix: &str) -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    format!(
+        "{}-{}-{}-{}",
+        prefix,
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 fn ensure_child_path(parent: &Path, child: &Path) -> Result<(), SandboxError> {
     if child.starts_with(parent) {
         return Ok(());
@@ -611,6 +691,7 @@ fn path_to_slash(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
 
     #[test]
     fn excludes_sensitive_and_generated_paths() {
@@ -675,6 +756,7 @@ mod tests {
 
         let workspace = SandboxWorkspace {
             project_id: "test".to_string(),
+            kind: SandboxWorkspaceKind::DevServer,
             workspace_root: workspace_root.clone(),
             cache_root: root.join("cache"),
             tmp_root: root.join("tmp"),
@@ -691,6 +773,88 @@ mod tests {
         assert!(workspace_root.join("node_modules").join("dep.js").is_file());
         assert!(!workspace_root.join(".env").exists());
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_and_dev_workspaces_do_not_delete_each_other() {
+        with_sandbox_root("ncb-sandbox-workspace-lifecycle", |sandbox_root| {
+            let project = sandbox_root.join("real-project");
+            fs::create_dir_all(project.join("src")).unwrap();
+            fs::write(project.join("package.json"), "{}").unwrap();
+            fs::write(project.join("src").join("main.ts"), "export {};").unwrap();
+
+            let manager = SandboxWorkspaceManager::default();
+            let dev_workspace = manager.prepare_dev_server("project1", &project).unwrap();
+            fs::write(dev_workspace.workspace_root.join("dev-marker.txt"), "dev").unwrap();
+            let run_workspace = manager.prepare_run("project1", &project).unwrap();
+
+            assert_ne!(dev_workspace.workspace_root, run_workspace.workspace_root);
+            assert!(dev_workspace.workspace_root.ends_with(
+                Path::new("project1")
+                    .join("dev")
+                    .join(dev_workspace.workspace_root.file_name().unwrap())
+            ));
+            assert!(run_workspace.workspace_root.ends_with(
+                Path::new("project1")
+                    .join("runs")
+                    .join(run_workspace.workspace_root.file_name().unwrap())
+            ));
+            assert!(dev_workspace
+                .workspace_root
+                .join("dev-marker.txt")
+                .is_file());
+
+            run_workspace.cleanup_after_command();
+            assert!(!run_workspace.workspace_root.exists());
+            assert!(dev_workspace
+                .workspace_root
+                .join("dev-marker.txt")
+                .is_file());
+
+            dev_workspace.cleanup_after_dev_server();
+            assert!(!dev_workspace.workspace_root.exists());
+        });
+    }
+
+    #[test]
+    fn repeated_run_workspaces_are_unique() {
+        with_sandbox_root("ncb-sandbox-workspace-runs", |sandbox_root| {
+            let project = sandbox_root.join("real-project");
+            fs::create_dir_all(project.join("src")).unwrap();
+            fs::write(project.join("src").join("main.ts"), "export {};").unwrap();
+
+            let manager = SandboxWorkspaceManager::default();
+            let first = manager.prepare_run("project1", &project).unwrap();
+            fs::write(first.workspace_root.join("first-marker.txt"), "first").unwrap();
+            let second = manager.prepare_run("project1", &project).unwrap();
+
+            assert_ne!(first.workspace_root, second.workspace_root);
+            assert!(first.workspace_root.join("first-marker.txt").is_file());
+            assert!(second.workspace_root.join("src").join("main.ts").is_file());
+
+            first.cleanup_after_command();
+            second.cleanup_after_command();
+        });
+    }
+
+    fn with_sandbox_root(prefix: &str, run: impl FnOnce(&Path)) {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let old_sandbox_dir = std::env::var_os("NOCODE_BUILDER_SANDBOX_DIR");
+        let root = std::env::temp_dir().join(format!(
+            "{prefix}-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::env::set_var("NOCODE_BUILDER_SANDBOX_DIR", &root);
+
+        run(&root);
+
+        if let Some(value) = old_sandbox_dir {
+            std::env::set_var("NOCODE_BUILDER_SANDBOX_DIR", value);
+        } else {
+            std::env::remove_var("NOCODE_BUILDER_SANDBOX_DIR");
+        }
         let _ = fs::remove_dir_all(root);
     }
 }

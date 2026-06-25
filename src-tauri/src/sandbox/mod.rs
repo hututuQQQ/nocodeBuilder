@@ -13,8 +13,11 @@ mod workspace;
 
 use tauri::State;
 
+use crate::commands::DevServerRegistry;
+
 pub use manager::SandboxManager;
 pub use process::{SandboxChild, SandboxedProcess};
+pub(crate) use types::SandboxNetworkPolicy;
 pub use types::{SandboxMetadata, SandboxStatus};
 pub(crate) use workspace::SandboxWorkspace;
 
@@ -44,9 +47,42 @@ pub fn repair_sandbox(manager: State<'_, SandboxManager>) -> Result<SandboxStatu
 #[tauri::command]
 pub fn reset_project_sandbox(
     manager: State<'_, SandboxManager>,
+    registry: State<'_, DevServerRegistry>,
     project_id: String,
 ) -> Result<(), String> {
+    reset_project_sandbox_checked(manager.inner(), registry.inner(), project_id)
+}
+
+fn reset_project_sandbox_checked(
+    manager: &SandboxManager,
+    registry: &DevServerRegistry,
+    project_id: String,
+) -> Result<(), String> {
+    if registry.is_project_running(&project_id)? {
+        return Err(format!(
+            "sandbox: cannot reset project '{project_id}' while its dev server is running"
+        ));
+    }
+
     manager
         .reset_project(&project_id)
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_project_refuses_to_delete_running_dev_workspace() {
+        let registry = DevServerRegistry::default();
+        registry.mark_project_running_for_test("project-reset-test");
+        let manager = SandboxManager::default();
+
+        let error =
+            reset_project_sandbox_checked(&manager, &registry, "project-reset-test".to_string())
+                .unwrap_err();
+
+        assert!(error.contains("dev server is running"));
+    }
 }

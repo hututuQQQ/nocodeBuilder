@@ -104,12 +104,14 @@ fn join_path_list(paths: Vec<PathBuf>) -> Result<OsString, SandboxError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::workspace::SandboxWorkspaceKind;
 
     #[test]
     fn environment_uses_minimal_keys_without_host_secrets() {
         let root = std::env::temp_dir().join("ncb-sandbox-env-test");
         let workspace = SandboxWorkspace {
             project_id: "p".to_string(),
+            kind: SandboxWorkspaceKind::Run,
             workspace_root: root.join("workspace"),
             cache_root: root.join("cache"),
             tmp_root: root.join("tmp"),

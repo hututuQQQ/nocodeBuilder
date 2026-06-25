@@ -152,7 +152,18 @@ fn build_profile(request: &SandboxRequest) -> String {
         }
     }
 
+    let allowed_roots = request
+        .readable_roots
+        .iter()
+        .chain(request.writable_roots.iter())
+        .collect::<Vec<_>>();
     for root in &request.denied_roots {
+        if allowed_roots
+            .iter()
+            .any(|allowed_root| path_is_same_or_child(allowed_root, root))
+        {
+            continue;
+        }
         lines.push(format!("(deny file* (subpath \"{}\"))", sbpl_path(root)));
     }
 
@@ -180,6 +191,13 @@ fn sbpl_path(path: &Path) -> String {
 
 fn path_to_absolute(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn path_is_same_or_child(path: &Path, root: &Path) -> bool {
+    let path = path_to_absolute(path);
+    let root = path_to_absolute(root);
+
+    path == root || path.starts_with(root)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -223,5 +241,82 @@ mod tests {
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("/managed/node"));
         assert!(profile.contains("/real/project"));
+    }
+
+    #[test]
+    fn generated_profile_does_not_deny_workspace_under_home() {
+        let request = SandboxRequest {
+            command_label: "npm run build".to_string(),
+            purpose: SandboxPurpose::Build,
+            executable: PathBuf::from("/Users/alice/Library/Application Support/nocodeBuilder/node/bin/npm"),
+            args: vec![],
+            working_dir: PathBuf::from("/Users/alice/Library/Application Support/nocodeBuilder/sandbox/workspaces/project/runs/run-1"),
+            readable_roots: vec![
+                PathBuf::from("/Users/alice/Library/Application Support/nocodeBuilder/node"),
+                PathBuf::from("/Users/alice/Library/Application Support/nocodeBuilder/sandbox/workspaces/project/runs/run-1"),
+            ],
+            writable_roots: vec![
+                PathBuf::from("/Users/alice/Library/Application Support/nocodeBuilder/sandbox/workspaces/project/runs/run-1"),
+                PathBuf::from("/Users/alice/Library/Application Support/nocodeBuilder/sandbox/cache/project"),
+                PathBuf::from("/Users/alice/Library/Application Support/nocodeBuilder/sandbox/tmp/project/run-1"),
+            ],
+            denied_roots: vec![
+                PathBuf::from("/Users/alice"),
+                PathBuf::from("/Users/alice/.ssh"),
+                PathBuf::from("/Users/alice/projects/real-app"),
+            ],
+            environment: BTreeMap::new(),
+            network: SandboxNetworkPolicy::Denied,
+            limits: SandboxResourceLimits {
+                timeout_seconds: Some(1),
+                memory_bytes: 1,
+                active_process_limit: 1,
+                max_output_bytes: 1024,
+            },
+        };
+
+        let profile = build_profile(&request);
+
+        assert!(profile.contains("(allow file-write* (subpath \"/Users/alice/Library/Application Support/nocodeBuilder/sandbox/workspaces/project/runs/run-1\"))"));
+        assert!(!profile.contains("(deny file* (subpath \"/Users/alice\"))"));
+        assert!(profile.contains("(deny file* (subpath \"/Users/alice/.ssh\"))"));
+        assert!(profile.contains("(deny file* (subpath \"/Users/alice/projects/real-app\"))"));
+    }
+
+    #[test]
+    fn generated_profile_encodes_network_modes() {
+        let mut request = SandboxRequest {
+            command_label: "npm install".to_string(),
+            purpose: SandboxPurpose::Install,
+            executable: PathBuf::from("/managed/node/bin/npm"),
+            args: vec![],
+            working_dir: PathBuf::from("/sandbox/workspace"),
+            readable_roots: vec![PathBuf::from("/managed/node")],
+            writable_roots: vec![PathBuf::from("/sandbox/workspace")],
+            denied_roots: vec![PathBuf::from("/real/project")],
+            environment: BTreeMap::new(),
+            network: SandboxNetworkPolicy::Denied,
+            limits: SandboxResourceLimits {
+                timeout_seconds: Some(1),
+                memory_bytes: 1,
+                active_process_limit: 1,
+                max_output_bytes: 1024,
+            },
+        };
+
+        let denied = build_profile(&request);
+        assert!(!denied.contains("(allow network-"));
+
+        request.network = SandboxNetworkPolicy::ManagedProxy {
+            proxy_port: 4873,
+            allowed_hosts: vec![],
+        };
+        let proxy = build_profile(&request);
+        assert!(proxy.contains("(allow network-outbound (remote tcp \"127.0.0.1:4873\"))"));
+
+        request.network = SandboxNetworkPolicy::LocalServer { port: 5173 };
+        let dev = build_profile(&request);
+        assert!(dev.contains("(allow network-bind (local tcp \"127.0.0.1:5173\"))"));
+        assert!(dev.contains("(allow network-inbound (local tcp \"127.0.0.1:5173\"))"));
     }
 }

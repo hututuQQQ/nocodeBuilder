@@ -75,6 +75,25 @@ impl SandboxManager {
         project_dir: &Path,
         allowed: AllowedCommand,
     ) -> Result<PreparedSandboxCommand, SandboxError> {
+        self.spawn_prepared_command(project_id, project_dir, allowed, false)
+    }
+
+    pub fn spawn_dev_server(
+        &self,
+        project_id: &str,
+        project_dir: &Path,
+        allowed: AllowedCommand,
+    ) -> Result<PreparedSandboxCommand, SandboxError> {
+        self.spawn_prepared_command(project_id, project_dir, allowed, true)
+    }
+
+    fn spawn_prepared_command(
+        &self,
+        project_id: &str,
+        project_dir: &Path,
+        allowed: AllowedCommand,
+        dev_server_workspace: bool,
+    ) -> Result<PreparedSandboxCommand, SandboxError> {
         let health = self.health_check()?;
         let mut policy = policy_for_allowed_command(allowed);
 
@@ -83,9 +102,13 @@ impl SandboxManager {
                 .map_err(SandboxError::unavailable)?;
         validate_managed_runtime(&resolved)?;
 
-        let workspace = self
-            .workspace_manager
-            .prepare_run(project_id, project_dir)?;
+        let workspace = if dev_server_workspace {
+            self.workspace_manager
+                .prepare_dev_server(project_id, project_dir)?
+        } else {
+            self.workspace_manager
+                .prepare_run(project_id, project_dir)?
+        };
         let (network, network_proxy) =
             prepare_network_policy(policy.network, project_id, Some(&workspace.cache_root))?;
         policy.network = network;
@@ -292,21 +315,115 @@ fn writable_roots(workspace: &SandboxWorkspace) -> Vec<PathBuf> {
 }
 
 fn denied_roots(project_dir: &Path) -> Vec<PathBuf> {
-    let mut denied = vec![project_dir.to_path_buf()];
+    let mut denied = Vec::new();
+    push_unique_root(&mut denied, project_dir.to_path_buf());
+    push_unique_root(&mut denied, project_dir.join(".aibuilder"));
+    push_unique_root(&mut denied, project_dir.join(".env"));
 
     for home_key in ["HOME", "USERPROFILE"] {
         if let Some(home) = std::env::var_os(home_key) {
             let home = PathBuf::from(home);
-            denied.push(home.join(".ssh"));
-            denied.push(home.join(".aws"));
-            denied.push(home);
+            for sensitive in [
+                ".ssh", ".aws", ".azure", ".kube", ".docker", ".npmrc", ".netrc",
+            ] {
+                push_unique_root(&mut denied, home.join(sensitive));
+            }
+            push_unique_root(&mut denied, home.join(".config").join("gcloud"));
+        }
+    }
+
+    for app_data_key in ["APPDATA", "LOCALAPPDATA"] {
+        if let Some(app_data) = std::env::var_os(app_data_key) {
+            let app_data = PathBuf::from(app_data);
+            for sensitive in [
+                PathBuf::from("gcloud"),
+                PathBuf::from("Google").join("Cloud SDK"),
+                PathBuf::from("Microsoft").join("Azure"),
+                PathBuf::from("Microsoft").join("UserSecrets"),
+                PathBuf::from("Docker"),
+                PathBuf::from("NuGet").join("NuGet.Config"),
+            ] {
+                push_unique_root(&mut denied, app_data.join(sensitive));
+            }
         }
     }
 
     denied
 }
 
+fn push_unique_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
+    if !roots.iter().any(|existing| existing == &root) {
+        roots.push(root);
+    }
+}
+
 #[allow(dead_code)]
 fn _policy_version() -> u32 {
     SANDBOX_POLICY_VERSION
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn denied_roots_do_not_cover_home_or_sandbox_root() {
+        with_env_lock(|| {
+            let root = std::env::temp_dir().join(format!(
+                "ncb-sandbox-denied-roots-{}",
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            ));
+            let home = root.join("home");
+            let local_app_data = home.join("AppData").join("Local");
+            let app_data = home.join("AppData").join("Roaming");
+            let project = home.join("projects").join("app");
+            let sandbox_root = local_app_data.join("nocodeBuilder").join("sandbox");
+            std::fs::create_dir_all(&project).unwrap();
+            std::env::set_var("HOME", &home);
+            std::env::set_var("USERPROFILE", &home);
+            std::env::set_var("LOCALAPPDATA", &local_app_data);
+            std::env::set_var("APPDATA", &app_data);
+
+            let denied = denied_roots(&project);
+
+            assert!(!denied.contains(&home));
+            assert!(!denied.contains(&local_app_data));
+            assert!(!denied.contains(&app_data));
+            assert!(!denied.iter().any(|root| root == &sandbox_root));
+            assert!(denied.contains(&project));
+            assert!(denied.contains(&project.join(".aibuilder")));
+            assert!(denied.contains(&project.join(".env")));
+            assert!(denied.contains(&home.join(".ssh")));
+            assert!(denied.contains(&home.join(".aws")));
+            assert!(denied.contains(&home.join(".config").join("gcloud")));
+            assert!(denied.contains(&home.join(".npmrc")));
+
+            let _ = std::fs::remove_dir_all(root);
+        });
+    }
+
+    fn with_env_lock(run: impl FnOnce()) {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let old_home = std::env::var_os("HOME");
+        let old_userprofile = std::env::var_os("USERPROFILE");
+        let old_localappdata = std::env::var_os("LOCALAPPDATA");
+        let old_appdata = std::env::var_os("APPDATA");
+
+        run();
+
+        restore_env("HOME", old_home);
+        restore_env("USERPROFILE", old_userprofile);
+        restore_env("LOCALAPPDATA", old_localappdata);
+        restore_env("APPDATA", old_appdata);
+    }
+
+    fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
 }

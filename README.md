@@ -79,7 +79,7 @@ Advanced overrides:
 
 Generated project commands are routed through `SandboxManager` and run from an app-managed workspace copy instead of the real project directory. The sandbox copy excludes `.aibuilder`, `.env*`, `.git`, `node_modules`, and build outputs; symlinks and Windows reparse points are rejected.
 
-Sandboxed dev servers keep HMR working through trusted-process incremental sync from the real project into the run workspace. The sync manifest is host-owned, and deleted source files only remove files previously copied by nocodeBuilder, not generated dependency or build directories.
+Sandboxed dev servers keep HMR working through trusted-process incremental sync from the real project into a dedicated dev workspace. Ordinary commands use separate per-run workspaces, so builds/tests do not delete a running dev server workspace. The sync manifest is host-owned, and deleted source files only remove files previously copied by nocodeBuilder, not generated dependency or build directories.
 
 Supported runtime targets:
 
