@@ -8,8 +8,10 @@ fn windows_native_smoke_is_windows_only() {
 mod windows_native_smoke {
     use std::{
         collections::BTreeMap,
+        ffi::OsStr,
         fs,
         io::Write,
+        os::windows::ffi::OsStrExt,
         path::{Path, PathBuf},
         process::{Command, Stdio},
     };
@@ -18,8 +20,8 @@ mod windows_native_smoke {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, LocalFree, HANDLE},
         Security::{
-            Authorization::ConvertSidToStringSidW, GetTokenInformation, TokenElevation, TokenUser,
-            TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
+            Authorization::ConvertSidToStringSidW, GetTokenInformation, LookupAccountNameW,
+            TokenElevation, TokenUser, SID_NAME_USE, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
@@ -91,6 +93,7 @@ mod windows_native_smoke {
         state: String,
         message: String,
         exit_code: Option<i32>,
+        identity_sid: Option<String>,
     }
 
     #[test]
@@ -192,12 +195,18 @@ mod windows_native_smoke {
             },
         );
 
-        let identity = fs::read_to_string(workspace.join("whoami.txt"))
-            .expect("read sandbox runner identity output")
-            .to_ascii_lowercase();
+        let sandbox_sid = lookup_account_sid("NCB_Sandbox");
+        assert_eq!(
+            runner_response.identity_sid.as_deref(),
+            Some(sandbox_sid.as_str()),
+            "runner did not report the NCB_Sandbox SID: {runner_response:?}"
+        );
+
+        let command_marker = fs::read_to_string(workspace.join("command.txt"))
+            .expect("read sandbox command start marker");
         assert!(
-            identity.contains("ncb_sandbox"),
-            "runner did not execute as NCB_Sandbox: {identity}"
+            command_marker.contains("command_started"),
+            "sandbox command did not start after SID verification: {command_marker}"
         );
 
         let network = fs::read_to_string(workspace.join("network.txt")).unwrap_or_default();
@@ -215,7 +224,7 @@ mod windows_native_smoke {
             );
         } else {
             panic!(
-                "sandbox runner smoke command failed: {runner_response:?}\nidentity:\n{identity}\nnetwork:\n{network}"
+                "sandbox runner smoke command failed: {runner_response:?}\nmarker:\n{command_marker}\nnetwork:\n{network}"
             );
         }
     }
@@ -323,10 +332,7 @@ mod windows_native_smoke {
 
     fn write_fake_npm(path: &Path) {
         let script = r#"@echo off
-"%SystemRoot%\System32\whoami.exe" > whoami.txt 2>&1
-echo WHOAMI_EXIT=%ERRORLEVEL%>>whoami.txt
-echo USERDOMAIN=%USERDOMAIN%>>whoami.txt
-echo USERNAME=%USERNAME%>>whoami.txt
+echo command_started>command.txt
 "%SystemRoot%\System32\curl.exe" --connect-timeout 2 --max-time 5 --silent http://1.1.1.1/ -o NUL
 if %ERRORLEVEL% EQU 0 (
   echo public_network_allowed>network.txt
@@ -427,6 +433,43 @@ if %ERRORLEVEL% EQU 0 (
         sid_to_string(token_user.User.Sid)
     }
 
+    fn lookup_account_sid(account: &str) -> String {
+        let account = wide_null(account);
+        let mut sid_size = 0u32;
+        let mut domain_size = 0u32;
+        let mut sid_name_use: SID_NAME_USE = 0;
+
+        unsafe {
+            LookupAccountNameW(
+                std::ptr::null(),
+                account.as_ptr(),
+                std::ptr::null_mut(),
+                &mut sid_size,
+                std::ptr::null_mut(),
+                &mut domain_size,
+                &mut sid_name_use,
+            );
+        }
+        assert!(sid_size > 0, "size account SID");
+
+        let mut sid = vec![0u8; sid_size as usize];
+        let mut domain = vec![0u16; domain_size as usize];
+        let found = unsafe {
+            LookupAccountNameW(
+                std::ptr::null(),
+                account.as_ptr(),
+                sid.as_mut_ptr().cast(),
+                &mut sid_size,
+                domain.as_mut_ptr(),
+                &mut domain_size,
+                &mut sid_name_use,
+            )
+        };
+        assert!(found != 0, "lookup account SID");
+
+        sid_to_string(sid.as_mut_ptr().cast())
+    }
+
     fn sid_to_string(sid: *mut core::ffi::c_void) -> String {
         let mut string_sid = std::ptr::null_mut();
         let converted = unsafe { ConvertSidToStringSidW(sid, &mut string_sid) };
@@ -457,6 +500,10 @@ if %ERRORLEVEL% EQU 0 (
         Some(String::from_utf16_lossy(unsafe {
             std::slice::from_raw_parts(value, len)
         }))
+    }
+
+    fn wide_null(value: &str) -> Vec<u16> {
+        OsStr::new(value).encode_wide().chain([0]).collect()
     }
 
     struct SmokeCleanup {

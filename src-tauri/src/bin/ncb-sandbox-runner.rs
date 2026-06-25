@@ -55,6 +55,8 @@ struct RunnerResponse {
     state: String,
     message: String,
     exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity_sid: Option<String>,
 }
 
 fn main() {
@@ -67,6 +69,7 @@ fn main() {
                 state: "error".to_string(),
                 message,
                 exit_code: None,
+                identity_sid: None,
             })
         }
         Err(message) => RunnerResponse {
@@ -74,6 +77,7 @@ fn main() {
             state: "error".to_string(),
             message,
             exit_code: None,
+            identity_sid: None,
         },
     };
 
@@ -677,6 +681,7 @@ fn setup_required_response(message: impl Into<String>) -> RunnerResponse {
         state: "setup-required".to_string(),
         message: message.into(),
         exit_code: None,
+        identity_sid: None,
     }
 }
 
@@ -738,6 +743,7 @@ fn launch_self_as_sandbox_account(
                 "Windows sandbox runner exited with code {child_exit} after reporting success"
             ),
             exit_code: Some(child_exit as i32),
+            identity_sid: response.identity_sid,
         });
     }
 
@@ -1023,6 +1029,7 @@ fn ensure_runner_identity() -> Result<(), String> {
 }
 
 fn execute_allowlisted_command(request: RunnerRequest) -> Result<RunnerResponse, String> {
+    let identity_sid = current_runner_identity_sid()?;
     let mut command = Command::new(&request.executable);
     command
         .args(&request.args)
@@ -1056,7 +1063,18 @@ fn execute_allowlisted_command(request: RunnerRequest) -> Result<RunnerResponse,
             "Windows sandbox command completed.".to_string()
         },
         exit_code: exit.status.code(),
+        identity_sid,
     })
+}
+
+#[cfg(all(target_os = "windows", not(test)))]
+fn current_runner_identity_sid() -> Result<Option<String>, String> {
+    windows_identity::current_process_user_sid().map(Some)
+}
+
+#[cfg(any(not(target_os = "windows"), test))]
+fn current_runner_identity_sid() -> Result<Option<String>, String> {
+    Ok(None)
 }
 
 struct RunnerExit {
