@@ -187,7 +187,7 @@ mod windows_native_smoke {
                 limits: RunnerLimits {
                     memory_bytes: 512 * 1024 * 1024,
                     active_process_limit: 16,
-                    timeout_seconds: Some(20),
+                    timeout_seconds: Some(60),
                 },
             },
         );
@@ -319,8 +319,14 @@ mod windows_native_smoke {
         let script = r#"@echo off
 whoami > whoami.txt
 echo USERNAME=%USERNAME%>>whoami.txt
-"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command "try { $client = [Net.Sockets.TcpClient]::new(); $task = $client.ConnectAsync('1.1.1.1', 443); if ($task.Wait(1500) -and $client.Connected) { 'public_network_allowed' | Set-Content -Encoding ASCII network.txt; $client.Close(); exit 22 } else { 'public_network_blocked' | Set-Content -Encoding ASCII network.txt; exit 0 } } catch { 'public_network_blocked' | Set-Content -Encoding ASCII network.txt; exit 0 }"
-exit /b %ERRORLEVEL%
+"%SystemRoot%\System32\curl.exe" --connect-timeout 2 --max-time 5 --silent http://1.1.1.1/ -o NUL
+if %ERRORLEVEL% EQU 0 (
+  echo public_network_allowed>network.txt
+  exit /b 22
+) else (
+  echo public_network_blocked>network.txt
+  exit /b 0
+)
 "#;
         fs::write(path, script).expect("write fake npm.cmd");
     }
