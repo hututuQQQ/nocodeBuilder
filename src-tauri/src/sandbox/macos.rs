@@ -123,10 +123,16 @@ fn build_profile(request: &SandboxRequest) -> String {
     let mut lines = vec![
         "(version 1)".to_string(),
         "(deny default)".to_string(),
-        "(allow process*)".to_string(),
+        "(allow process-exec)".to_string(),
+        "(allow process-fork)".to_string(),
+        "(allow signal (target same-sandbox))".to_string(),
+        "(allow process-info* (target same-sandbox))".to_string(),
         "(allow sysctl-read)".to_string(),
         "(allow file-read-metadata)".to_string(),
-        read_rule(Path::new("/dev/null"), true),
+        "(allow file-read* file-test-existence file-write-data (literal \"/dev/null\"))"
+            .to_string(),
+        "(allow file-read-data file-test-existence file-write-data (subpath \"/dev/fd\"))"
+            .to_string(),
     ];
 
     for root in SYSTEM_READ_ROOTS {
@@ -185,14 +191,23 @@ fn build_profile(request: &SandboxRequest) -> String {
 
 fn read_rule(path: &Path, literal: bool) -> String {
     if literal {
-        format!("(allow file-read* (literal \"{}\"))", sbpl_path(path))
+        format!(
+            "(allow file-read* file-test-existence (literal \"{}\"))",
+            sbpl_path(path)
+        )
     } else {
-        format!("(allow file-read* (subpath \"{}\"))", sbpl_path(path))
+        format!(
+            "(allow file-read* file-test-existence (subpath \"{}\"))",
+            sbpl_path(path)
+        )
     }
 }
 
 fn write_rule(path: &Path) -> String {
-    format!("(allow file-write* (subpath \"{}\"))", sbpl_path(path))
+    format!(
+        "(allow file-write* file-test-existence (subpath \"{}\"))",
+        sbpl_path(path)
+    )
 }
 
 fn executable_map_rule(path: &Path) -> String {
@@ -237,6 +252,8 @@ mod tests {
     use std::collections::BTreeMap;
     #[cfg(target_os = "macos")]
     use std::fs;
+    #[cfg(target_os = "macos")]
+    use std::os::unix::process::ExitStatusExt;
 
     #[test]
     fn generated_profile_denies_by_default_and_mentions_denied_roots() {
@@ -300,7 +317,7 @@ mod tests {
 
         let profile = build_profile(&request);
 
-        assert!(profile.contains("(allow file-write* (subpath \"/Users/alice/Library/Application Support/nocodeBuilder/sandbox/workspaces/project/runs/run-1\"))"));
+        assert!(profile.contains("(allow file-write* file-test-existence (subpath \"/Users/alice/Library/Application Support/nocodeBuilder/sandbox/workspaces/project/runs/run-1\"))"));
         assert!(!profile.contains("(deny file* (subpath \"/Users/alice\"))"));
         assert!(profile.contains("(deny file* (subpath \"/Users/alice/.ssh\"))"));
         assert!(profile.contains("(deny file* (subpath \"/Users/alice/projects/real-app\"))"));
@@ -393,8 +410,9 @@ mod tests {
             .unwrap();
         assert!(
             allowed.status.success(),
-            "allowed read failed: status={:?}, stdout={}, stderr={}, profile=\n{}",
+            "allowed read failed: code={:?}, signal={:?}, stdout={}, stderr={}, profile=\n{}",
             allowed.status.code(),
+            allowed.status.signal(),
             String::from_utf8_lossy(&allowed.stdout),
             String::from_utf8_lossy(&allowed.stderr),
             profile
