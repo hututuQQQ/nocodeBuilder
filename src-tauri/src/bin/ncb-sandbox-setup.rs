@@ -12,8 +12,10 @@ const MAX_INPUT_BYTES: usize = 64 * 1024;
 const SETUP_SCHEMA_VERSION: u32 = 1;
 const SANDBOX_ACCOUNT_NAME: &str = "NCB_Sandbox";
 const SANDBOX_GROUP_NAME: &str = "NoCodeBuilderSandboxUsers";
+#[cfg(all(target_os = "windows", not(test)))]
 const SANDBOX_ACCOUNT_DESCRIPTION: &str =
     "Low-privilege account reserved for nocodeBuilder native sandbox runs.";
+#[cfg(all(target_os = "windows", not(test)))]
 const SANDBOX_GROUP_DESCRIPTION: &str =
     "Local group containing nocodeBuilder native sandbox identities.";
 const SETUP_PROGRESS_FILE: &str = "windows-setup-progress.json";

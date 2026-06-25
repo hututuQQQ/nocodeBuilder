@@ -50,15 +50,14 @@ impl SandboxChild {
             command.creation_flags(CREATE_NO_WINDOW);
         }
 
-        let mut child = command.spawn().map_err(|error| {
-            SandboxError::new(
-                SandboxErrorKind::SpawnFailed,
-                format!("failed to spawn sandboxed process: {error}"),
-            )
-        })?;
-
         #[cfg(target_os = "windows")]
         {
+            let mut child = command.spawn().map_err(|error| {
+                SandboxError::new(
+                    SandboxErrorKind::SpawnFailed,
+                    format!("failed to spawn sandboxed process: {error}"),
+                )
+            })?;
             let job = WindowsJobObject::create(limits)?;
             if let Err(error) = job.assign_child(&child) {
                 let _ = child.kill();
@@ -74,6 +73,12 @@ impl SandboxChild {
 
         #[cfg(not(target_os = "windows"))]
         {
+            let child = command.spawn().map_err(|error| {
+                SandboxError::new(
+                    SandboxErrorKind::SpawnFailed,
+                    format!("failed to spawn sandboxed process: {error}"),
+                )
+            })?;
             #[cfg(target_os = "macos")]
             {
                 let memory_watchdog =

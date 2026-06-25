@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 const MAX_INPUT_BYTES: usize = 128 * 1024;
 const RUNNER_SCHEMA_VERSION: u32 = 1;
+#[cfg(any(target_os = "windows", test))]
 const SANDBOX_ACCOUNT_NAME: &str = "NCB_Sandbox";
 #[cfg(all(target_os = "windows", not(test)))]
 const CREDENTIAL_SERVICE_NAME: &str = "AI Web Builder";
@@ -1745,8 +1746,8 @@ mod tests {
 
     #[test]
     fn refuses_to_execute_until_setup_is_real() {
-        let _guard = identity_override_lock().lock().unwrap();
-        std::env::remove_var("NCB_SANDBOX_TEST_RUNNER_IDENTITY");
+        let _guard = lock_identity_override();
+        let _identity = ScopedIdentityOverride::disabled();
         let response = handle_runner_request(valid_request()).unwrap();
 
         assert!(!response.ok);
@@ -1755,13 +1756,12 @@ mod tests {
 
     #[test]
     fn identity_override_reaches_spawn_path_without_shell_fallback() {
-        let _guard = identity_override_lock().lock().unwrap();
-        std::env::set_var("NCB_SANDBOX_TEST_RUNNER_IDENTITY", "1");
+        let _guard = lock_identity_override();
+        let _identity = ScopedIdentityOverride::enabled();
 
         let error = handle_runner_request(valid_request()).unwrap_err();
 
-        assert!(error.contains("failed to spawn Windows sandbox command"));
-        std::env::remove_var("NCB_SANDBOX_TEST_RUNNER_IDENTITY");
+        assert!(error.contains("failed to spawn"));
     }
 
     fn valid_request() -> RunnerRequest {
@@ -1847,5 +1847,39 @@ mod tests {
     fn identity_override_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn lock_identity_override() -> std::sync::MutexGuard<'static, ()> {
+        identity_override_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    struct ScopedIdentityOverride {
+        previous: Option<String>,
+    }
+
+    impl ScopedIdentityOverride {
+        fn enabled() -> Self {
+            let previous = std::env::var("NCB_SANDBOX_TEST_RUNNER_IDENTITY").ok();
+            std::env::set_var("NCB_SANDBOX_TEST_RUNNER_IDENTITY", "1");
+            Self { previous }
+        }
+
+        fn disabled() -> Self {
+            let previous = std::env::var("NCB_SANDBOX_TEST_RUNNER_IDENTITY").ok();
+            std::env::remove_var("NCB_SANDBOX_TEST_RUNNER_IDENTITY");
+            Self { previous }
+        }
+    }
+
+    impl Drop for ScopedIdentityOverride {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var("NCB_SANDBOX_TEST_RUNNER_IDENTITY", previous);
+            } else {
+                std::env::remove_var("NCB_SANDBOX_TEST_RUNNER_IDENTITY");
+            }
+        }
     }
 }
