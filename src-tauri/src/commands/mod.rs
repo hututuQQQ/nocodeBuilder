@@ -1,18 +1,20 @@
 mod command_runner;
-mod command_whitelist;
+pub(crate) mod command_whitelist;
 mod dev_server;
 mod events;
-mod node_runtime;
+pub(crate) mod node_runtime;
 mod preview;
 mod process;
 mod supabase;
 mod time;
-mod types;
+pub(crate) mod types;
 mod vercel;
 
 use tauri::{AppHandle, State};
 
 pub use dev_server::DevServerRegistry;
+
+use crate::sandbox::SandboxManager;
 
 use types::{
     CommandResult, DevServerInfo, VercelDeployOptions, VercelDeploymentInfo, VercelUserInfo,
@@ -21,22 +23,25 @@ use types::{
 #[tauri::command]
 pub async fn run_command(
     app: AppHandle,
+    sandbox_manager: State<'_, SandboxManager>,
     project_id: String,
     command: String,
 ) -> Result<CommandResult, String> {
-    command_runner::run_command(app, project_id, command).await
+    command_runner::run_command(app, sandbox_manager.inner().clone(), project_id, command).await
 }
 
 #[tauri::command]
 pub async fn start_dev_server(
     app: AppHandle,
     registry: State<'_, DevServerRegistry>,
+    sandbox_manager: State<'_, SandboxManager>,
     project_id: String,
 ) -> Result<DevServerInfo, String> {
     let registry = registry.inner().clone();
+    let sandbox_manager = sandbox_manager.inner().clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        dev_server::start_dev_server(app, registry, project_id)
+        dev_server::start_dev_server(app, registry, sandbox_manager, project_id)
     })
     .await
     .map_err(|error| format!("command: failed to join dev server task: {error}"))?
@@ -71,10 +76,11 @@ pub fn probe_preview_url(url: String) -> Result<preview::PreviewProbeResult, Str
 #[tauri::command]
 pub async fn deploy_to_vercel(
     app: AppHandle,
+    sandbox_manager: State<'_, SandboxManager>,
     project_id: String,
     options: VercelDeployOptions,
 ) -> Result<VercelDeploymentInfo, String> {
-    vercel::deploy_to_vercel(app, project_id, options).await
+    vercel::deploy_to_vercel(app, sandbox_manager.inner().clone(), project_id, options).await
 }
 
 #[tauri::command]

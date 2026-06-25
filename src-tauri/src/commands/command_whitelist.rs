@@ -86,3 +86,18 @@ pub fn preferred_build_command(project_dir: &Path) -> AllowedCommand {
 fn normalize_command(command: &str) -> String {
     command.split_whitespace().collect::<Vec<_>>().join(" ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allows_only_exact_whitelisted_commands() {
+        assert!(parse_allowed_command("npm run build").is_ok());
+        assert!(parse_allowed_command("pnpm test").is_ok());
+        assert!(parse_allowed_command("npm install next").is_err());
+        assert!(parse_allowed_command("npm run build && whoami").is_err());
+        assert!(parse_allowed_command("sh -c 'npm run build'").is_err());
+        assert!(parse_allowed_command("powershell -Command npm install").is_err());
+    }
+}

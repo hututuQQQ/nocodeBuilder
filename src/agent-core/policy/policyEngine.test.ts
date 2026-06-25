@@ -133,7 +133,7 @@ describe("PolicyEngine", () => {
     expect(decision.approvalRequired).toBe(false);
   });
 
-  it("does not require approval before running package installation", () => {
+  it("requires approval before running package installation", () => {
     const machine = new RunStateMachine();
     const run = machine.createRun({
       contract: compileTaskContract({ objective: "Initialize dependencies" }),
@@ -152,7 +152,31 @@ describe("PolicyEngine", () => {
       throw new Error("Expected npm install to be allowed.");
     }
 
-    expect(decision.approvalRequired).toBe(false);
+    expect(decision.approvalRequired).toBe(true);
+  });
+
+  it("denies package installation when dependency changes are denied", () => {
+    const machine = new RunStateMachine();
+    const contract = compileTaskContract({ objective: "Answer a question" });
+    const run = machine.createRun({
+      contract: {
+        ...contract,
+        permissions: {
+          ...contract.permissions,
+          dependencyChange: "deny",
+        },
+      },
+      conversationId: "conversation-1",
+      projectId: "project-1",
+    });
+    const tool = getCoreToolDefinition("run_command");
+    const decision = new PolicyEngine().evaluate({
+      args: { command: "pnpm install" },
+      run,
+      tool: tool!,
+    });
+
+    expect(decision.allowed).toBe(false);
   });
 
   it("allows workspace writes inside allowed paths", () => {

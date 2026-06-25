@@ -5,7 +5,7 @@ use std::{
 
 use tauri::AppHandle;
 
-use crate::projects::resolve_project_dir;
+use crate::{projects::resolve_project_dir, sandbox::SandboxManager};
 
 use super::{
     command_runner::run_command_blocking,
@@ -20,6 +20,7 @@ mod urls;
 
 pub async fn deploy_to_vercel(
     app: AppHandle,
+    sandbox_manager: SandboxManager,
     project_id: String,
     options: VercelDeployOptions,
 ) -> Result<VercelDeploymentInfo, String> {
@@ -33,6 +34,7 @@ pub async fn deploy_to_vercel(
         let build_command = preferred_build_command(&project_dir);
         let build_result = run_command_blocking(
             app_for_task.clone(),
+            sandbox_manager,
             project_id_for_task.clone(),
             project_dir.as_path(),
             build_command,
@@ -116,6 +118,7 @@ fn run_vercel_deploy_blocking(
             Some(output.clone()),
             None,
             None,
+            None,
             Some(redactions.clone()),
         ));
     }
@@ -128,6 +131,7 @@ fn run_vercel_deploy_blocking(
             "stderr",
             stderr,
             Some(output.clone()),
+            None,
             None,
             None,
             Some(redactions.clone()),

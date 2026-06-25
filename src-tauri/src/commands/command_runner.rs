@@ -2,22 +2,23 @@ use std::{
     fs,
     path::Path,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use tauri::AppHandle;
 
-use crate::projects::resolve_project_dir;
+use crate::{projects::resolve_project_dir, sandbox::SandboxManager};
 
 use super::{
     command_whitelist::parse_allowed_command,
     events::{emit_status, spawn_output_reader},
-    process::spawn_child,
     time::current_timestamp,
     types::{AllowedCommand, CommandResult},
 };
 
 pub async fn run_command(
     app: AppHandle,
+    sandbox_manager: SandboxManager,
     project_id: String,
     command: String,
 ) -> Result<CommandResult, String> {
@@ -30,6 +31,7 @@ pub async fn run_command(
     tauri::async_runtime::spawn_blocking(move || {
         run_command_blocking(
             app_for_task,
+            sandbox_manager,
             project_id_for_task,
             project_dir.as_path(),
             allowed,
@@ -53,6 +55,7 @@ pub async fn run_command(
 
 pub(crate) fn run_command_blocking(
     app: AppHandle,
+    sandbox_manager: SandboxManager,
     project_id: String,
     project_dir: &Path,
     allowed: AllowedCommand,
@@ -71,10 +74,13 @@ pub(crate) fn run_command_blocking(
         None,
     );
 
-    let mut child = spawn_child(project_dir, allowed)?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    let mut prepared = sandbox_manager
+        .spawn_command(&project_id, project_dir, allowed)
+        .map_err(|error| error.to_string())?;
+    let stdout = prepared.child.take_stdout();
+    let stderr = prepared.child.take_stderr();
     let mut readers = Vec::new();
+    let max_output_bytes = Some(prepared.policy.limits.max_output_bytes);
 
     if let Some(stdout) = stdout {
         readers.push(spawn_output_reader(
@@ -86,6 +92,7 @@ pub(crate) fn run_command_blocking(
             Some(output.clone()),
             None,
             None,
+            max_output_bytes,
             None,
         ));
     }
@@ -100,12 +107,19 @@ pub(crate) fn run_command_blocking(
             Some(output.clone()),
             None,
             None,
+            max_output_bytes,
             None,
         ));
     }
 
-    let status = child
-        .wait()
+    let timeout = prepared
+        .policy
+        .limits
+        .timeout_seconds
+        .map(Duration::from_secs);
+    let sandbox_exit = prepared
+        .child
+        .wait_with_timeout(timeout)
         .map_err(|error| format!("command: failed to wait for {command_label}: {error}"))?;
 
     for reader in readers {
@@ -113,14 +127,32 @@ pub(crate) fn run_command_blocking(
     }
 
     let finished_at = current_timestamp();
-    let mut success = status.success();
-    let exit_code = status.code();
+    let mut success = sandbox_exit.success;
+    let exit_code = sandbox_exit.code;
     let mut validation_message = None;
+    prepared.metadata.termination_reason = Some(sandbox_exit.termination_reason);
 
     if success {
-        if let Err(error) = validate_post_command(project_dir, allowed) {
+        if let Err(error) = validate_post_command(&prepared.workspace.workspace_root, allowed) {
             success = false;
             validation_message = Some(error);
+        }
+    }
+
+    if success {
+        match prepared.workspace.write_back_allowed_outputs(project_dir) {
+            Ok(written) if !written.is_empty() => {
+                if let Ok(mut output) = output.lock() {
+                    output.push_str("[sandbox] wrote back ");
+                    output.push_str(&written.join(", "));
+                    output.push('\n');
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                success = false;
+                validation_message = Some(error.to_string());
+            }
         }
     }
 
@@ -144,6 +176,8 @@ pub(crate) fn run_command_blocking(
         output.push('\n');
     }
 
+    prepared.workspace.cleanup_tmp();
+
     Ok(CommandResult {
         project_id,
         command: command_label,
@@ -152,6 +186,7 @@ pub(crate) fn run_command_blocking(
         output,
         started_at,
         finished_at,
+        sandbox: Some(prepared.metadata),
     })
 }
 

@@ -14,6 +14,19 @@ edition = "2021"
 name = "ai_web_builder_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "ai-web-builder"
+path = "src/main.rs"
+
+[[bin]]
+name = "ncb-sandbox-setup"
+path = "src/bin/ncb-sandbox-setup.rs"
+test = false
+
+[[bin]]
+name = "ncb-sandbox-runner"
+path = "src/bin/ncb-sandbox-runner.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -21,11 +34,33 @@ tauri-build = { version = "2", features = [] }
 chrono = "0.4"
 futures-util = "0.3"
 flate2 = "1"
+getrandom = "0.3"
 keyring = { version = "4", default-features = false, features = ["v1", "windows-native-keyring-store"] }
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls", "stream"] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "sqlite", "runtime-tokio-rustls"] }
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_NetworkManagement_NetManagement",
+  "Win32_NetworkManagement_WindowsFilteringPlatform",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Security_Authentication_Identity",
+  "Win32_System_Console",
+  "Win32_System_JobObjects",
+  "Win32_System_Registry",
+  "Win32_System_Rpc",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging"
+] }

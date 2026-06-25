@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "prepare:sidecars": "node scripts/prepare-tauri-sidecars.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

@@ -1173,16 +1173,28 @@ function hasFilePath(fileTree: FileTree, path: string): boolean {
 
 function formatCommandObservation(result: CommandResult) {
   const diagnostics = extractCommandDiagnostics(result.output);
+  const sandbox = result.sandbox
+    ? {
+        backend: result.sandbox.backend,
+        networkMode: result.sandbox.networkMode,
+        policyVersion: result.sandbox.policyVersion,
+        terminationReason: result.sandbox.terminationReason,
+      }
+    : undefined;
   const diagnosticsBlock =
     diagnostics.length > 0
       ? ["", "diagnostics:", JSON.stringify(diagnostics, null, 2)]
       : [];
+  const sandboxBlock = sandbox
+    ? ["sandbox:", JSON.stringify(sandbox, null, 2), ""]
+    : [];
 
   return truncateToolOutput(
     [
       `command: ${result.command}`,
       `success: ${String(result.success)}`,
       `exitCode: ${result.exitCode ?? "unknown"}`,
+      ...sandboxBlock,
       ...diagnosticsBlock,
       "",
       result.output.trim(),

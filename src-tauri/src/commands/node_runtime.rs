@@ -1,6 +1,7 @@
 use std::{
+    collections::BTreeMap,
     env, fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     process::Command,
     sync::{Mutex, OnceLock},
@@ -8,13 +9,14 @@ use std::{
 };
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
-const NODE_DIST_BASE_URL: &str = "https://nodejs.org/dist";
-const NODE_DIST_INDEX_URL: &str = "https://nodejs.org/dist/index.json";
 const NODE_DIR_ENV: &str = "NOCODE_BUILDER_NODE_DIR";
+const NODE_HOST_OVERRIDE_ENV: &str = "NOCODE_BUILDER_ALLOW_HOST_NODE";
 const RUNTIME_DIR_ENV: &str = "NOCODE_BUILDER_RUNTIME_DIR";
 const RUNTIME_DIR_NAME: &str = "nocodeBuilder";
 const NODE_RUNTIME_DIR_NAME: &str = "node";
+const NODE_RUNTIME_MANIFEST_JSON: &str = include_str!("../../runtime/node-runtime-manifest.json");
 
 static NODE_INSTALL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -23,25 +25,38 @@ pub struct ResolvedCommand {
     pub args: Vec<String>,
     pub executable: PathBuf,
     pub path_prepend: Vec<PathBuf>,
+    pub runtime_root: PathBuf,
+    pub runtime_bin: PathBuf,
+    #[allow(dead_code)]
+    pub runtime_version: String,
 }
 
 #[derive(Clone, Debug)]
 struct NodeRuntime {
     root: PathBuf,
+    version: String,
 }
 
 #[derive(Clone, Debug)]
 struct NodeArchiveTarget {
     archive_extension: &'static str,
-    file_id: &'static str,
     folder_suffix: &'static str,
+    archive_name: String,
+    url: String,
+    sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct NodeRelease {
-    files: Vec<String>,
-    lts: serde_json::Value,
-    version: String,
+#[serde(rename_all = "camelCase")]
+struct NodeRuntimeManifest {
+    node_version: String,
+    targets: BTreeMap<String, NodeRuntimeManifestTarget>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct NodeRuntimeManifestTarget {
+    url: String,
+    sha256: String,
 }
 
 pub fn resolve_package_manager_command(
@@ -50,11 +65,14 @@ pub fn resolve_package_manager_command(
 ) -> Result<ResolvedCommand, String> {
     let executable_name = command_executable_name(package_manager);
 
-    if command_available(&executable_name) {
+    if host_node_override_enabled() && command_available(&executable_name) {
         return Ok(ResolvedCommand {
             args: args.iter().map(|arg| (*arg).to_string()).collect(),
             executable: PathBuf::from(executable_name),
             path_prepend: Vec::new(),
+            runtime_root: PathBuf::new(),
+            runtime_bin: PathBuf::new(),
+            runtime_version: "host-override".to_string(),
         });
     }
 
@@ -65,15 +83,26 @@ pub fn resolve_package_manager_command(
 pub fn resolve_npx_command(args: Vec<String>) -> Result<ResolvedCommand, String> {
     let executable_name = command_executable_name("npx");
 
-    if command_available(&executable_name) {
+    if host_node_override_enabled() && command_available(&executable_name) {
         return Ok(ResolvedCommand {
             args,
             executable: PathBuf::from(executable_name),
             path_prepend: Vec::new(),
+            runtime_root: PathBuf::new(),
+            runtime_bin: PathBuf::new(),
+            runtime_version: "host-override".to_string(),
         });
     }
 
     ensure_managed_node_runtime()?.npx_command(args)
+}
+
+pub fn managed_node_version() -> Result<String, String> {
+    Ok(runtime_manifest()?.node_version)
+}
+
+pub(crate) fn managed_node_runtime_parent_dir() -> Result<PathBuf, String> {
+    node_runtime_parent_dir()
 }
 
 pub fn apply_runtime_environment(
@@ -120,8 +149,10 @@ fn configured_node_runtime() -> Result<Option<NodeRuntime>, String> {
         return Ok(None);
     };
 
+    let manifest = runtime_manifest()?;
     let runtime = NodeRuntime {
         root: PathBuf::from(node_dir),
+        version: manifest.node_version,
     };
     runtime.validate()?;
 
@@ -129,51 +160,43 @@ fn configured_node_runtime() -> Result<Option<NodeRuntime>, String> {
 }
 
 fn find_existing_node_runtime() -> Result<Option<NodeRuntime>, String> {
+    let manifest = runtime_manifest()?;
+    let target = current_node_archive_target(&manifest)?;
     let root = node_runtime_parent_dir()?;
+    let expected = root.join(format!(
+        "node-{}-{}",
+        manifest.node_version, target.folder_suffix
+    ));
 
-    if !root.is_dir() {
+    if !expected.is_dir() {
         return Ok(None);
     }
 
-    let mut candidates = fs::read_dir(&root)
-        .map_err(|error| {
-            format!(
-                "node-runtime: failed to inspect runtime directory '{}': {error}",
-                root.display()
-            )
-        })?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("node-v"))
-        })
-        .collect::<Vec<_>>();
+    let runtime = NodeRuntime {
+        root: expected,
+        version: manifest.node_version,
+    };
 
-    candidates.sort_by(|left, right| right.cmp(left));
-
-    for candidate in candidates {
-        let runtime = NodeRuntime { root: candidate };
-
-        if runtime.validate().is_ok() {
-            return Ok(Some(runtime));
-        }
+    if runtime.validate().is_ok() {
+        return Ok(Some(runtime));
     }
 
     Ok(None)
 }
 
 fn install_managed_node_runtime() -> Result<NodeRuntime, String> {
-    let target = current_node_archive_target()?;
-    let release = fetch_latest_lts_release(&target)?;
+    let manifest = runtime_manifest()?;
+    let target = current_node_archive_target(&manifest)?;
     let parent_dir = node_runtime_parent_dir()?;
-    let install_dir = parent_dir.join(format!("node-{}-{}", release.version, target.folder_suffix));
+    let install_dir = parent_dir.join(format!(
+        "node-{}-{}",
+        manifest.node_version, target.folder_suffix
+    ));
 
     if install_dir.is_dir() {
         let runtime = NodeRuntime {
             root: install_dir.clone(),
+            version: manifest.node_version.clone(),
         };
 
         if runtime.validate().is_ok() {
@@ -195,18 +218,15 @@ fn install_managed_node_runtime() -> Result<NodeRuntime, String> {
         )
     })?;
 
-    let archive_name = format!(
-        "node-{}-{}.{}",
-        release.version, target.folder_suffix, target.archive_extension
-    );
-    let archive_url = format!(
-        "{}/{}/{}",
-        NODE_DIST_BASE_URL, release.version, archive_name
-    );
+    let archive_name = target.archive_name.clone();
     let archive_path = parent_dir.join(&archive_name);
     let temporary_archive_path = parent_dir.join(format!("{archive_name}.download"));
+    let staging_dir = parent_dir.join(format!(".{}-{}-staging", archive_name, std::process::id()));
 
-    download_file(&archive_url, &temporary_archive_path)?;
+    let _ = fs::remove_file(&temporary_archive_path);
+    let _ = fs::remove_dir_all(&staging_dir);
+    download_file(&target.url, &temporary_archive_path)?;
+    verify_sha256(&temporary_archive_path, &target.sha256)?;
 
     if archive_path.exists() {
         fs::remove_file(&archive_path).map_err(|error| {
@@ -224,35 +244,48 @@ fn install_managed_node_runtime() -> Result<NodeRuntime, String> {
         )
     })?;
 
-    extract_archive(&archive_path, &parent_dir, target.archive_extension)?;
+    fs::create_dir_all(&staging_dir).map_err(|error| {
+        format!(
+            "node-runtime: failed to create staging directory '{}': {error}",
+            staging_dir.display()
+        )
+    })?;
 
-    let runtime = NodeRuntime { root: install_dir };
+    if let Err(error) = extract_archive(&archive_path, &staging_dir, target.archive_extension) {
+        let _ = fs::remove_dir_all(&staging_dir);
+        return Err(error);
+    }
+
+    let staged_runtime = staging_dir.join(format!(
+        "node-{}-{}",
+        manifest.node_version, target.folder_suffix
+    ));
+
+    if install_dir.exists() {
+        fs::remove_dir_all(&install_dir).map_err(|error| {
+            format!(
+                "node-runtime: failed to remove existing runtime '{}': {error}",
+                install_dir.display()
+            )
+        })?;
+    }
+
+    fs::rename(&staged_runtime, &install_dir).map_err(|error| {
+        let _ = fs::remove_dir_all(&staging_dir);
+        format!(
+            "node-runtime: failed to finalize runtime '{}': {error}",
+            install_dir.display()
+        )
+    })?;
+    let _ = fs::remove_dir_all(&staging_dir);
+
+    let runtime = NodeRuntime {
+        root: install_dir,
+        version: manifest.node_version,
+    };
     runtime.validate()?;
 
     Ok(runtime)
-}
-
-fn fetch_latest_lts_release(target: &NodeArchiveTarget) -> Result<NodeRelease, String> {
-    let client = http_client()?;
-    let releases = client
-        .get(NODE_DIST_INDEX_URL)
-        .send()
-        .and_then(|response| response.error_for_status())
-        .map_err(|error| format!("node-runtime: failed to fetch Node.js release index: {error}"))?
-        .json::<Vec<NodeRelease>>()
-        .map_err(|error| format!("node-runtime: failed to parse Node.js release index: {error}"))?;
-
-    releases
-        .into_iter()
-        .find(|release| {
-            is_lts_release(&release.lts) && release.files.iter().any(|file| file == target.file_id)
-        })
-        .ok_or_else(|| {
-            format!(
-                "node-runtime: no current Node.js LTS release provides {}",
-                target.file_id
-            )
-        })
 }
 
 fn download_file(url: &str, destination: &Path) -> Result<(), String> {
@@ -275,6 +308,44 @@ fn download_file(url: &str, destination: &Path) -> Result<(), String> {
         .map_err(|error| format!("node-runtime: failed to flush Node.js download: {error}"))?;
 
     Ok(())
+}
+
+fn verify_sha256(path: &Path, expected_hex: &str) -> Result<(), String> {
+    let mut file = fs::File::open(path).map_err(|error| {
+        format!(
+            "node-runtime: failed to open download for checksum '{}': {error}",
+            path.display()
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| {
+            format!(
+                "node-runtime: failed to read download for checksum '{}': {error}",
+                path.display()
+            )
+        })?;
+
+        if read == 0 {
+            break;
+        }
+
+        hasher.update(&buffer[..read]);
+    }
+
+    let actual = format!("{:x}", hasher.finalize());
+
+    if actual.eq_ignore_ascii_case(expected_hex) {
+        return Ok(());
+    }
+
+    let _ = fs::remove_file(path);
+    Err(format!(
+        "node-runtime: SHA-256 mismatch for '{}': expected {expected_hex}, got {actual}",
+        path.display()
+    ))
 }
 
 fn http_client() -> Result<reqwest::blocking::Client, String> {
@@ -315,6 +386,15 @@ fn extract_zip_archive(archive_path: &Path, destination: &Path) -> Result<(), St
         else {
             continue;
         };
+        if entry
+            .unix_mode()
+            .is_some_and(|mode| mode & 0o170000 == 0o120000)
+        {
+            return Err(format!(
+                "node-runtime: refusing symlink entry '{}'",
+                relative_path.display()
+            ));
+        }
         let output_path = destination.join(relative_path);
 
         if entry.is_dir() {
@@ -371,6 +451,13 @@ fn extract_tar_gz_archive(archive_path: &Path, destination: &Path) -> Result<(),
         let Some(relative_path) = safe_archive_path(entry_path.as_ref()) else {
             continue;
         };
+        let entry_type = entry.header().entry_type();
+        if !(entry_type.is_dir() || entry_type.is_file()) {
+            return Err(format!(
+                "node-runtime: refusing non-file archive entry '{}'",
+                relative_path.display()
+            ));
+        }
         let output_path = destination.join(relative_path);
 
         if let Some(parent) = output_path.parent() {
@@ -411,34 +498,24 @@ fn safe_archive_path(path: &Path) -> Option<PathBuf> {
     }
 }
 
-fn is_lts_release(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Bool(value) => *value,
-        serde_json::Value::String(value) => !value.trim().is_empty(),
-        _ => false,
-    }
+fn runtime_manifest() -> Result<NodeRuntimeManifest, String> {
+    serde_json::from_str(NODE_RUNTIME_MANIFEST_JSON)
+        .map_err(|error| format!("node-runtime: failed to parse runtime manifest: {error}"))
 }
 
-fn current_node_archive_target() -> Result<NodeArchiveTarget, String> {
+fn host_node_override_enabled() -> bool {
+    matches!(env::var(NODE_HOST_OVERRIDE_ENV), Ok(value) if value == "1")
+}
+
+fn current_node_archive_target(
+    manifest: &NodeRuntimeManifest,
+) -> Result<NodeArchiveTarget, String> {
     let arch = env::consts::ARCH;
 
     if cfg!(target_os = "windows") {
         return match arch {
-            "aarch64" => Ok(NodeArchiveTarget {
-                archive_extension: "zip",
-                file_id: "win-arm64-zip",
-                folder_suffix: "win-arm64",
-            }),
-            "x86" => Ok(NodeArchiveTarget {
-                archive_extension: "zip",
-                file_id: "win-x86-zip",
-                folder_suffix: "win-x86",
-            }),
-            "x86_64" => Ok(NodeArchiveTarget {
-                archive_extension: "zip",
-                file_id: "win-x64-zip",
-                folder_suffix: "win-x64",
-            }),
+            "aarch64" => archive_target(manifest, "win-arm64", "zip"),
+            "x86_64" => archive_target(manifest, "win-x64", "zip"),
             _ => Err(format!(
                 "node-runtime: unsupported Windows architecture '{arch}'"
             )),
@@ -447,49 +524,44 @@ fn current_node_archive_target() -> Result<NodeArchiveTarget, String> {
 
     if cfg!(target_os = "macos") {
         return match arch {
-            "aarch64" => Ok(NodeArchiveTarget {
-                archive_extension: "tar.gz",
-                file_id: "osx-arm64-tar",
-                folder_suffix: "osx-arm64",
-            }),
-            "x86_64" => Ok(NodeArchiveTarget {
-                archive_extension: "tar.gz",
-                file_id: "osx-x64-tar",
-                folder_suffix: "osx-x64",
-            }),
+            "aarch64" => archive_target(manifest, "darwin-arm64", "tar.gz"),
+            "x86_64" => archive_target(manifest, "darwin-x64", "tar.gz"),
             _ => Err(format!(
                 "node-runtime: unsupported macOS architecture '{arch}'"
             )),
         };
     }
 
-    if cfg!(target_os = "linux") {
-        return match arch {
-            "aarch64" => Ok(NodeArchiveTarget {
-                archive_extension: "tar.gz",
-                file_id: "linux-arm64",
-                folder_suffix: "linux-arm64",
-            }),
-            "arm" => Ok(NodeArchiveTarget {
-                archive_extension: "tar.gz",
-                file_id: "linux-armv7l",
-                folder_suffix: "linux-armv7l",
-            }),
-            "x86_64" => Ok(NodeArchiveTarget {
-                archive_extension: "tar.gz",
-                file_id: "linux-x64",
-                folder_suffix: "linux-x64",
-            }),
-            _ => Err(format!(
-                "node-runtime: unsupported Linux architecture '{arch}'"
-            )),
-        };
-    }
-
     Err(format!(
-        "node-runtime: automatic Node.js installation is not supported on {}",
+        "node-runtime: managed Node.js is only provided for Windows and macOS, not {}",
         env::consts::OS
     ))
+}
+
+fn archive_target(
+    manifest: &NodeRuntimeManifest,
+    key: &'static str,
+    archive_extension: &'static str,
+) -> Result<NodeArchiveTarget, String> {
+    let target = manifest
+        .targets
+        .get(key)
+        .ok_or_else(|| format!("node-runtime: runtime manifest is missing target '{key}'"))?;
+    let archive_name = target
+        .url
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| format!("node-runtime: target '{key}' has an invalid URL"))?
+        .to_string();
+
+    Ok(NodeArchiveTarget {
+        archive_extension,
+        folder_suffix: key,
+        archive_name,
+        url: target.url.clone(),
+        sha256: target.sha256.clone(),
+    })
 }
 
 fn node_runtime_parent_dir() -> Result<PathBuf, String> {
@@ -572,6 +644,9 @@ impl NodeRuntime {
                 args: args.iter().map(|arg| (*arg).to_string()).collect(),
                 executable: self.executable("npm"),
                 path_prepend: vec![self.bin_dir()],
+                runtime_root: self.root.clone(),
+                runtime_bin: self.bin_dir(),
+                runtime_version: self.version.clone(),
             }),
             "pnpm" => {
                 let corepack = self.executable("corepack");
@@ -591,6 +666,9 @@ impl NodeRuntime {
                     args: command_args,
                     executable: corepack,
                     path_prepend: vec![self.bin_dir()],
+                    runtime_root: self.root.clone(),
+                    runtime_bin: self.bin_dir(),
+                    runtime_version: self.version.clone(),
                 })
             }
             _ => Err(format!(
@@ -604,6 +682,9 @@ impl NodeRuntime {
             args,
             executable: self.executable("npx"),
             path_prepend: vec![self.bin_dir()],
+            runtime_root: self.root.clone(),
+            runtime_bin: self.bin_dir(),
+            runtime_version: self.version.clone(),
         })
     }
 
@@ -657,10 +738,12 @@ mod tests {
     }
 
     #[test]
-    fn identifies_lts_release_shapes() {
-        assert!(is_lts_release(&serde_json::json!("Hydrogen")));
-        assert!(is_lts_release(&serde_json::json!(true)));
-        assert!(!is_lts_release(&serde_json::json!(false)));
-        assert!(!is_lts_release(&serde_json::json!("")));
+    fn manifest_pins_node_version_and_targets() {
+        let manifest = runtime_manifest().expect("manifest");
+        assert_eq!(manifest.node_version, "v24.18.0");
+        assert!(manifest.targets.contains_key("win-x64"));
+        assert!(manifest.targets.contains_key("win-arm64"));
+        assert!(manifest.targets.contains_key("darwin-x64"));
+        assert!(manifest.targets.contains_key("darwin-arm64"));
     }
 }

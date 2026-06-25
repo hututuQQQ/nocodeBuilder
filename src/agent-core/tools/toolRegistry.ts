@@ -239,7 +239,7 @@ const TOOL_METADATA: Array<
     false,
     "external_write",
     false,
-    "never",
+    "conditional",
   ),
   legacyTool("stop_dev_server", "Stop the local preview server.", false, false, "external_write", false, "never"),
   legacyTool(

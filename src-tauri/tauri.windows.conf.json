@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "externalBin": [
+      "binaries/ncb-sandbox-setup",
+      "binaries/ncb-sandbox-runner"
+    ]
+  }
+}

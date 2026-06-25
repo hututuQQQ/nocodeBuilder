@@ -1,41 +1,55 @@
 use std::{
     collections::HashMap,
-    process::Child,
-    sync::{mpsc, Arc, Mutex},
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
     thread,
     time::Duration,
 };
 
 use tauri::AppHandle;
 
-use crate::projects::resolve_project_dir;
+use crate::{
+    projects::resolve_project_dir,
+    sandbox::{SandboxChild, SandboxManager, SandboxWorkspace, SandboxedProcess},
+};
 
 use super::{
     command_whitelist::preferred_dev_command,
-    events::{emit_status, spawn_output_reader},
-    process::{kill_process_tree, spawn_child},
+    events::{emit_output_line, emit_status, spawn_output_reader},
     time::current_timestamp,
     types::DevServerInfo,
 };
 
 const DEV_SERVER_START_TIMEOUT: Duration = Duration::from_secs(45);
+const SOURCE_SYNC_INTERVAL: Duration = Duration::from_millis(750);
 
 #[derive(Default, Clone)]
 pub struct DevServerRegistry {
     servers: Arc<Mutex<HashMap<String, DevServerProcess>>>,
 }
 
-#[derive(Debug)]
 struct DevServerProcess {
     command: String,
     pid: u32,
+    process: Arc<Mutex<SandboxChild>>,
+    workspace: SandboxWorkspace,
+    source_sync: SourceSyncHandle,
     started_at: String,
     url: Arc<Mutex<Option<String>>>,
+}
+
+struct SourceSyncHandle {
+    shutdown: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
 }
 
 pub fn start_dev_server(
     app: AppHandle,
     registry: DevServerRegistry,
+    sandbox_manager: SandboxManager,
     project_id: String,
 ) -> Result<DevServerInfo, String> {
     let project_dir = resolve_project_dir(&project_id)?;
@@ -67,16 +81,30 @@ pub fn start_dev_server(
             return Err("command: dev server is already starting".to_string());
         }
 
-        let mut child = spawn_child(&project_dir, allowed)?;
-        let pid = child.id();
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
+        let mut prepared = sandbox_manager
+            .spawn_command(&project_id, &project_dir, allowed)
+            .map_err(|error| error.to_string())?;
+        let pid = prepared.child.native_pid().unwrap_or_default();
+        let stdout = prepared.child.take_stdout();
+        let stderr = prepared.child.take_stderr();
+        let workspace = prepared.workspace.clone();
+        let source_sync = spawn_source_sync(
+            app.clone(),
+            project_id.clone(),
+            command_label.clone(),
+            project_dir.clone(),
+            workspace.clone(),
+        );
+        let child = Arc::new(Mutex::new(prepared.child));
 
         servers.insert(
             project_id.clone(),
             DevServerProcess {
                 command: command_label.clone(),
                 pid,
+                process: child.clone(),
+                workspace,
+                source_sync,
                 started_at: started_at.clone(),
                 url: url_state.clone(),
             },
@@ -106,6 +134,7 @@ pub fn start_dev_server(
             Some(url_sender.clone()),
             Some(url_state.clone()),
             None,
+            None,
         );
     }
 
@@ -119,6 +148,7 @@ pub fn start_dev_server(
             None,
             Some(url_sender),
             Some(url_state.clone()),
+            None,
             None,
         );
     }
@@ -178,7 +208,14 @@ pub fn stop_dev_server(
     };
 
     if let Some(server) = server {
-        kill_process_tree(server.pid)?;
+        let terminate_result = server
+            .process
+            .lock()
+            .map_err(|_| "command: failed to lock dev server process".to_string())
+            .and_then(|mut process| process.terminate_tree().map_err(|error| error.to_string()));
+        server.source_sync.stop();
+        server.workspace.cleanup_tmp();
+        terminate_result?;
         emit_status(
             &app,
             &project_id,
@@ -200,7 +237,16 @@ pub fn stop_all_dev_servers(app: AppHandle, registry: &DevServerRegistry) -> Res
     };
 
     for (project_id, server) in servers {
-        match kill_process_tree(server.pid) {
+        let result = server
+            .process
+            .lock()
+            .map_err(|_| "command: failed to lock dev server process".to_string())
+            .and_then(|mut process| process.terminate_tree().map_err(|error| error.to_string()));
+
+        server.source_sync.stop();
+        server.workspace.cleanup_tmp();
+
+        match result {
             Ok(()) => emit_status(
                 &app,
                 &project_id,
@@ -231,11 +277,22 @@ fn spawn_dev_server_watcher(
     project_id: String,
     command: String,
     pid: u32,
-    mut child: Child,
+    child: Arc<Mutex<SandboxChild>>,
 ) {
     thread::spawn(move || {
-        let exit_status = child.wait();
-        let should_emit = servers
+        let exit_status = loop {
+            let poll = child
+                .lock()
+                .map_err(|_| "failed to lock dev server process".to_string())
+                .and_then(|mut child| child.try_wait().map_err(|error| error.to_string()));
+
+            match poll {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) => thread::sleep(Duration::from_millis(500)),
+                Err(error) => break Err(error),
+            }
+        };
+        let removed_server = servers
             .lock()
             .map(|mut servers| {
                 let is_current = servers
@@ -243,28 +300,26 @@ fn spawn_dev_server_watcher(
                     .is_some_and(|server| server.pid == pid);
 
                 if is_current {
-                    servers.remove(&project_id);
+                    return servers.remove(&project_id);
                 }
 
-                is_current
+                None
             })
-            .unwrap_or(false);
+            .unwrap_or(None);
 
-        if !should_emit {
+        let Some(server) = removed_server else {
             return;
-        }
+        };
+        server.source_sync.stop();
+        server.workspace.cleanup_tmp();
 
         match exit_status {
             Ok(status) => emit_status(
                 &app,
                 &project_id,
                 &command,
-                if status.success() {
-                    "stopped"
-                } else {
-                    "failed"
-                },
-                status.code(),
+                if status.success { "stopped" } else { "failed" },
+                status.code,
                 None,
                 None,
             ),
@@ -279,6 +334,78 @@ fn spawn_dev_server_watcher(
             ),
         }
     });
+}
+
+fn spawn_source_sync(
+    app: AppHandle,
+    project_id: String,
+    command: String,
+    project_dir: PathBuf,
+    workspace: SandboxWorkspace,
+) -> SourceSyncHandle {
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let thread_shutdown = shutdown.clone();
+    let handle = thread::spawn(move || {
+        let mut last_error: Option<String> = None;
+
+        while !thread_shutdown.load(Ordering::Relaxed) {
+            if let Err(error) = workspace.sync_source_changes_from(&project_dir) {
+                let error = error.to_string();
+
+                if last_error.as_deref() != Some(error.as_str()) {
+                    emit_output_line(
+                        &app,
+                        &project_id,
+                        &command,
+                        "stderr",
+                        format!(
+                            "sandbox: failed to sync source changes into dev workspace: {error}"
+                        ),
+                    );
+                    last_error = Some(error);
+                }
+            } else {
+                last_error = None;
+            }
+
+            sleep_until_next_sync(&thread_shutdown);
+        }
+    });
+
+    SourceSyncHandle {
+        shutdown,
+        handle: Some(handle),
+    }
+}
+
+fn sleep_until_next_sync(shutdown: &AtomicBool) {
+    let mut slept = Duration::ZERO;
+
+    while slept < SOURCE_SYNC_INTERVAL && !shutdown.load(Ordering::Relaxed) {
+        let step = Duration::from_millis(100).min(SOURCE_SYNC_INTERVAL - slept);
+        thread::sleep(step);
+        slept += step;
+    }
+}
+
+impl SourceSyncHandle {
+    fn stop(mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for SourceSyncHandle {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 fn lock_servers<'a>(

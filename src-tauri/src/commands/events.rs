@@ -23,6 +23,7 @@ pub fn spawn_output_reader<R>(
     output: Option<Arc<Mutex<String>>>,
     url_sender: Option<mpsc::Sender<String>>,
     url_state: Option<Arc<Mutex<Option<String>>>>,
+    max_output_bytes: Option<usize>,
     redactions: Option<Arc<Vec<String>>>,
 ) -> thread::JoinHandle<()>
 where
@@ -45,11 +46,11 @@ where
 
                     if let Some(output) = &output {
                         if let Ok(mut output) = output.lock() {
-                            output.push('[');
-                            output.push_str(stream);
-                            output.push_str("] ");
-                            output.push_str(&clean_line);
-                            output.push('\n');
+                            append_limited_output(
+                                &mut output,
+                                &format!("[{stream}] {clean_line}\n"),
+                                max_output_bytes,
+                            );
                         }
                     }
 
@@ -116,6 +117,25 @@ pub fn emit_status(
     );
 }
 
+pub fn emit_output_line(
+    app: &AppHandle,
+    project_id: &str,
+    command: &str,
+    stream: &str,
+    line: String,
+) {
+    let _ = app.emit(
+        COMMAND_OUTPUT_EVENT,
+        CommandOutputEvent {
+            project_id: project_id.to_string(),
+            command: command.to_string(),
+            stream: stream.to_string(),
+            line,
+            timestamp: current_timestamp(),
+        },
+    );
+}
+
 pub fn strip_ansi_codes(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -147,6 +167,39 @@ pub fn redact_secrets<S: AsRef<str>>(input: &str, secrets: &[S]) -> String {
         })
 }
 
+pub fn append_limited_output(output: &mut String, text: &str, max_bytes: Option<usize>) {
+    let Some(max_bytes) = max_bytes else {
+        output.push_str(text);
+        return;
+    };
+
+    if output.len() >= max_bytes {
+        return;
+    }
+
+    let remaining = max_bytes - output.len();
+
+    if text.len() <= remaining {
+        output.push_str(text);
+        return;
+    }
+
+    let marker = "\n[command output truncated]\n";
+    let available = remaining.saturating_sub(marker.len());
+    let split = text
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= available)
+        .last()
+        .unwrap_or(0);
+
+    output.push_str(&text[..split]);
+
+    if output.len() + marker.len() <= max_bytes {
+        output.push_str(marker);
+    }
+}
+
 fn detect_local_url(line: &str) -> Option<String> {
     ["http://localhost:", "http://127.0.0.1:", "http://[::1]:"]
         .iter()
@@ -171,4 +224,18 @@ fn detect_local_url(line: &str) -> Option<String> {
             }
         })
         .next()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_limited_output;
+
+    #[test]
+    fn caps_captured_output() {
+        let mut output = String::new();
+        append_limited_output(&mut output, "abcdef", Some(10));
+        append_limited_output(&mut output, "ghijklmnopqrstuvwxyz", Some(10));
+
+        assert!(output.len() <= 10);
+    }
 }

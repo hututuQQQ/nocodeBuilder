@@ -10,6 +10,7 @@ mod app_storage;
 mod commands;
 mod credentials;
 mod projects;
+mod sandbox;
 mod spec_storage;
 
 #[cfg(test)]
@@ -275,6 +276,7 @@ fn process_sse_event(
 pub fn run() {
     tauri::Builder::default()
         .manage(commands::DevServerRegistry::default())
+        .manage(sandbox::SandboxManager::default())
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { .. } = event {
                 let app = window.app_handle().clone();
@@ -325,6 +327,10 @@ pub fn run() {
             commands::run_command,
             commands::start_dev_server,
             commands::stop_dev_server,
+            sandbox::get_sandbox_status,
+            sandbox::initialize_windows_sandbox,
+            sandbox::repair_sandbox,
+            sandbox::reset_project_sandbox,
             commands::open_preview_in_browser,
             commands::probe_preview_url,
             commands::supabase_proxy_request,
