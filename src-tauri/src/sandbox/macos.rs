@@ -13,6 +13,15 @@ use super::{
 use crate::sandbox::policy::SANDBOX_POLICY_VERSION;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+const SYSTEM_READ_ROOTS: &[&str] = &[
+    "/System/Library",
+    "/System/Volumes/Preboot/Cryptexes/OS",
+    "/System/Cryptexes/OS",
+    "/usr/lib",
+    "/usr/share",
+    "/bin",
+    "/usr/bin",
+];
 
 #[derive(Clone, Debug, Default)]
 pub struct MacosSeatbeltBackend;
@@ -118,15 +127,17 @@ fn build_profile(request: &SandboxRequest) -> String {
         "(allow sysctl-read)".to_string(),
         "(allow file-read-metadata)".to_string(),
         read_rule(Path::new("/dev/null"), true),
-        read_rule(Path::new("/System/Library"), false),
-        read_rule(Path::new("/usr/lib"), false),
-        read_rule(Path::new("/usr/share"), false),
-        read_rule(Path::new("/bin"), false),
-        read_rule(Path::new("/usr/bin"), false),
     ];
+
+    for root in SYSTEM_READ_ROOTS {
+        let root = Path::new(root);
+        lines.push(read_rule(root, false));
+        lines.push(executable_map_rule(root));
+    }
 
     for root in &request.readable_roots {
         lines.push(read_rule(root, false));
+        lines.push(executable_map_rule(root));
     }
 
     for root in &request.writable_roots {
@@ -182,6 +193,13 @@ fn read_rule(path: &Path, literal: bool) -> String {
 
 fn write_rule(path: &Path) -> String {
     format!("(allow file-write* (subpath \"{}\"))", sbpl_path(path))
+}
+
+fn executable_map_rule(path: &Path) -> String {
+    format!(
+        "(allow file-map-executable (subpath \"{}\"))",
+        sbpl_path(path)
+    )
 }
 
 fn sbpl_path(path: &Path) -> String {
@@ -244,6 +262,7 @@ mod tests {
 
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("/managed/node"));
+        assert!(profile.contains("(allow file-map-executable (subpath \"/managed/node\"))"));
         assert!(profile.contains("/real/project"));
     }
 
