@@ -3,7 +3,7 @@ import type { DevelopmentSpec, SpecRevision, SpecTask } from "./types";
 import { compileSpecTaskContract } from "./taskCompiler";
 
 describe("compileSpecTaskContract", () => {
-  it("adds Spec source metadata and task scoped criteria", () => {
+  it("adds Spec source metadata while keeping generic verifier criteria", () => {
     const revision = createRevision();
     const spec = createSpec(revision);
     const task = revision.tasks[0];
@@ -11,8 +11,9 @@ describe("compileSpecTaskContract", () => {
 
     expect(contract.objective).toBe(task.objective);
     expect(contract.scope.allowedPaths).toEqual(task.allowedPaths);
-    expect(contract.acceptanceCriteria).toEqual([
-      revision.requirements.acceptanceCriteria[0],
+    expect(contract.acceptanceCriteria.map((criterion) => criterion.id)).toEqual([
+      "request-addressed",
+      "verifier-passed",
     ]);
     expect(contract.source).toEqual({
       acceptanceCriteriaIds: task.acceptanceCriteriaIds,
@@ -23,6 +24,16 @@ describe("compileSpecTaskContract", () => {
       taskId: task.id,
     });
     expect(contract.scope.forbiddenPaths).toContain(".aibuilder/**");
+  });
+
+  it("rejects unknown task scoped criteria before execution", () => {
+    const task = createTask({ acceptanceCriteriaIds: ["missing-criterion"] });
+    const revision = createRevision({ tasks: [task] });
+    const spec = createSpec(revision);
+
+    expect(() =>
+      compileSpecTaskContract({ revision, spec, task }),
+    ).toThrow("Spec task references unknown criterion missing-criterion.");
   });
 
   it("forces full_site only for the Initial Build generate task", () => {

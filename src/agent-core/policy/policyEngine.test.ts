@@ -93,10 +93,17 @@ describe("PolicyEngine", () => {
     expect(decision.approvalRequired).toBe(true);
   });
 
-  it("requires approval before writing package.json when dependency changes ask", () => {
+  it("does not require approval before writing package.json even when dependency changes ask", () => {
     const machine = new RunStateMachine();
+    const contract = compileTaskContract({ objective: "Add animation dependency" });
     const run = machine.createRun({
-      contract: compileTaskContract({ objective: "Add animation dependency" }),
+      contract: {
+        ...contract,
+        permissions: {
+          ...contract.permissions,
+          dependencyChange: "ask",
+        },
+      },
       conversationId: "conversation-1",
       projectId: "project-1",
     });
@@ -120,10 +127,32 @@ describe("PolicyEngine", () => {
 
     expect(decision.allowed).toBe(true);
     if (!decision.allowed) {
-      throw new Error("Expected package.json write to be allowed with approval.");
+      throw new Error("Expected package.json write to be allowed.");
     }
 
-    expect(decision.approvalRequired).toBe(true);
+    expect(decision.approvalRequired).toBe(false);
+  });
+
+  it("does not require approval before running package installation", () => {
+    const machine = new RunStateMachine();
+    const run = machine.createRun({
+      contract: compileTaskContract({ objective: "Initialize dependencies" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+    });
+    const tool = getCoreToolDefinition("run_command");
+    const decision = new PolicyEngine().evaluate({
+      args: { command: "npm install" },
+      run,
+      tool: tool!,
+    });
+
+    expect(decision.allowed).toBe(true);
+    if (!decision.allowed) {
+      throw new Error("Expected npm install to be allowed.");
+    }
+
+    expect(decision.approvalRequired).toBe(false);
   });
 
   it("allows workspace writes inside allowed paths", () => {
@@ -140,7 +169,7 @@ describe("PolicyEngine", () => {
     expect(decision.allowed).toBe(true);
   });
 
-  it("hard denies workspace writes outside allowed paths", () => {
+  it("allows workspace writes outside allowed paths as soft scope guidance", () => {
     const run = createScopedRun(["app/**"]);
     const tool = getCoreToolDefinition("write_files");
     const decision = new PolicyEngine().evaluate({
@@ -151,10 +180,12 @@ describe("PolicyEngine", () => {
       tool: tool!,
     });
 
-    expect(decision).toEqual({
-      allowed: false,
-      reason: "Tool target is outside the task's allowed paths.",
-    });
+    expect(decision.allowed).toBe(true);
+    if (!decision.allowed) {
+      throw new Error("Expected soft-scope workspace write to be allowed.");
+    }
+
+    expect(decision.approvalRequired).toBe(false);
   });
 
   it("allows exact allowed edit paths", () => {
@@ -173,7 +204,7 @@ describe("PolicyEngine", () => {
     expect(decision.allowed).toBe(true);
   });
 
-  it("hard denies deletes outside allowed paths before approval", () => {
+  it("requires approval for deletes outside allowed paths", () => {
     const run = createScopedRun(["app/**"]);
     const tool = getCoreToolDefinition("delete_files");
     const decision = new PolicyEngine().evaluate({
@@ -182,10 +213,12 @@ describe("PolicyEngine", () => {
       tool: tool!,
     });
 
-    expect(decision).toEqual({
-      allowed: false,
-      reason: "Tool target is outside the task's allowed paths.",
-    });
+    expect(decision.allowed).toBe(true);
+    if (!decision.allowed) {
+      throw new Error("Expected delete_files to be allowed with approval.");
+    }
+
+    expect(decision.approvalRequired).toBe(true);
   });
 
   it("keeps forbidden paths higher priority than allowed paths", () => {
@@ -203,7 +236,7 @@ describe("PolicyEngine", () => {
     });
   });
 
-  it("normalizes paths before enforcing allowed scope", () => {
+  it("normalizes paths before applying forbidden path checks", () => {
     const run = createScopedRun(["app/**"]);
     const tool = getCoreToolDefinition("write_files");
     const allowedDecision = new PolicyEngine().evaluate({

@@ -224,7 +224,7 @@ export function SpecPanel({
         ) : !currentSpec || !revision ? (
           <EmptySpec />
         ) : (
-          <div className="mx-auto max-w-5xl space-y-4">
+          <div className="mx-auto w-full max-w-5xl min-w-0 space-y-4">
             <SpecSummary
               busy={busy}
               onRetryTask={(taskId) => void retrySpecTask(taskId)}
@@ -474,6 +474,15 @@ function SpecTaskList({
                       {task.runId.slice(0, 16)}
                     </span>
                   ) : null}
+                  {formatSpecTaskAutoRetryLabel(task) ? (
+                    <span
+                      className="inline-flex items-center gap-1 rounded border border-blue-400/30 bg-blue-400/10 px-2 py-0.5 text-[11px] text-blue-100"
+                      title="Automatic retry is in progress"
+                    >
+                      <RefreshCcw size={11} aria-hidden="true" />
+                      {formatSpecTaskAutoRetryLabel(task)}
+                    </span>
+                  ) : null}
                 </div>
                 <p className="mt-1 text-xs leading-5 text-zinc-400">
                   {task.objective}
@@ -590,10 +599,10 @@ function SpecChat({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   specStatus: DevelopmentSpec["status"];
 }) {
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ block: "end" });
+    scrollSpecChatContainerToBottom(messagesContainerRef.current);
   }, [messages]);
 
   return (
@@ -602,7 +611,10 @@ function SpecChat({
         icon={<MessageSquareText size={15} aria-hidden="true" />}
         title="Chat"
       />
-      <div className="mt-3 max-h-72 space-y-3 overflow-y-auto rounded-md border border-zinc-800 bg-zinc-900/40 p-3">
+      <div
+        className="mt-3 max-h-72 space-y-3 overflow-y-auto rounded-md border border-zinc-800 bg-zinc-900/40 p-3"
+        ref={messagesContainerRef}
+      >
         {messages.length === 0 ? (
           <p className="py-6 text-center text-xs text-zinc-600">
             No messages yet.
@@ -612,7 +624,6 @@ function SpecChat({
             <SpecChatMessage key={message.id} message={message} />
           ))
         )}
-        <div ref={messagesEndRef} />
       </div>
       <form className="mt-3 flex gap-3" onSubmit={onSubmit}>
         <textarea
@@ -638,6 +649,16 @@ function SpecChat({
       </form>
     </section>
   );
+}
+
+function scrollSpecChatContainerToBottom(container: HTMLDivElement | null) {
+  if (!container) {
+    return;
+  }
+
+  window.requestAnimationFrame(() => {
+    container.scrollTop = container.scrollHeight;
+  });
 }
 
 function SpecChatMessage({ message }: { message: ChatMessage }) {
@@ -762,10 +783,10 @@ function BuildView({
   const acceptanceResults = computePersistedAcceptanceResults(spec);
 
   return (
-    <section className="rounded-md border border-zinc-800 bg-zinc-950/70 p-4">
+    <section className="min-w-0 overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/70 p-4">
       <SectionHeader icon={<RefreshCcw size={15} aria-hidden="true" />} title="Build and verify" />
-      <div className="mt-3 grid gap-3 lg:grid-cols-[220px_1fr]">
-        <div className="rounded-md border border-zinc-800 bg-zinc-900/40 p-3">
+      <div className="mt-3 grid min-w-0 gap-3 lg:grid-cols-[220px_minmax(0,1fr)]">
+        <div className="min-w-0 rounded-md border border-zinc-800 bg-zinc-900/40 p-3">
           <div className="text-2xl font-semibold text-zinc-100">
             {passedTasks}/{tasks.length}
           </div>
@@ -803,37 +824,37 @@ function BuildView({
             </button>
           ) : null}
         </div>
-        <div className="space-y-3">
-          <div className="rounded-md border border-zinc-800 bg-zinc-900/40 p-3">
+        <div className="min-w-0 space-y-3">
+          <div className="min-w-0 overflow-hidden rounded-md border border-zinc-800 bg-zinc-900/40 p-3">
             <h3 className="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">
               Acceptance criteria
             </h3>
             <div className="mt-3 space-y-2">
               {acceptanceResults.map((result) => (
                 <div
-                  className="rounded border border-zinc-800 bg-zinc-950/60 px-3 py-2"
+                  className="min-w-0 overflow-hidden rounded border border-zinc-800 bg-zinc-950/60 px-3 py-2"
                   key={result.criterionId}
                 >
-                  <div className="flex items-start justify-between gap-3">
+                  <div className="flex min-w-0 items-start justify-between gap-3">
                     <p className="flex min-w-0 items-start gap-2 text-xs leading-5 text-zinc-300">
                       <span className="shrink-0" aria-hidden="true">
                         {getAcceptanceStatusSymbol(result.status)}
                       </span>
-                      <span className="min-w-0">
+                      <span className="min-w-0 break-words">
                         {criteriaById.get(result.criterionId)?.description ??
                           result.criterionId}
                       </span>
                     </p>
                     <StatusPill status={result.status} />
                   </div>
-                  <p className="mt-1 text-[11px] leading-4 text-zinc-500">
+                  <p className="mt-1 break-all text-[11px] leading-4 text-zinc-500">
                     {formatAcceptanceEvidenceLabels(result).tasks}
                   </p>
-                  <p className="mt-1 text-[11px] leading-4 text-zinc-500">
+                  <p className="mt-1 break-all text-[11px] leading-4 text-zinc-500">
                     {formatAcceptanceEvidenceLabels(result).runs}
                   </p>
                   {result.summary ? (
-                    <p className="mt-2 whitespace-pre-wrap rounded border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-[11px] leading-4 text-zinc-400">
+                    <p className="mt-2 whitespace-pre-wrap break-words rounded border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-[11px] leading-4 text-zinc-400">
                       {result.summary}
                     </p>
                   ) : null}
@@ -869,6 +890,13 @@ export function formatAcceptanceEvidenceLabels(
     runs: `Runs: ${result.runIds.join(", ") || "none"}`,
     tasks: `Tasks: ${result.taskIds.join(", ") || "none"}`,
   };
+}
+
+export function formatSpecTaskAutoRetryLabel(
+  task: Pick<SpecTask, "autoRetryCount">,
+) {
+  const count = task.autoRetryCount ?? 0;
+  return count > 0 ? `Auto retry ${count}` : null;
 }
 
 export function canShowSpecTaskRetry(

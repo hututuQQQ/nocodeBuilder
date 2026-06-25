@@ -964,7 +964,7 @@ describe("spec store actions", () => {
     });
   });
 
-  it("keeps the preallocated task runId when Spec runtime returns no run", async () => {
+  it("auto-retries when Spec runtime returns no passed verification report", async () => {
     const revision = createExecutableRevision({
       tasks: [
         createExecutableTask("task-1"),
@@ -1001,13 +1001,27 @@ describe("spec store actions", () => {
     await actions.approveAndExecuteCurrentSpec();
 
     const currentTasks = store.get().currentSpec?.revisions[0].tasks ?? [];
-    const persistedRunId = fake.runSpecTaskRuntime.mock.calls[0][0].runId;
+    const firstRunId = fake.runSpecTaskRuntime.mock.calls[0][0].runId;
+    const finalRunId = fake.runSpecTaskRuntime.mock.calls[2][0].runId;
+    expect(fake.runSpecTaskRuntime).toHaveBeenCalledTimes(3);
     expect(store.get().currentSpec?.status).toBe("blocked");
+    expect(store.get().terminalLogs).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "[spec] Auto-retrying task task-1 (1/2) after: AgentRun ended without a passed verification report.",
+        ),
+        expect.stringContaining(
+          "[spec] Auto-retrying task task-1 (2/2) after: AgentRun ended without a passed verification report.",
+        ),
+      ]),
+    );
     expect(currentTasks[0]).toMatchObject({
+      autoRetryCount: 2,
       error: "AgentRun ended without a passed verification report.",
-      runId: persistedRunId,
+      runId: finalRunId,
       status: "failed",
     });
+    expect(finalRunId).not.toBe(firstRunId);
     expect(currentTasks[1]).toMatchObject({
       blockedByTaskId: "task-1",
       status: "blocked",
@@ -1367,6 +1381,7 @@ describe("spec store actions", () => {
     const revision = createExecutableRevision({
       tasks: [
         createExecutableTask("task-1", {
+          autoRetryCount: 2,
           runId: "run-budget",
           status: "running",
         }),
@@ -1410,6 +1425,7 @@ describe("spec store actions", () => {
     const revision = createExecutableRevision({
       tasks: [
         createExecutableTask("task-1", {
+          autoRetryCount: 2,
           runId: "run-1",
           status: "passed",
         }),
@@ -1445,6 +1461,7 @@ describe("spec store actions", () => {
     const revision = createExecutableRevision({
       tasks: [
         createExecutableTask("task-1", {
+          autoRetryCount: 2,
           runId: "run-1",
           status: "passed",
         }),
@@ -1490,6 +1507,62 @@ describe("spec store actions", () => {
     expect(store.get().runProjectCommand).not.toHaveBeenCalled();
   });
 
+  it("auto-retries a task when final acceptance evidence uses a failed report", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-1",
+          status: "passed",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "verifying",
+    });
+    fake.agentRuns.set("run-1", createRun("run-1", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "completed",
+      status: "completed",
+    }));
+    fake.verificationReports.set("run-1", createVerificationReport("run-1", "failed"));
+    fake.runSpecTaskRuntime.mockImplementation(async (input: RuntimeInput) => {
+      const run = createRun(input.runId, {
+        completedAt: "2026-01-01T00:03:00.000Z",
+        phase: "completed",
+        status: "completed",
+      });
+      const report = createVerificationReport(input.runId, "passed");
+      fake.agentRuns.set(input.runId, run);
+      fake.verificationReports.set(input.runId, report);
+
+      return {
+        run,
+        verificationReport: report,
+      };
+    });
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    const retriedRunId = fake.runSpecTaskRuntime.mock.calls[0][0].runId;
+    expect(fake.runSpecTaskRuntime).toHaveBeenCalledTimes(1);
+    expect(store.get().currentSpec?.status).toBe("completed");
+    expect(store.get().currentSpec?.revisions[0].tasks[0]).toMatchObject({
+      autoRetryCount: 1,
+      error: undefined,
+      runId: retriedRunId,
+      status: "passed",
+    });
+    expect(store.get().terminalLogs).toContain(
+      "[spec] Auto-retrying task task-1 (1/2) after: Acceptance criteria are not passing: criterion-1.",
+    );
+  });
+
   it("blocks completion when any task verification report failed even if required criteria passed", async () => {
     const payload = createGeneratedPayload();
     const revision = createExecutableRevision({
@@ -1507,11 +1580,13 @@ describe("spec store actions", () => {
       tasks: [
         createExecutableTask("task-1", {
           acceptanceCriteriaIds: ["criterion-1"],
+          autoRetryCount: 2,
           runId: "run-1",
           status: "passed",
         }),
         createExecutableTask("task-2", {
           acceptanceCriteriaIds: ["criterion-optional"],
+          autoRetryCount: 2,
           runId: "run-2",
           status: "passed",
         }),

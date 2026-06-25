@@ -1,4 +1,5 @@
 import type { ChatMessage as LlmChatMessage } from "../llm/types";
+import { formatUserLanguageInstruction } from "../languagePolicy";
 import {
   DEFAULT_PROJECT_POLICY,
   formatAllowedPathsForPrompt,
@@ -37,7 +38,9 @@ export function buildGenerateProjectMessages(
         "If the user explicitly asks for AI, chat, assistant, agent, or content generation features, use the Vercel AI SDK with the `ai` package and an appropriate provider package inside App Router route handlers.",
         "If the user does not ask for AI features, do not add AI SDK dependencies or API routes just for decoration.",
         "If you need a dependency, add it to package.json with an exact pinned version. Never run install commands with package names.",
-        "Use visible UI text in the user's language when the request language is clear.",
+        ...formatUserLanguageInstruction(
+          "The JSON summary and newly created visible UI text",
+        ),
         "Make the first screen the actual website/app experience, not a marketing page for the builder.",
         "Use real layout, responsive CSS, and visual assets or CSS-driven visuals that make the site feel complete.",
         "",
@@ -95,8 +98,9 @@ export function buildModifyProjectMessages(
         formatCorePackageVersionRule(policy),
         "Do not create .env, .env.local, or .env.example files unless the user explicitly asks for them.",
         "Never include real API keys, secrets, tokens, or credentials in generated files.",
-        "Match the user's language for the response summary. If the user request is Chinese, write summary in Simplified Chinese.",
-        "When adding or rewriting visible page copy, prefer the user's language unless the existing project clearly uses a different language or the user asks otherwise.",
+        ...formatUserLanguageInstruction(
+          "The JSON summary and newly added or rewritten visible page copy",
+        ),
         "",
         "The response shape must strictly match:",
         '{"type":"modify_files","summary":"string","files":[{"path":"app/page.tsx","content":"string"}]}',
@@ -125,8 +129,9 @@ export function buildModifyProjectMessages(
             "Preserve useful existing code and content unless the user asked to replace it.",
             policy.preferredStackInstruction,
             "The project must keep compiling after the change.",
-            "Write the summary in the same language as userRequest.",
-            "Use the same language as userRequest for newly created visible UI text when that is reasonable.",
+            ...formatUserLanguageInstruction(
+              "The summary and newly created visible UI text",
+            ),
           ],
         },
         null,
@@ -150,6 +155,7 @@ export function buildAgentStepMessages(
         "Do not claim that a tool succeeded until an observation says it succeeded.",
         "Choose the smallest useful next step. If you need information, call read/list/search tools. If the task appears complete, return finish_candidate for external verification.",
         "You may return tool_calls with multiple calls only when every call is read-only, such as list_files, read_files, grep_files, or glob_files.",
+        "Never include write_files, edit_file, delete_files, run_command, apply_supabase_schema, preview, or dev-server tools inside tool_calls. Return exactly one tool_call for any write, command, schema, preview, or dev-server action.",
         "Do not combine file edits, deletes, commands, schema changes, or refresh with other tool calls.",
         "Use the smallest useful action. Preserve existing code and content unless the user asked to replace it.",
         "If the user asks a question that can be answered from current context, return answer without changing files.",
@@ -175,7 +181,9 @@ export function buildAgentStepMessages(
         formatCorePackageVersionRule(policy),
         "Never run npm install, pnpm install, npm add, pnpm add, or similar commands with package names. To add packages, edit package.json; the host automatically installs after package.json changes.",
         "Prefer native fetch for Supabase REST route handlers to avoid unnecessary dependencies. Add dependencies only when truly needed.",
-        "Match the user's language for summaries and newly created visible UI text when reasonable.",
+        ...formatUserLanguageInstruction(
+          "Answer messages, finish_candidate summaries, tool rationales/summaries, and newly created visible UI text",
+        ),
         "",
         "Available tools:",
         formatAgentToolListForPrompt(),
@@ -221,6 +229,7 @@ export function buildAgentStepMessages(
           })),
           instructions: [
             "Return one next step only, or a tool_calls batch containing only read-only calls.",
+            "If using write_files, edit_file, delete_files, run_command, apply_supabase_schema, refresh_preview, start_dev_server, or stop_dev_server, return a single tool_call object, not tool_calls.",
             "Prefer answer only when the user is asking for explanation or status and not asking you to inspect or change the project.",
             "For bug, error, broken preview, or fix requests, do not return answer as the first step. Inspect files, search code, or run an allowed verification command first.",
             "Prefer grep_files or glob_files before reading when you need to locate code.",

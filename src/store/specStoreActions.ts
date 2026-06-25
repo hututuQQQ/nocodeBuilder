@@ -66,6 +66,8 @@ type SpecActions = Pick<
   | "switchCurrentIterationToSpec"
 >;
 
+const SPEC_TASK_AUTO_RETRY_LIMIT = 2;
+
 export function createSpecActions({ get, set }: StoreAccess): SpecActions {
   const store = { get, set };
 
@@ -1003,6 +1005,20 @@ async function executeSpecTasks(store: StoreAccess, specId: string) {
     }).catch(async (error: unknown) => {
       const message = getProjectErrorMessage(error);
       const latestExecutionSpec = await loadExecutionSpecById(executionIdentity);
+      const latestTask = findSpecTask(latestExecutionSpec, task.id);
+
+      if (
+        latestTask &&
+        await saveAutoRetrySpecTask(
+          store,
+          latestExecutionSpec,
+          latestTask,
+          message,
+        )
+      ) {
+        return "auto_retry" as const;
+      }
+
       const failedTaskSpec = updateTask(latestExecutionSpec, task.id, {
         error: message,
         runId,
@@ -1017,6 +1033,10 @@ async function executeSpecTasks(store: StoreAccess, specId: string) {
       );
       return null;
     });
+
+    if (result === "auto_retry") {
+      continue;
+    }
 
     if (!result) {
       return;
@@ -1049,11 +1069,24 @@ async function executeSpecTasks(store: StoreAccess, specId: string) {
       ...executionIdentity,
       runId: run?.id ?? runId,
     });
+    const latestTask = findSpecTask(latestExecutionSpec, task.id);
+    const failureMessage = getFailedSpecRunMessage(run?.status, report);
+
+    if (
+      run?.status !== "cancelled" &&
+      latestTask &&
+      await saveAutoRetrySpecTask(
+        store,
+        latestExecutionSpec,
+        latestTask,
+        failureMessage,
+      )
+    ) {
+      continue;
+    }
+
     const failedTaskSpec = updateTask(latestExecutionSpec, task.id, {
-      error:
-        report?.repairFeedback.join("\n") ||
-        report?.missingEvidence.join("\n") ||
-        `AgentRun ended without a passed verification report.`,
+      error: failureMessage,
       runId: run?.id ?? runId,
       status: run?.status === "cancelled" ? "cancelled" : "failed",
     });
@@ -1165,11 +1198,18 @@ async function reconcileAndContinueSpecExecution(
     return;
   }
 
+  const failureMessage = getFailedSpecRunMessage(run.status, report);
+
+  if (
+    run.status !== "cancelled" &&
+    await saveAutoRetrySpecTask(store, spec, runningTask, failureMessage)
+  ) {
+    await executeSpecTasks(store, spec.id);
+    return;
+  }
+
   const failedTaskSpec = updateTask(spec, runningTask.id, {
-    error:
-      report?.repairFeedback.join("\n") ||
-      report?.missingEvidence.join("\n") ||
-      `AgentRun ended with status ${run.status}.`,
+    error: failureMessage,
     runId: run.id,
     status: run.status === "cancelled" ? "cancelled" : "failed",
   });
@@ -1256,6 +1296,27 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
   });
 
   if (failedCriteria.length > 0) {
+    const retryTask = findAutoRetryableTaskForFailedCriteria(
+      revision,
+      failedCriteria.map((criterion) => criterion.id),
+      verificationReports,
+    );
+
+    if (
+      retryTask &&
+      await saveAutoRetrySpecTask(
+        store,
+        spec,
+        retryTask,
+        `Acceptance criteria are not passing: ${failedCriteria
+          .map((criterion) => criterion.id)
+          .join(", ")}.`,
+      )
+    ) {
+      await executeSpecTasks(store, spec.id);
+      return;
+    }
+
     const output = `Required acceptance criteria are not all passing: ${failedCriteria
       .map((criterion) => criterion.id)
       .join(", ")}.`;
@@ -1282,6 +1343,21 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
   });
 
   if (incompleteTaskReports.length > 0) {
+    const retryTask = incompleteTaskReports.find((task) =>
+      canAutoRetrySpecTask(task),
+    );
+
+    if (retryTask) {
+      await saveAutoRetrySpecTask(
+        store,
+        spec,
+        retryTask,
+        `Task verification report did not pass for ${retryTask.id}.`,
+      );
+      await executeSpecTasks(store, spec.id);
+      return;
+    }
+
     const output = `Task verification reports are not all passing: ${incompleteTaskReports
       .map((task) => task.id)
       .join(", ")}.`;
@@ -1769,6 +1845,109 @@ function updateTask(
   };
 }
 
+function findSpecTask(spec: DevelopmentSpec, taskId: string) {
+  return getCurrentSpecRevision(spec).tasks.find((task) => task.id === taskId);
+}
+
+function canAutoRetrySpecTask(task: SpecTask) {
+  return (task.autoRetryCount ?? 0) < SPEC_TASK_AUTO_RETRY_LIMIT;
+}
+
+async function saveAutoRetrySpecTask(
+  store: StoreAccess,
+  spec: DevelopmentSpec,
+  task: SpecTask,
+  reason: string,
+) {
+  if (!canAutoRetrySpecTask(task)) {
+    return false;
+  }
+
+  const retryCount = (task.autoRetryCount ?? 0) + 1;
+  const retrySpec = prepareSpecForAutoRetry(
+    updateTask(spec, task.id, {
+      autoRetryCount: retryCount,
+      blockedByTaskId: undefined,
+      error: undefined,
+      runId: undefined,
+      status: "pending",
+    }),
+    task,
+  );
+
+  await saveSpecToStore(store, retrySpec);
+  store.set((state) => ({
+    terminalLogs: appendLogs(state.terminalLogs, [
+      `[spec] Auto-retrying task ${task.id} (${retryCount}/${SPEC_TASK_AUTO_RETRY_LIMIT}) after: ${reason}`,
+    ]),
+  }));
+
+  return true;
+}
+
+function prepareSpecForAutoRetry(spec: DevelopmentSpec, task: SpecTask) {
+  if (spec.status === "building") {
+    return {
+      ...spec,
+      failureMessage: undefined,
+      finalVerification: undefined,
+    };
+  }
+
+  if (spec.status === "approved" || spec.status === "blocked") {
+    return transitionSpecStatus(spec, "building");
+  }
+
+  if (spec.status === "verifying") {
+    return transitionSpecStatus(
+      markSpecBlocked(spec, `Retrying ${task.title}.`),
+      "building",
+    );
+  }
+
+  return spec;
+}
+
+function getFailedSpecRunMessage(
+  runStatus: string | undefined,
+  report: {
+    missingEvidence: string[];
+    repairFeedback: string[];
+  } | null | undefined,
+) {
+  return (
+    report?.repairFeedback.join("\n") ||
+    report?.missingEvidence.join("\n") ||
+    (runStatus
+      ? `AgentRun ended with status ${runStatus}.`
+      : "AgentRun ended without a passed verification report.")
+  );
+}
+
+function findAutoRetryableTaskForFailedCriteria(
+  revision: SpecRevision,
+  failedCriterionIds: string[],
+  verificationReports: Map<string, "passed" | "failed" | "pending">,
+) {
+  const failedCriterionIdSet = new Set(failedCriterionIds);
+
+  return revision.tasks.find((task) => {
+    if (!canAutoRetrySpecTask(task)) {
+      return false;
+    }
+
+    if (
+      !task.acceptanceCriteriaIds.some((criterionId) =>
+        failedCriterionIdSet.has(criterionId),
+      )
+    ) {
+      return false;
+    }
+
+    return !task.runId || verificationReports.get(task.runId) !== "passed";
+  });
+}
+
 function restoreRetryableTaskGraph(
   revision: SpecRevision,
   taskId: string,
@@ -1800,6 +1979,7 @@ function restoreRetryableTaskGraph(
       if (task.id === taskId) {
         return {
           ...task,
+          autoRetryCount: undefined,
           blockedByTaskId: undefined,
           error: undefined,
           runId: undefined,
@@ -1810,6 +1990,7 @@ function restoreRetryableTaskGraph(
       if (restoreIds.has(task.id) && task.status === "blocked") {
         return {
           ...task,
+          autoRetryCount: undefined,
           blockedByTaskId: undefined,
           error: undefined,
           runId: undefined,

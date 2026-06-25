@@ -5,6 +5,7 @@ import {
   canUseSpecChat,
   findFirstRetryableSpecTask,
   formatAcceptanceEvidenceLabels,
+  formatSpecTaskAutoRetryLabel,
   getAcceptanceStatusSymbol,
 } from "./SpecPanel";
 
@@ -29,6 +30,14 @@ describe("SpecPanel acceptance criteria projection", () => {
       runs: "Runs: none",
       tasks: "Tasks: none",
     });
+  });
+
+  it("formats automatic retry task badges only after a retry starts", () => {
+    expect(formatSpecTaskAutoRetryLabel({ autoRetryCount: undefined })).toBeNull();
+    expect(formatSpecTaskAutoRetryLabel({ autoRetryCount: 0 })).toBeNull();
+    expect(formatSpecTaskAutoRetryLabel({ autoRetryCount: 1 })).toBe(
+      "Auto retry 1",
+    );
   });
 
   it("shows Retry only for failed, cancelled, or recoverable blocked tasks", () => {

@@ -1,6 +1,5 @@
 import type { AgentRun, TaskContract, ToolDefinition } from "../types";
 import {
-  isPathAllowed,
   isPathForbidden,
   normalizeProjectPath,
 } from "../pathScope";
@@ -57,7 +56,7 @@ export class PolicyEngine {
 
     if (
       input.tool.approvalPolicy === "conditional" &&
-      this.requiresConditionalApproval(input.run.contract, input.tool, input.args) &&
+      this.requiresConditionalApproval(input.run.contract, input.tool) &&
       !input.approvedHashes?.has(approvalHash)
     ) {
       return {
@@ -89,17 +88,6 @@ export class PolicyEngine {
       return {
         allowed: false,
         reason: "Tool target is inside a forbidden path such as .aibuilder or .env.",
-      };
-    }
-
-    if (
-      (tool.sideEffect === "workspace_write" || tool.sideEffect === "destructive") &&
-      paths.length > 0 &&
-      paths.some((path) => !isPathAllowed(path, contract.scope.allowedPaths))
-    ) {
-      return {
-        allowed: false,
-        reason: "Tool target is outside the task's allowed paths.",
       };
     }
 
@@ -141,22 +129,9 @@ export class PolicyEngine {
   private requiresConditionalApproval(
     contract: TaskContract,
     tool: ToolDefinition,
-    args: unknown,
   ) {
     if (tool.name === "update_design_tokens") {
       return false;
-    }
-
-    if (
-      tool.sideEffect === "workspace_write" &&
-      collectPaths(args).includes("package.json")
-    ) {
-      return contract.permissions.dependencyChange === "ask";
-    }
-
-    if (tool.name === "run_command") {
-      const command = extractCommand(args);
-      return command === "npm install" || command === "pnpm install";
     }
 
     if (tool.name === "apply_supabase_schema") {
@@ -214,15 +189,6 @@ function isPathField(key: string) {
     normalized.endsWith("path") ||
     normalized.endsWith("paths")
   );
-}
-
-function extractCommand(args: unknown) {
-  if (typeof args !== "object" || args === null || Array.isArray(args)) {
-    return null;
-  }
-
-  const command = (args as Record<string, unknown>).command;
-  return typeof command === "string" ? command : null;
 }
 
 function stableStringify(value: unknown): string {

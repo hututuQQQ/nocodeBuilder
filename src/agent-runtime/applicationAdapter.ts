@@ -39,6 +39,7 @@ import {
   getProjectErrorMessage,
   projectApi,
   type FileTree,
+  type PreviewProbeResult,
   type ProjectInfo,
 } from "../services/projects";
 import { agentRuntimeApi } from "../services/agentRuntime";
@@ -688,7 +689,12 @@ async function verifyRunPort({
     title: "Verification",
   });
   const verifier = new AgentVerifier({
-    httpProbe: (url) => projectApi.probePreviewUrl(url),
+    httpProbe: (url) =>
+      probePreviewWithDevServerRecovery({
+        project,
+        store,
+        url,
+      }),
     readFile: (path) => projectApi.readFile(project.id, path),
     readSiteSpec: () => agentRuntimeApi.readSiteSpec(project.id),
     recordArtifact: async ({ content, relativePath, runId }) => {
@@ -732,6 +738,44 @@ async function verifyRunPort({
     status: report.status === "passed" ? "succeeded" : "failed",
   });
   return report;
+}
+
+async function probePreviewWithDevServerRecovery({
+  project,
+  store,
+  url,
+}: {
+  project: ProjectInfo;
+  store: StoreAccess;
+  url: string;
+}): Promise<PreviewProbeResult> {
+  const firstProbe = await projectApi.probePreviewUrl(url);
+
+  if (!isPreviewServerError(firstProbe)) {
+    return firstProbe;
+  }
+
+  appendTerminalLog(
+    store,
+    `[preview] Probe returned HTTP ${firstProbe.status}; restarting preview server and retrying once.`,
+  );
+
+  try {
+    await store.get().stopDevServer(project.id);
+    await store.get().startDevServer(project.id);
+    const retryUrl = store.get().previewUrl ?? url;
+    return await projectApi.probePreviewUrl(retryUrl);
+  } catch (error) {
+    appendTerminalLog(
+      store,
+      `[preview:error] Failed to restart preview after HTTP ${firstProbe.status}: ${getProjectErrorMessage(error)}`,
+    );
+    return firstProbe;
+  }
+}
+
+function isPreviewServerError(result: PreviewProbeResult) {
+  return !result.ok && result.status >= 500 && result.status < 600;
 }
 
 async function buildAgentStepContext({

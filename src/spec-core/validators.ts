@@ -619,6 +619,17 @@ function validatePersistedTask(value: unknown): SpecTask {
     throw new Error(`Task ${id} blockedByTaskId must be a non-empty string.`);
   }
 
+  const autoRetryCount = value.autoRetryCount;
+
+  if (
+    autoRetryCount !== undefined &&
+    (typeof autoRetryCount !== "number" ||
+      !Number.isInteger(autoRetryCount) ||
+      autoRetryCount < 0)
+  ) {
+    throw new Error(`Task ${id} autoRetryCount must be a non-negative integer.`);
+  }
+
   return {
     acceptanceCriteriaIds: readIdentifierArray(
       value.acceptanceCriteriaIds,
@@ -639,6 +650,7 @@ function validatePersistedTask(value: unknown): SpecTask {
     runId: value.runId as string | undefined,
     status: status as SpecTask["status"],
     title: readRequiredString(value.title, "Spec task.title", 240),
+    autoRetryCount,
   };
 }
 

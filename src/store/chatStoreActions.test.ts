@@ -112,7 +112,30 @@ describe("chat store actions", () => {
     expect(store.get().currentConversation?.messages).toHaveLength(2);
   });
 
-  it("answers blocked Spec messages with recovery guidance", async () => {
+  it("localizes Spec guidance for Chinese messages", async () => {
+    const store = createStore({
+      currentConversation: createConversation({
+        activeSpecId: "spec-1",
+        mode: "spec",
+        specIds: ["spec-1"],
+      }),
+      currentSpec: createReviewSpec(),
+    });
+    const actions = createChatActions(store as never);
+
+    await actions.sendMessage("请改一下需求");
+
+    expect(modifyCurrentProject).not.toHaveBeenCalled();
+    expect(store.get().chatMessages).toHaveLength(2);
+    expect(store.get().chatMessages[1]).toMatchObject({
+      content:
+        "使用 Request revision 修改这个 Spec，或者在准备好后点击 Approve 并开始构建。",
+      role: "assistant",
+    });
+  });
+
+  it("uses blocked Spec messages to retry the first recoverable task", async () => {
+    const retrySpecTask = vi.fn(async () => undefined);
     const store = createStore({
       currentConversation: createConversation({
         activeSpecId: "spec-1",
@@ -120,12 +143,71 @@ describe("chat store actions", () => {
         specIds: ["spec-1"],
       }),
       currentSpec: createBlockedSpec(),
+      retrySpecTask,
     });
     const actions = createChatActions(store as never);
 
     await actions.sendMessage("How do I fix this?");
 
     expect(modifyCurrentProject).not.toHaveBeenCalled();
+    expect(retrySpecTask).toHaveBeenCalledWith("task-1");
+    expect(store.get().chatMessages).toHaveLength(2);
+    expect(store.get().chatMessages[0]).toMatchObject({
+      content: "How do I fix this?",
+      role: "user",
+    });
+    expect(store.get().chatMessages[1]).toMatchObject({
+      content: "I'll retry Current task with your note in the conversation context.",
+      role: "assistant",
+    });
+    expect(store.get().terminalLogs).toContain(
+      "[spec] Chat message requested retry for task task-1.",
+    );
+  });
+
+  it("uses blocked Spec messages to retry final verification when applicable", async () => {
+    const retrySpecVerification = vi.fn(async () => undefined);
+    const retrySpecTask = vi.fn(async () => undefined);
+    const store = createStore({
+      currentConversation: createConversation({
+        activeSpecId: "spec-1",
+        mode: "spec",
+        specIds: ["spec-1"],
+      }),
+      currentSpec: createFinalVerificationBlockedSpec(),
+      retrySpecTask,
+      retrySpecVerification,
+    });
+    const actions = createChatActions(store as never);
+
+    await actions.sendMessage("Try again after restarting preview");
+
+    expect(retrySpecVerification).toHaveBeenCalledTimes(1);
+    expect(retrySpecTask).not.toHaveBeenCalled();
+    expect(store.get().chatMessages).toHaveLength(2);
+    expect(store.get().chatMessages[1]).toMatchObject({
+      content:
+        "I'll retry final verification with your note in the conversation context.",
+      role: "assistant",
+    });
+  });
+
+  it("answers blocked Spec messages with recovery guidance when nothing can retry", async () => {
+    const retrySpecTask = vi.fn(async () => undefined);
+    const store = createStore({
+      currentConversation: createConversation({
+        activeSpecId: "spec-1",
+        mode: "spec",
+        specIds: ["spec-1"],
+      }),
+      currentSpec: createUnretryableBlockedSpec(),
+      retrySpecTask,
+    });
+    const actions = createChatActions(store as never);
+
+    await actions.sendMessage("How do I fix this?");
+
+    expect(retrySpecTask).not.toHaveBeenCalled();
     expect(store.get().chatMessages).toHaveLength(2);
     expect(store.get().chatMessages[1]).toMatchObject({
       content:
@@ -154,10 +236,43 @@ describe("chat store actions", () => {
     await actions.sendMessage("try a smaller change");
 
     expect(sendAgentSteering).toHaveBeenCalledWith("try a smaller change");
-    expect(store.get().chatMessages).toHaveLength(1);
+    expect(store.get().chatMessages).toHaveLength(2);
+    expect(store.get().chatMessages[1]).toMatchObject({
+      content:
+        "I sent this to the running Spec task as steering. The agent will use it on the next model step.",
+      role: "assistant",
+    });
     expect(store.get().terminalLogs).toContain(
       `[spec] Added message as steering for run ${run.id}.`,
     );
+  });
+
+  it("localizes Spec steering acknowledgements for Chinese messages", async () => {
+    const run = createRun("run-current", {
+      contract: createSpecContract({ taskId: "task-1" }),
+    });
+    const sendAgentSteering = vi.fn(async () => undefined);
+    const store = createStore({
+      currentAgentRun: run,
+      currentConversation: createConversation({
+        activeSpecId: "spec-1",
+        mode: "spec",
+        specIds: ["spec-1"],
+      }),
+      currentSpec: createSpec({ runId: run.id }),
+      sendAgentSteering,
+    });
+    const actions = createChatActions(store as never);
+
+    await actions.sendMessage("你修复一下");
+
+    expect(sendAgentSteering).toHaveBeenCalledWith("你修复一下");
+    expect(store.get().chatMessages).toHaveLength(2);
+    expect(store.get().chatMessages[1]).toMatchObject({
+      content:
+        "我已把这条消息发送给正在运行的 Spec 任务作为 steering，AI 会在下一步参考它。",
+      role: "assistant",
+    });
   });
 
   it("does not treat a non-current Spec run as message steering", async () => {
@@ -218,6 +333,8 @@ function createStore(patch: Partial<StoreState> = {}) {
     isSwitchingIterationMode: false,
     isVerifyingSpec: false,
     projectError: null,
+    retrySpecTask: vi.fn(async () => undefined),
+    retrySpecVerification: vi.fn(async () => undefined),
     sendAgentSteering: vi.fn(async () => undefined),
     terminalLogs: [],
     ...patch,
@@ -293,6 +410,8 @@ type StoreState = {
   isSwitchingIterationMode: boolean;
   isVerifyingSpec: boolean;
   projectError: string | null;
+  retrySpecTask: ReturnType<typeof vi.fn>;
+  retrySpecVerification: ReturnType<typeof vi.fn>;
   sendAgentSteering: ReturnType<typeof vi.fn>;
   terminalLogs: string[];
 };
@@ -441,6 +560,58 @@ function createBlockedSpec(): DevelopmentSpec {
             ...spec.revisions[0].tasks[0],
             error: "AgentRun ended without a passed verification report.",
             status: "failed",
+          },
+        ],
+      },
+    ],
+    status: "blocked",
+  };
+}
+
+function createFinalVerificationBlockedSpec(): DevelopmentSpec {
+  const spec = createReviewSpec();
+
+  return {
+    ...spec,
+    failureMessage: "Final npm run build failed.",
+    finalVerification: {
+      checkedAt: "2026-01-01T00:02:00.000Z",
+      command: "npm run build",
+      output: "Internal Server Error",
+      success: false,
+    },
+    revisions: [
+      {
+        ...spec.revisions[0],
+        tasks: [
+          {
+            ...spec.revisions[0].tasks[0],
+            runId: "run-current",
+            status: "passed",
+          },
+        ],
+      },
+    ],
+    status: "blocked",
+  };
+}
+
+function createUnretryableBlockedSpec(): DevelopmentSpec {
+  const spec = createReviewSpec();
+
+  return {
+    ...spec,
+    failureMessage: "Task dependencies could not advance.",
+    revisions: [
+      {
+        ...spec.revisions[0],
+        tasks: [
+          {
+            ...spec.revisions[0].tasks[0],
+            blockedByTaskId: "task-dependency",
+            dependencyIds: ["task-dependency"],
+            error: "Blocked by dependency.",
+            status: "blocked",
           },
         ],
       },

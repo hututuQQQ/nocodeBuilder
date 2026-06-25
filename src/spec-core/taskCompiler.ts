@@ -30,15 +30,11 @@ export function compileSpecTaskContract({
       criterion,
     ]),
   );
-  const acceptanceCriteria = task.acceptanceCriteriaIds.map((criterionId) => {
-    const criterion = criteriaById.get(criterionId);
-
-    if (!criterion) {
+  for (const criterionId of task.acceptanceCriteriaIds) {
+    if (!criteriaById.has(criterionId)) {
       throw new Error(`Spec task references unknown criterion ${criterionId}.`);
     }
-
-    return criterion;
-  });
+  }
 
   const allowedPaths =
     spec.kind === "initial_build" && executionMode === "generate"
@@ -47,7 +43,6 @@ export function compileSpecTaskContract({
 
   return validateTaskContract({
     ...base,
-    acceptanceCriteria,
     objective: task.objective,
     scope: {
       ...base.scope,

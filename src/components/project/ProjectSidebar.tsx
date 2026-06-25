@@ -589,16 +589,16 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
               </p>
             ) : null}
 
-            <div className="mt-4 flex justify-end gap-2">
+            <div className="mt-4 grid gap-2">
               <button
-                className="h-9 rounded-md border border-zinc-800 px-3 text-sm text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-200"
+                className="h-9 w-full whitespace-nowrap rounded-md border border-zinc-800 px-3 text-sm text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-200"
                 onClick={() => setIsDialogOpen(false)}
                 type="button"
               >
                 Cancel
               </button>
               <button
-                className="flex h-9 items-center gap-2 rounded-md border border-teal-400/30 bg-teal-400/10 px-3 text-sm font-medium text-teal-100 transition hover:border-teal-300/60 hover:bg-teal-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
+                className="flex h-9 w-full items-center justify-center gap-2 whitespace-nowrap rounded-md border border-teal-400/30 bg-teal-400/10 px-3 text-sm font-medium text-teal-100 transition hover:border-teal-300/60 hover:bg-teal-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
                 disabled={
                   !projectName.trim() ||
                   !projectPrompt.trim() ||
@@ -711,16 +711,16 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
               </p>
             ) : null}
 
-            <div className="mt-4 flex justify-end gap-2">
+            <div className="mt-4 grid gap-2">
               <button
-                className="h-9 rounded-md border border-zinc-800 px-3 text-sm text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-200"
+                className="h-9 w-full whitespace-nowrap rounded-md border border-zinc-800 px-3 text-sm text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-200"
                 onClick={() => setNewIterationProjectId(null)}
                 type="button"
               >
                 Cancel
               </button>
               <button
-                className="flex h-9 items-center gap-2 rounded-md border border-teal-400/30 bg-teal-400/10 px-3 text-sm font-medium text-teal-100 transition hover:border-teal-300/60 hover:bg-teal-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
+                className="flex h-9 w-full items-center justify-center gap-2 whitespace-nowrap rounded-md border border-teal-400/30 bg-teal-400/10 px-3 text-sm font-medium text-teal-100 transition hover:border-teal-300/60 hover:bg-teal-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
                 disabled={
                   isCreatingConversation ||
                   isGeneratingSpec ||

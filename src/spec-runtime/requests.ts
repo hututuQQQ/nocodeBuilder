@@ -1,11 +1,15 @@
 import type { AiProviderConfig } from "../services/keyStore";
 import { ChatCompletionClient } from "../agent/llm/ChatCompletionClient";
+import type { ChatMessage as LlmChatMessage } from "../agent/llm/types";
 import {
   buildFeatureSpecMessages,
   buildInitialSpecMessages,
   buildSpecRevisionMessages,
 } from "./prompts";
 import { validateGeneratedSpecRevisionPayload } from "../spec-core/validators";
+import type { GeneratedSpecRevisionPayload } from "../spec-core/types";
+
+const SPEC_VALIDATION_RETRY_LIMIT = 1;
 
 export async function requestInitialSpec({
   config,
@@ -21,12 +25,12 @@ export async function requestInitialSpec({
   signal?: AbortSignal;
 }) {
   const client = createSpecChatClient(config);
-  const response = await client.chatJson<unknown>(
-    buildInitialSpecMessages({ projectBrief, projectName }),
-    { onDelta, signal },
-  );
-
-  return validateGeneratedSpecRevisionPayload(response);
+  return requestValidatedSpecPayload({
+    client,
+    messages: buildInitialSpecMessages({ projectBrief, projectName }),
+    onDelta,
+    signal,
+  });
 }
 
 export async function requestFeatureSpec({
@@ -43,12 +47,12 @@ export async function requestFeatureSpec({
   signal?: AbortSignal;
 }) {
   const client = createSpecChatClient(config);
-  const response = await client.chatJson<unknown>(
-    buildFeatureSpecMessages({ brief, context }),
-    { onDelta, signal },
-  );
-
-  return validateGeneratedSpecRevisionPayload(response);
+  return requestValidatedSpecPayload({
+    client,
+    messages: buildFeatureSpecMessages({ brief, context }),
+    onDelta,
+    signal,
+  });
 }
 
 export async function requestSpecRevision({
@@ -65,12 +69,12 @@ export async function requestSpecRevision({
   signal?: AbortSignal;
 }) {
   const client = createSpecChatClient(config);
-  const response = await client.chatJson<unknown>(
-    buildSpecRevisionMessages({ currentRevision, feedback }),
-    { onDelta, signal },
-  );
-
-  return validateGeneratedSpecRevisionPayload(response);
+  return requestValidatedSpecPayload({
+    client,
+    messages: buildSpecRevisionMessages({ currentRevision, feedback }),
+    onDelta,
+    signal,
+  });
 }
 
 function createSpecChatClient(config: AiProviderConfig) {
@@ -79,4 +83,87 @@ function createSpecChatClient(config: AiProviderConfig) {
     model: config.model,
     provider: config.provider,
   });
+}
+
+async function requestValidatedSpecPayload({
+  client,
+  messages,
+  onDelta,
+  signal,
+}: {
+  client: ChatCompletionClient;
+  messages: LlmChatMessage[];
+  onDelta?: (delta: string) => void;
+  signal?: AbortSignal;
+}): Promise<GeneratedSpecRevisionPayload> {
+  let currentMessages = messages;
+  let lastResponse: unknown = null;
+
+  for (let attempt = 0; attempt <= SPEC_VALIDATION_RETRY_LIMIT; attempt += 1) {
+    lastResponse = await client.chatJson<unknown>(currentMessages, {
+      onDelta,
+      signal,
+    });
+
+    try {
+      return validateGeneratedSpecRevisionPayload(lastResponse);
+    } catch (error) {
+      if (attempt >= SPEC_VALIDATION_RETRY_LIMIT) {
+        throw error;
+      }
+
+      currentMessages = buildSpecValidationRepairMessages(
+        currentMessages,
+        lastResponse,
+        error,
+      );
+    }
+  }
+
+  return validateGeneratedSpecRevisionPayload(lastResponse);
+}
+
+function buildSpecValidationRepairMessages(
+  messages: LlmChatMessage[],
+  invalidResponse: unknown,
+  error: unknown,
+): LlmChatMessage[] {
+  return [
+    ...messages,
+    {
+      role: "assistant",
+      content: stringifyForPrompt(invalidResponse),
+    },
+    {
+      role: "user",
+      content: JSON.stringify(
+        {
+          task: "Repair the Spec JSON so it passes validation. Return the complete replacement Spec JSON only.",
+          validationError: formatValidationError(error),
+          invalidResponse,
+          instructions: [
+            "Preserve the user's requested product scope and language.",
+            "Every task.acceptanceCriteriaIds array must contain at least one existing acceptance criterion id.",
+            "Do not invent requirementIds or acceptanceCriteriaIds that are not declared in requirements.",
+            "Every required acceptance criterion must still be covered by at least one task.",
+            "Return JSON only. Do not output Markdown, prose, comments, or code fences.",
+          ],
+        },
+        null,
+        2,
+      ),
+    },
+  ];
+}
+
+function formatValidationError(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function stringifyForPrompt(value: unknown) {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }

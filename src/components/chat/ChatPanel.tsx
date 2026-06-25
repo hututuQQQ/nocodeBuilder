@@ -113,7 +113,7 @@ export function ChatPanel({
 
   useEffect(() => {
     if (shouldStickToBottomRef.current) {
-      messagesEndRef.current?.scrollIntoView({ block: "end" });
+      scrollChatContainerToBottom(scrollContainerRef.current);
     }
   }, [chatMessages]);
 
@@ -350,6 +350,16 @@ export function ChatPanel({
       </form>
     </main>
   );
+}
+
+function scrollChatContainerToBottom(container: HTMLDivElement | null) {
+  if (!container) {
+    return;
+  }
+
+  window.requestAnimationFrame(() => {
+    container.scrollTop = container.scrollHeight;
+  });
 }
 
 function isTerminalAgentRun(status: string) {

@@ -65,7 +65,7 @@ export function compileTaskContract({
     ],
     permissions: {
       fileWrite: resolvedTaskType !== "answer",
-      dependencyChange: "ask",
+      dependencyChange: "allow",
       fileDelete: "ask",
       databaseChange: resolvedTaskType === "backend_feature" ? "ask" : "deny",
       previewDeployment: "ask",

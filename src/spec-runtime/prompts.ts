@@ -1,4 +1,5 @@
 import type { ChatMessage as LlmChatMessage } from "../agent/llm/types";
+import { formatUserLanguageInstruction } from "../agent/languagePolicy";
 import type { ProjectPolicy } from "../agent/project/projectPolicy";
 import {
   DEFAULT_PROJECT_POLICY,
@@ -126,7 +127,12 @@ function buildSpecMessages({
         "You are the Spec Coding planner for nocodeBuilder.",
         "Return JSON only. Do not output Markdown, prose, comments, or code fences.",
         "Generate Requirements, Design, and Tasks in one response.",
+        ...formatUserLanguageInstruction(
+          "User-facing Spec fields such as brief, requirements, design text, task titles, task objectives, summaries, and unresolved questions",
+        ),
         "Every required acceptance criterion must be covered by at least one task.",
+        "Every task must include at least one acceptanceCriteriaIds entry that references an existing acceptance criterion.",
+        "Do not create implementation-only tasks with an empty acceptanceCriteriaIds array; attach setup, dependency, styling, verification, or support work to the acceptance criterion it enables.",
         "Every task must include non-empty allowedPaths and expectedFiles where useful.",
         "Task dependencyIds must form an acyclic graph.",
         "Use complete, execution-ready task objectives. The runtime will execute one task per AgentRun.",
