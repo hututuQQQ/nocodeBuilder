@@ -12,6 +12,8 @@ const MAX_INPUT_BYTES: usize = 64 * 1024;
 const SETUP_SCHEMA_VERSION: u32 = 1;
 const SANDBOX_ACCOUNT_NAME: &str = "NCB_Sandbox";
 const SANDBOX_GROUP_NAME: &str = "NoCodeBuilderSandboxUsers";
+const CREDENTIAL_SERVICE_NAME: &str = "AI Web Builder";
+const SANDBOX_ACCOUNT_PASSWORD_KEY: &str = "windows-sandbox:NCB_Sandbox:password";
 #[cfg(all(target_os = "windows", not(test)))]
 const SANDBOX_ACCOUNT_DESCRIPTION: &str =
     "Low-privilege account reserved for nocodeBuilder native sandbox runs.";
@@ -334,6 +336,10 @@ fn status_response(request: &SetupRequest) -> Result<SetupResponse, String> {
     }
 
     if marker.account_configured && marker.acls_configured && marker.network_filtering_configured {
+        if let Err(error) = verify_sandbox_account_password_credential() {
+            return Ok(repair_required_response(request, error));
+        }
+
         return Ok(SetupResponse {
             ok: true,
             state: "ready",
@@ -516,6 +522,40 @@ fn verify_network_filtering() -> Result<(), String> {
 #[cfg(all(not(target_os = "windows"), not(test)))]
 fn verify_network_filtering() -> Result<(), String> {
     Err("Windows sandbox network filtering verification is only supported on Windows".to_string())
+}
+
+#[cfg(all(target_os = "windows", not(test)))]
+fn verify_sandbox_account_password_credential() -> Result<(), String> {
+    let entry = keyring::Entry::new(CREDENTIAL_SERVICE_NAME, SANDBOX_ACCOUNT_PASSWORD_KEY)
+        .map_err(|error| {
+            format!("failed to open Windows sandbox account password credential: {error}")
+        })?;
+    let password = entry.get_password().map_err(|error| {
+        format!(
+            "Windows sandbox account password is missing from the user credential store: {error}"
+        )
+    })?;
+
+    validate_sandbox_account_password(&password).map_err(|_| {
+        "Windows sandbox account password in the user credential store is invalid".to_string()
+    })
+}
+
+#[cfg(test)]
+fn verify_sandbox_account_password_credential() -> Result<(), String> {
+    if matches!(
+        std::env::var("NCB_SANDBOX_TEST_VERIFY_PASSWORD_CREDENTIAL"),
+        Ok(value) if value == "0"
+    ) {
+        return Err("mock password credential verification failed".to_string());
+    }
+
+    Ok(())
+}
+
+#[cfg(all(not(target_os = "windows"), not(test)))]
+fn verify_sandbox_account_password_credential() -> Result<(), String> {
+    Err("Windows sandbox account password credentials are only supported on Windows".to_string())
 }
 
 #[cfg(all(target_os = "windows", not(test)))]
@@ -3057,11 +3097,33 @@ mod tests {
     }
 
     #[test]
+    fn missing_password_credential_requires_repair_even_with_full_marker() {
+        let _guard = elevation_override_lock().lock().unwrap();
+        std::env::remove_var("NCB_SANDBOX_TEST_VERIFY_ACCOUNT");
+        std::env::remove_var("NCB_SANDBOX_TEST_VERIFY_ACLS");
+        std::env::remove_var("NCB_SANDBOX_TEST_VERIFY_NETWORK");
+        std::env::set_var("NCB_SANDBOX_TEST_VERIFY_PASSWORD_CREDENTIAL", "0");
+        let sandbox_root = unique_fixture_root("missing-password-credential");
+        let request = setup_status_request(&sandbox_root, 11);
+        write_marker(&request, true, true, true);
+
+        let response = handle_setup_request(request).unwrap();
+
+        assert!(!response.ok);
+        assert_eq!(response.state, "repair-required");
+        assert!(response.message.contains("password credential"));
+
+        std::env::remove_var("NCB_SANDBOX_TEST_VERIFY_PASSWORD_CREDENTIAL");
+        let _ = fs::remove_dir_all(sandbox_root);
+    }
+
+    #[test]
     fn full_setup_progress_reports_ready() {
         let _guard = elevation_override_lock().lock().unwrap();
         std::env::remove_var("NCB_SANDBOX_TEST_VERIFY_ACCOUNT");
         std::env::remove_var("NCB_SANDBOX_TEST_VERIFY_ACLS");
         std::env::remove_var("NCB_SANDBOX_TEST_VERIFY_NETWORK");
+        std::env::remove_var("NCB_SANDBOX_TEST_VERIFY_PASSWORD_CREDENTIAL");
         let sandbox_root = unique_fixture_root("full-progress");
         let request = setup_status_request(&sandbox_root, 9);
         write_marker(&request, true, true, true);

@@ -79,3 +79,31 @@ jobs:
 
       - name: Test Rust on target OS
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  windows-native-sandbox-smoke:
+    name: Windows Native Sandbox Smoke
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify elevated runner
+        shell: pwsh
+        run: |
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+          if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw "Windows native sandbox smoke test requires an elevated runner token."
+          }
+          Write-Host "Running elevated as $($identity.Name)."
+
+      - name: Run native setup and runner smoke
+        shell: pwsh
+        env:
+          NCB_RUN_WINDOWS_NATIVE_SMOKE: "1"
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test windows_native_smoke -- --nocapture
