@@ -129,7 +129,18 @@ fn build_profile(request: &SandboxRequest) -> String {
         "(allow process-info* (target same-sandbox))".to_string(),
         "(allow sysctl-read)".to_string(),
         "(allow file-read-metadata)".to_string(),
+        "(allow system-mac-syscall (mac-policy-name \"vnguard\"))".to_string(),
+        "(allow system-mac-syscall (require-all (mac-policy-name \"Sandbox\") (mac-syscall-number 67)))"
+            .to_string(),
+        "(allow iokit-open (iokit-registry-entry-class \"RootDomainUserClient\"))".to_string(),
+        "(allow ipc-posix-sem)".to_string(),
+        "(allow ipc-posix-shm-read* (ipc-posix-name-prefix \"apple.cfprefs.\"))".to_string(),
+        "(allow user-preference-read)".to_string(),
+        "(allow mach-lookup (global-name \"com.apple.bsd.dirhelper\") (global-name \"com.apple.cfprefsd.agent\") (global-name \"com.apple.cfprefsd.daemon\") (global-name \"com.apple.system.DirectoryService.libinfo_v1\") (global-name \"com.apple.system.logger\") (global-name \"com.apple.system.opendirectoryd.libinfo\") (local-name \"com.apple.cfprefsd.agent\"))"
+            .to_string(),
         "(allow file-read* file-test-existence file-write-data (literal \"/dev/null\"))"
+            .to_string(),
+        "(allow file-read* file-test-existence (literal \"/dev/random\") (literal \"/dev/urandom\") (literal \"/private/etc/passwd\") (literal \"/private/etc/master.passwd\") (literal \"/private/etc/localtime\"))"
             .to_string(),
         "(allow file-read-data file-test-existence file-write-data (subpath \"/dev/fd\"))"
             .to_string(),
