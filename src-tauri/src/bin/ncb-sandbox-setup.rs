@@ -1995,7 +1995,7 @@ mod windows_network {
         Win32::{
             Foundation::{
                 GetLastError, LocalFree, ERROR_INSUFFICIENT_BUFFER, FWP_E_ALREADY_EXISTS,
-                FWP_E_NOT_FOUND, HANDLE,
+                FWP_E_FILTER_NOT_FOUND, FWP_E_PROVIDER_NOT_FOUND, FWP_E_SUBLAYER_NOT_FOUND, HANDLE,
             },
             NetworkManagement::WindowsFilteringPlatform::{
                 FwpmEngineClose0, FwpmEngineOpen0, FwpmFilterAdd0, FwpmFilterDeleteByKey0,
@@ -2125,26 +2125,32 @@ mod windows_network {
         delete_optional(
             unsafe { FwpmFilterDeleteByKey0(engine.handle(), &ALLOW_LOOPBACK_V4_FILTER_KEY) },
             "failed to remove Windows sandbox IPv4 loopback WFP allow filter",
+            FWP_E_FILTER_NOT_FOUND as u32,
         )?;
         delete_optional(
             unsafe { FwpmFilterDeleteByKey0(engine.handle(), &ALLOW_LOOPBACK_V6_FILTER_KEY) },
             "failed to remove Windows sandbox IPv6 loopback WFP allow filter",
+            FWP_E_FILTER_NOT_FOUND as u32,
         )?;
         delete_optional(
             unsafe { FwpmFilterDeleteByKey0(engine.handle(), &BLOCK_V4_FILTER_KEY) },
             "failed to remove Windows sandbox IPv4 WFP block filter",
+            FWP_E_FILTER_NOT_FOUND as u32,
         )?;
         delete_optional(
             unsafe { FwpmFilterDeleteByKey0(engine.handle(), &BLOCK_V6_FILTER_KEY) },
             "failed to remove Windows sandbox IPv6 WFP block filter",
+            FWP_E_FILTER_NOT_FOUND as u32,
         )?;
         delete_optional(
             unsafe { FwpmSubLayerDeleteByKey0(engine.handle(), &SUBLAYER_KEY) },
             "failed to remove Windows sandbox WFP sublayer",
+            FWP_E_SUBLAYER_NOT_FOUND as u32,
         )?;
         delete_optional(
             unsafe { FwpmProviderDeleteByKey0(engine.handle(), &PROVIDER_KEY) },
             "failed to remove Windows sandbox WFP provider",
+            FWP_E_PROVIDER_NOT_FOUND as u32,
         )
     }
 
@@ -2185,7 +2191,7 @@ mod windows_network {
         sandbox_sid: &str,
     ) -> Result<(), String> {
         let delete_status = unsafe { FwpmFilterDeleteByKey0(engine, &filter_key) };
-        if delete_status != 0 && delete_status != FWP_E_NOT_FOUND as u32 {
+        if delete_status != 0 && delete_status != FWP_E_FILTER_NOT_FOUND as u32 {
             return Err(wfp_error(
                 "failed to replace stale Windows sandbox WFP filter",
                 delete_status,
@@ -2204,7 +2210,7 @@ mod windows_network {
         sandbox_sid: &str,
     ) -> Result<(), String> {
         let delete_status = unsafe { FwpmFilterDeleteByKey0(engine, &filter_key) };
-        if delete_status != 0 && delete_status != FWP_E_NOT_FOUND as u32 {
+        if delete_status != 0 && delete_status != FWP_E_FILTER_NOT_FOUND as u32 {
             return Err(wfp_error(
                 "failed to replace stale Windows sandbox WFP loopback allow filter",
                 delete_status,
@@ -2723,8 +2729,8 @@ mod windows_network {
         }
     }
 
-    fn delete_optional(status: u32, label: &str) -> Result<(), String> {
-        if status == 0 || status == FWP_E_NOT_FOUND as u32 {
+    fn delete_optional(status: u32, label: &str, not_found_status: u32) -> Result<(), String> {
+        if status == 0 || status == not_found_status {
             Ok(())
         } else {
             Err(wfp_error(label, status))
