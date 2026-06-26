@@ -71,6 +71,7 @@ struct LlmChatCompletionRequest {
     provider: String,
     api_key: Option<String>,
     body: Value,
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,6 +82,7 @@ struct LlmChatCompletionStreamRequest {
     provider: String,
     api_key: Option<String>,
     body: Value,
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -105,7 +107,10 @@ async fn llm_chat_completion(
     let api_key =
         credentials::resolve_ai_provider_secret(&request.provider, request.api_key.as_deref())?;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(resolve_llm_timeout_secs(
+            request.timeout_secs,
+            30,
+        )))
         .build()
         .map_err(|_| "network: failed to create HTTP client".to_string())?;
 
@@ -134,7 +139,10 @@ async fn llm_chat_completion_stream(
     let api_key =
         credentials::resolve_ai_provider_secret(&request.provider, request.api_key.as_deref())?;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(resolve_llm_timeout_secs(
+            request.timeout_secs,
+            120,
+        )))
         .build()
         .map_err(|_| "network: failed to create HTTP client".to_string())?;
     let mut body = request.body;
@@ -214,6 +222,10 @@ async fn llm_chat_completion_stream(
     .to_string();
 
     Ok(LlmChatCompletionResponse { status, body })
+}
+
+fn resolve_llm_timeout_secs(requested: Option<u64>, default_secs: u64) -> u64 {
+    requested.unwrap_or(default_secs).clamp(5, 600)
 }
 
 fn next_sse_event(buffer: &str) -> Option<(&str, usize)> {
