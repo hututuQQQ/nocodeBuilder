@@ -914,6 +914,46 @@ mod tests {
     }
 
     #[test]
+    fn write_back_rejects_oversized_allowed_file_without_overwriting_project() {
+        let root = std::env::temp_dir().join(format!(
+            "ncb-sandbox-write-back-size-test-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let project = root.join("project");
+        let workspace_root = root.join("workspace");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&workspace_root).unwrap();
+        fs::write(project.join("package-lock.json"), "real lock").unwrap();
+        let oversized_lock = workspace_root.join("package-lock.json");
+        fs::File::create(&oversized_lock)
+            .unwrap()
+            .set_len(MAX_WRITE_BACK_BYTES + 1)
+            .unwrap();
+
+        let workspace = SandboxWorkspace {
+            project_id: "test".to_string(),
+            kind: SandboxWorkspaceKind::Run,
+            workspace_root,
+            cache_root: root.join("cache"),
+            tmp_root: root.join("tmp"),
+            source_manifest_path: root.join("state").join("source-manifest.json"),
+        };
+
+        let error = workspace
+            .write_back_allowed_outputs(&project)
+            .expect_err("oversized sandbox output should be rejected");
+
+        assert_eq!(error.kind, SandboxErrorKind::PolicyDenied);
+        assert!(error.message.contains("oversized sandbox output"));
+        assert_eq!(
+            fs::read_to_string(project.join("package-lock.json")).unwrap(),
+            "real lock"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn run_and_dev_workspaces_do_not_delete_each_other() {
         with_sandbox_root("ncb-sandbox-workspace-lifecycle", |sandbox_root| {
             let project = sandbox_root.join("real-project");
