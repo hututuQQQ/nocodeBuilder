@@ -118,6 +118,33 @@ Use the Tauri APIs:
 
 On Windows, `initialize_windows_sandbox` provisions app-owned directories, the hidden sandbox account/group, restricted account logon rights, app-owned ACLs, loopback-only WFP allow filters, default outbound WFP block filters, and the credential-store password used for sandbox-account runner launch. `get_sandbox_status` reports ready only when those real resources verify successfully; progress markers alone are insufficient. `reset_project_sandbox(projectId)` refuses to delete project sandbox data while that project's dev server is running. On Linux, status is `unsupported` and command execution fails closed.
 
+## Manual Acceptance Runbook
+
+Use this runbook before moving the PR out of draft. These checks must be performed from the packaged app path on real target hosts. Running `npm` or `pnpm` directly in the project directory is not valid acceptance evidence.
+
+Windows clean-machine acceptance:
+
+1. Start from a Windows host without a preexisting `NCB_Sandbox` account, `NoCodeBuilderSandboxUsers` group, or nocodeBuilder WFP filters. Install the packaged app built from the PR head.
+2. Launch the app as a normal interactive user and call `get_sandbox_status`. Record `setup-required`.
+3. Call `initialize_windows_sandbox`, accept UAC, and call `get_sandbox_status` again. Record `ready`, the `windows-native` backend, policy version, and managed Node version.
+4. Create a generated project containing `.env`, `.env.local`, `.aibuilder`, and a script that attempts to read `USERPROFILE/.ssh` and those project secrets. Run the script through an allowlisted sandboxed package-manager command from the app. Record that the reads fail and command metadata reports the Windows sandbox backend.
+5. Run sandboxed `npm run build`. Record that the command executes as `NCB_Sandbox`, not the interactive user, and that no bare host npm/pnpm fallback is used.
+6. Run sandboxed `npm install`. Record managed-proxy loopback traffic only, with allowed registry hosts logged by the trusted proxy and no unrestricted public outbound path.
+7. Run a script that attempts public outbound network access during build/test. Record failure under the WFP policy.
+8. Start a sandboxed dev server. Record a `127.0.0.1` URL, HTTP readiness success, and no `0.0.0.0` bind.
+9. Start a script that creates a delayed child or descendant process, then stop/cancel the command or dev server. Record that the Job Object cleanup removes descendants.
+10. While a dev server is running, call `reset_project_sandbox(projectId)`. Record that it refuses to delete active dev-server state; after stopping the server, record that reset succeeds.
+
+macOS full acceptance:
+
+1. Start from a macOS host with `/usr/bin/sandbox-exec` present. Install the packaged app built from the PR head.
+2. Launch the app and call `get_sandbox_status`. Record `ready`, the `macos-seatbelt` backend, policy version, and managed Node version.
+3. Create a generated project containing `.env`, `.env.local`, `.aibuilder`, and a script that attempts to read `HOME/.ssh` and the real project secrets. Run the script through an allowlisted sandboxed package-manager command from the app. Record that the reads fail under Seatbelt.
+4. Run sandboxed `npm install`. Record successful dependency fetches through the managed local proxy only.
+5. Run sandboxed `npm run build`. Record build success and failed public network access from build/test code.
+6. Run sandboxed `npm run dev`. Record a `127.0.0.1` URL, HTTP readiness success, and no `0.0.0.0` bind.
+7. Stop/cancel the command or dev server. Record that the process group is terminated and no sandboxed descendants remain.
+
 ## Platform Verification Status
 
 General Rust regression coverage has passed in GitHub Actions PR checks (`test`, `cargo test --manifest-path src-tauri/Cargo.toml`). The PR body records the latest passing run id and completion times for the current head. This coverage includes dev-server lifecycle coverage for `commands::dev_server::tests::stop_all_dev_servers_drains_registry_and_cleans_dev_workspaces`, dev-server random localhost port allocation coverage in `sandbox::manager::tests::local_server_policy_allocates_loopback_port`, and managed-proxy loopback-target rejection coverage in `sandbox::network::tests::proxy_client_rejects_loopback_targets_even_when_allowlisted`.
