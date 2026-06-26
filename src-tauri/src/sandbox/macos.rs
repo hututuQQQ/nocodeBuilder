@@ -337,6 +337,13 @@ mod tests {
             denied_roots: vec![
                 PathBuf::from("/Users/alice"),
                 PathBuf::from("/Users/alice/.ssh"),
+                PathBuf::from("/Users/alice/.aws"),
+                PathBuf::from("/Users/alice/.config/gcloud"),
+                PathBuf::from("/Users/alice/.azure"),
+                PathBuf::from("/Users/alice/.kube"),
+                PathBuf::from("/Users/alice/.docker"),
+                PathBuf::from("/Users/alice/.npmrc"),
+                PathBuf::from("/Users/alice/.netrc"),
                 PathBuf::from("/Users/alice/projects/real-app"),
             ],
             environment: BTreeMap::new(),
@@ -353,7 +360,21 @@ mod tests {
 
         assert!(profile.contains("(allow file-write* file-test-existence (subpath \"/Users/alice/Library/Application Support/nocodeBuilder/sandbox/workspaces/project/runs/run-1\"))"));
         assert!(!profile.contains("(deny file* (subpath \"/Users/alice\"))"));
-        assert!(profile.contains("(deny file* (subpath \"/Users/alice/.ssh\"))"));
+        for sensitive in [
+            "/Users/alice/.ssh",
+            "/Users/alice/.aws",
+            "/Users/alice/.config/gcloud",
+            "/Users/alice/.azure",
+            "/Users/alice/.kube",
+            "/Users/alice/.docker",
+            "/Users/alice/.npmrc",
+            "/Users/alice/.netrc",
+        ] {
+            assert!(
+                profile.contains(&format!("(deny file* (subpath \"{sensitive}\"))")),
+                "expected Seatbelt profile to deny {sensitive}"
+            );
+        }
         assert!(profile.contains("(deny file* (subpath \"/Users/alice/projects/real-app\"))"));
     }
 

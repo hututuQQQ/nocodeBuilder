@@ -319,6 +319,17 @@ fn denied_roots(project_dir: &Path) -> Vec<PathBuf> {
     push_unique_root(&mut denied, project_dir.to_path_buf());
     push_unique_root(&mut denied, project_dir.join(".aibuilder"));
     push_unique_root(&mut denied, project_dir.join(".env"));
+    if let Ok(entries) = std::fs::read_dir(project_dir) {
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(".env."))
+            {
+                push_unique_root(&mut denied, entry.path());
+            }
+        }
+    }
 
     for home_key in ["HOME", "USERPROFILE"] {
         if let Some(home) = std::env::var_os(home_key) {
@@ -413,6 +424,7 @@ mod tests {
             let project = home.join("projects").join("app");
             let sandbox_root = local_app_data.join("nocodeBuilder").join("sandbox");
             std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(project.join(".env.local"), "SECRET=1").unwrap();
             std::env::set_var("HOME", &home);
             std::env::set_var("USERPROFILE", &home);
             std::env::set_var("LOCALAPPDATA", &local_app_data);
@@ -427,10 +439,35 @@ mod tests {
             assert!(denied.contains(&project));
             assert!(denied.contains(&project.join(".aibuilder")));
             assert!(denied.contains(&project.join(".env")));
-            assert!(denied.contains(&home.join(".ssh")));
-            assert!(denied.contains(&home.join(".aws")));
+            assert!(denied.contains(&project.join(".env.local")));
+            for sensitive in [
+                ".ssh", ".aws", ".azure", ".kube", ".docker", ".npmrc", ".netrc",
+            ] {
+                assert!(
+                    denied.contains(&home.join(sensitive)),
+                    "expected HOME credential root {sensitive} to be denied"
+                );
+            }
             assert!(denied.contains(&home.join(".config").join("gcloud")));
-            assert!(denied.contains(&home.join(".npmrc")));
+            for sensitive in [
+                PathBuf::from("gcloud"),
+                PathBuf::from("Google").join("Cloud SDK"),
+                PathBuf::from("Microsoft").join("Azure"),
+                PathBuf::from("Microsoft").join("UserSecrets"),
+                PathBuf::from("Docker"),
+                PathBuf::from("NuGet").join("NuGet.Config"),
+            ] {
+                assert!(
+                    denied.contains(&app_data.join(&sensitive)),
+                    "expected APPDATA credential root {} to be denied",
+                    sensitive.display()
+                );
+                assert!(
+                    denied.contains(&local_app_data.join(&sensitive)),
+                    "expected LOCALAPPDATA credential root {} to be denied",
+                    sensitive.display()
+                );
+            }
 
             let _ = std::fs::remove_dir_all(root);
         });
