@@ -368,6 +368,38 @@ mod tests {
     use std::ffi::OsString;
 
     #[test]
+    fn rejects_host_path_node_runtime_resolution() {
+        let resolved = ResolvedCommand {
+            args: vec!["run".to_string(), "build".to_string()],
+            executable: PathBuf::from("npm"),
+            path_prepend: Vec::new(),
+            runtime_root: PathBuf::new(),
+            runtime_bin: PathBuf::new(),
+            runtime_version: "host-override".to_string(),
+        };
+
+        let error = validate_managed_runtime(&resolved).expect_err("host PATH runtime rejected");
+
+        assert_eq!(error.kind, SandboxErrorKind::PolicyDenied);
+        assert!(error.message.contains("managed Node"));
+    }
+
+    #[test]
+    fn accepts_absolute_managed_node_runtime_resolution() {
+        let root = std::env::temp_dir().join("ncb-managed-runtime-test");
+        let resolved = ResolvedCommand {
+            args: vec!["run".to_string(), "build".to_string()],
+            executable: root.join("bin").join("npm.cmd"),
+            path_prepend: vec![root.join("bin")],
+            runtime_root: root.clone(),
+            runtime_bin: root.join("bin"),
+            runtime_version: "v-test".to_string(),
+        };
+
+        validate_managed_runtime(&resolved).expect("managed runtime accepted");
+    }
+
+    #[test]
     fn denied_roots_do_not_cover_home_or_sandbox_root() {
         crate::test_support::with_env_lock(|| {
             let _env = EnvGuard::capture();
