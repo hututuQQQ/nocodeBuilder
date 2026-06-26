@@ -28,6 +28,7 @@ export type DevelopmentSpec = {
   completedAt?: string;
   cancelledAt?: string;
   failureMessage?: string;
+  blockDiagnosis?: import("./blockTriage").SpecBlockDiagnosis;
   finalVerification?: SpecFinalVerification;
 };
 

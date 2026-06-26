@@ -27,6 +27,10 @@ import { AgentVerifier, type BaselineCommandResults } from "../agent-core/verifi
 import { compileTaskContract } from "../agent-core/contract/taskContract";
 import type { TaskContract } from "../agent-core/types";
 import {
+  createTaskManifestFromContract,
+  type TaskManifest,
+} from "../agent-core/manifest/taskManifest";
+import {
   RunController,
   type HeadlessModelAction,
   readRunDriveStateMetadata,
@@ -86,6 +90,7 @@ type RunApplicationRuntimeInput = {
   contract?: TaskContract;
   conversationId?: string;
   existingRun?: AgentRun;
+  manifest?: TaskManifest;
   mode: ApplicationRuntimeMode;
   project: ProjectInfo;
   resumeObservation?: AgentObservation;
@@ -163,6 +168,7 @@ export async function runSpecTaskRuntime({
   runId,
   store,
   taskObjective,
+  manifest,
 }: {
   contract: TaskContract;
   conversationId: string;
@@ -173,11 +179,13 @@ export async function runSpecTaskRuntime({
   runId?: string;
   store: StoreAccess;
   taskObjective: string;
+  manifest?: TaskManifest;
 }): Promise<ApplicationRunResult> {
   return runApplicationRuntime({
     contract,
     conversationId,
     existingRun,
+    manifest,
     mode: executionMode,
     project,
     resumeObservation,
@@ -213,6 +221,17 @@ async function runApplicationRuntime(
         selectedSiteNodeId: store.get().selectedSiteNodeId,
         taskType: mode === "generate" ? "full_site" : undefined,
       });
+  const conversationId =
+    input.conversationId ??
+    store.get().currentConversation?.id ??
+    "conversation-default";
+  const manifest = existingRun?.manifest ?? input.manifest ?? createTaskManifestFromContract({
+    contract,
+    conversationId,
+    projectGoal: userRequest,
+    projectId: project.id,
+    rawUserGoal: userRequest,
+  });
 
   store.set((state) => ({
     isGeneratingProject: mode === "generate",
@@ -261,13 +280,11 @@ async function runApplicationRuntime(
             baselineCommandResults: session.baselineCommandResults,
             baselinePackageJson: session.baselinePackageJson,
             contract,
-            conversationId:
-              input.conversationId ??
-              store.get().currentConversation?.id ??
-              "conversation-default",
+            conversationId,
             initialObservations: input.resumeObservation
               ? [JSON.stringify(input.resumeObservation)]
               : undefined,
+            manifest,
             projectId: project.id,
             runId: controllerRunId,
           },
@@ -932,6 +949,12 @@ async function buildAgentStepContext({
     observations: dynamicContext.observations,
     previewUrl: state.previewUrl,
     projectName: project.name,
+    manifest: context.run.manifest ?? createTaskManifestFromContract({
+      contract: context.run.contract,
+      conversationId: context.run.conversationId,
+      projectId: context.run.projectId,
+      rawUserGoal: userRequest,
+    }),
     recentMessages,
     runContextSummary: context.runContextSummary,
     specContext: specContext ?? undefined,
@@ -1673,7 +1696,9 @@ async function buildCompactSpecContext({
     brief: revision.brief,
     currentTask: {
       acceptanceCriteriaIds: task.acceptanceCriteriaIds,
-      allowedPaths: task.allowedPaths,
+      allowedPaths:
+        run.manifest?.runtimeContract.compiledAllowedPaths ??
+        task.allowedPaths,
       dependencyIds: task.dependencyIds,
       expectedFiles: task.expectedFiles,
       id: task.id,

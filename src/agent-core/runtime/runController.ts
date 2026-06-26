@@ -18,6 +18,11 @@ import {
 } from "../pathScope";
 import { normalizeApprovalHash, PolicyEngine } from "../policy/policyEngine";
 import { getCoreToolDefinition, validateCoreToolInput } from "../tools/toolRegistry";
+import {
+  createTaskManifestFromContract,
+  type TaskManifest,
+} from "../manifest/taskManifest";
+import { checkRunDrift, type DriftCheckResult } from "./driftGuard";
 import { isTerminalAgentRunStatus, RunStateMachine } from "./runStateMachine";
 
 export type HeadlessModelAction =
@@ -176,6 +181,7 @@ export type StartRunInput = {
   contract: TaskContract;
   conversationId: string;
   initialObservations?: unknown[];
+  manifest?: TaskManifest;
   projectId: string;
   runId?: string;
 };
@@ -202,6 +208,7 @@ type RunDriveState = {
   readSnapshots: AgentRunCheckpoint["readSnapshots"];
   repairFeedback: string[];
   consecutiveModelValidationFailures: number;
+  consecutiveDriftFailures: number;
   loopGuard: LoopGuardState;
   progressGuard: ProgressGuardState;
   runContextSummary: RunContextSummary;
@@ -237,6 +244,11 @@ export class RunController {
     const created = this.machine.createRun({
       contract: input.contract,
       conversationId: input.conversationId,
+      manifest: input.manifest ?? createTaskManifestFromContract({
+        contract: input.contract,
+        conversationId: input.conversationId,
+        projectId: input.projectId,
+      }),
       now: this.ports.clock.now(),
       projectId: input.projectId,
       runId: input.runId,
@@ -265,7 +277,7 @@ export class RunController {
       throw new Error(`Run ${runId} was not found.`);
     }
 
-    let run = loaded;
+    let run: AgentRun = ensureRunManifest(loaded);
     const previousStatus = run.status;
 
     if (isTerminalAgentRunStatus(run.status)) {
@@ -358,6 +370,7 @@ export class RunController {
 
     while (!isTerminalAgentRunStatus(run.status)) {
       run = await this.refreshRunRequests(run);
+      run = ensureRunManifest(run);
 
       if (run.cancelRequested && run.status !== "cancelled") {
         run = await this.commit(run, this.machine.transition(run, { type: "cancel" }));
@@ -418,6 +431,26 @@ export class RunController {
         continue;
       }
 
+      const runWithManifest = ensureRunManifest(run);
+      run = runWithManifest;
+      const driftCheck = checkRunDrift({
+        manifest: runWithManifest.manifest,
+        action,
+        changedFiles: [...state.changedFiles],
+        recentObservations: context.observations.slice(-8),
+      });
+
+      if (!driftCheck.ok) {
+        run = await this.recordDriftFailure(run, state, driftCheck);
+
+        if (isTerminalAgentRunStatus(run.status)) {
+          return run;
+        }
+
+        continue;
+      }
+
+      state.consecutiveDriftFailures = 0;
       state.consecutiveModelValidationFailures = 0;
       run = await this.ports.runStore.recordProgress(
         run,
@@ -525,6 +558,56 @@ export class RunController {
 
     await this.saveCheckpoint(run, state, "model-validation-failed");
     return run;
+  }
+
+  private async recordDriftFailure(
+    run: AgentRun,
+    state: RunDriveState,
+    driftCheck: DriftCheckResult,
+  ): Promise<AgentRun> {
+    state.consecutiveDriftFailures += 1;
+    const summary = `Drift guard rejected model action: ${driftCheck.reason}`;
+    state.observations.push(
+      JSON.stringify({
+        content: [
+          driftCheck.reason,
+          driftCheck.suggestedAction
+            ? `suggestedAction=${driftCheck.suggestedAction}`
+            : "",
+          "TaskManifest is the source of truth. Choose a corrected next action that stays within the manifest.",
+        ].filter(Boolean).join("\n"),
+        ok: false,
+        summary,
+        tool: "drift_guard",
+      }),
+    );
+
+    await this.ports.eventStore.append({
+      runId: run.id,
+      type: "model.failed",
+      timestamp: this.ports.clock.now(),
+      payload: {
+        reason: driftCheck.reason,
+        retryable: state.consecutiveDriftFailures < 2,
+        suggestedAction: driftCheck.suggestedAction,
+        type: "drift_guard",
+      },
+    });
+
+    if (state.consecutiveDriftFailures < 2) {
+      await this.saveCheckpoint(run, state, "drift-guard-observation");
+      return run;
+    }
+
+    const failedRun = await this.commit(
+      run,
+      this.machine.transition(run, {
+        reason: summary,
+        type: "fail",
+      }),
+    );
+    await this.saveCheckpoint(failedRun, state, "drift-guard-failed");
+    return failedRun;
   }
 
   private async executeToolAction(
@@ -1356,6 +1439,7 @@ export class RunController {
     state: RunDriveState,
     signal?: AbortSignal,
   ): Promise<RunContextBundle> {
+    run = ensureRunManifest(run);
     const events = await this.ports.eventStore.list(run.id);
     const steeringEvents = events.filter(
       (event) => event.type === "steering.received" && event.sequence > state.steeringWatermark,
@@ -1647,6 +1731,7 @@ export class RunController {
         repairFeedback: [...checkpoint.repairFeedback],
         consecutiveModelValidationFailures:
           metadata.consecutiveModelValidationFailures ?? 0,
+        consecutiveDriftFailures: metadata.consecutiveDriftFailures ?? 0,
         loopGuard: metadata.loopGuard ?? {},
         progressGuard:
           metadata.progressGuard ?? createEmptyProgressGuardState(),
@@ -1735,11 +1820,25 @@ function createEmptyDriveState(
     readSnapshots: [],
     repairFeedback: [],
     consecutiveModelValidationFailures: 0,
+    consecutiveDriftFailures: 0,
     loopGuard: {},
     progressGuard: createEmptyProgressGuardState(),
     runContextSummary: createEmptyRunContextSummary(),
     steeringWatermark: 0,
   };
+}
+
+function ensureRunManifest(run: AgentRun): AgentRun & { manifest: TaskManifest } {
+  return run.manifest
+    ? run as AgentRun & { manifest: TaskManifest }
+    : {
+        ...run,
+        manifest: createTaskManifestFromContract({
+          contract: run.contract,
+          conversationId: run.conversationId,
+          projectId: run.projectId,
+        }),
+      };
 }
 
 const MAX_MODEL_VALIDATION_OBSERVATIONS = 2;
@@ -2460,6 +2559,7 @@ type CheckpointDriveStateMetadata = {
   baselineArtifactId?: string;
   baselineCommandResults?: Record<string, unknown>;
   baselinePackageJson?: string | null;
+  consecutiveDriftFailures?: number;
   consecutiveModelValidationFailures?: number;
   externalEffects?: string[];
   expectedFileEvidenceAutoReadPaths?: string[];
@@ -2483,6 +2583,7 @@ function writeDriveStateMetadata(state: RunDriveState) {
       baselineArtifactId: state.baselineArtifactId,
       baselineCommandResults: state.baselineCommandResults,
       baselinePackageJson: state.baselinePackageJson,
+      consecutiveDriftFailures: state.consecutiveDriftFailures,
       consecutiveModelValidationFailures: state.consecutiveModelValidationFailures,
       externalEffects: state.externalEffects,
       expectedFileEvidenceAutoReadPaths: state.expectedFileEvidenceAutoReadPaths,
@@ -2529,6 +2630,9 @@ export function readRunDriveStateMetadata(plan: unknown): CheckpointDriveStateMe
         : undefined,
     consecutiveModelValidationFailures: readNonNegativeInteger(
       metadataRecord.consecutiveModelValidationFailures,
+    ),
+    consecutiveDriftFailures: readNonNegativeInteger(
+      metadataRecord.consecutiveDriftFailures,
     ),
     externalEffects: readOptionalStringArray(metadataRecord.externalEffects),
     expectedFileEvidenceAutoReadPaths: readOptionalStringArray(

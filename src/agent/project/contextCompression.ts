@@ -2,6 +2,7 @@ import type {
   AgentBudgetState,
   AgentRun,
 } from "../../agent-core/types";
+import { AGENT_CONTEXT_BUDGET } from "../../agent-core/budget/agentBudget";
 import type {
   AgentObservation,
   AgentStepContext,
@@ -9,8 +10,10 @@ import type {
   ContextCompressionReport,
 } from "./types";
 
-export const CONTEXT_ENVELOPE_CHAR_BUDGET = 55_000;
-export const CRITICAL_CONTEXT_ENVELOPE_CHAR_BUDGET = 42_000;
+export const CONTEXT_ENVELOPE_CHAR_BUDGET =
+  AGENT_CONTEXT_BUDGET.normalContextChars;
+export const CRITICAL_CONTEXT_ENVELOPE_CHAR_BUDGET =
+  AGENT_CONTEXT_BUDGET.criticalContextChars;
 
 const FILE_TREE_CHAR_BUDGET = 8_000;
 const DIAGNOSTICS_CHAR_BUDGET = 6_000;
@@ -53,6 +56,7 @@ export function compressAgentStepContext(context: AgentStepContext): AgentStepCo
     contextReport: createContextReport(rawChars, 0, context),
     diagnostics: compactNullableText(context.diagnostics, DIAGNOSTICS_CHAR_BUDGET),
     fileTree: compactNullableText(context.fileTree, FILE_TREE_CHAR_BUDGET),
+    manifest: context.manifest,
     memory: context.memory
       ? {
           ...context.memory,
@@ -352,10 +356,13 @@ function createMinimalContextForHardCap(context: AgentStepContext): AgentStepCon
     specContext: context.specContext
       ? {
           ...context.specContext,
-          acceptanceCriteria: context.specContext.acceptanceCriteria.slice(0, 6).map((criterion) => ({
-            ...criterion,
-            description: compactText(criterion.description, 180),
-          })),
+          acceptanceCriteria: selectRelevantSpecRequirements(context.specContext)
+            .primaryAcceptanceCriteria
+            .concat(selectRelevantSpecRequirements(context.specContext).secondaryAcceptanceCriteria.slice(0, 6))
+            .map((criterion) => ({
+              ...criterion,
+              description: compactText(criterion.description, 180),
+            })),
           brief: compactText(context.specContext.brief, 220),
           currentTask: {
             ...context.specContext.currentTask,
@@ -373,10 +380,13 @@ function createMinimalContextForHardCap(context: AgentStepContext): AgentStepCon
           },
           goal: compactText(context.specContext.goal, 220),
           relatedTasks: [],
-          requirements: context.specContext.requirements.slice(0, 6).map((requirement) => ({
-            ...requirement,
-            description: compactText(requirement.description, 160),
-          })),
+          requirements: selectRelevantSpecRequirements(context.specContext)
+            .primaryRequirements
+            .concat(selectRelevantSpecRequirements(context.specContext).secondaryRequirements.slice(0, 6))
+            .map((requirement) => ({
+              ...requirement,
+              description: compactText(requirement.description, 160),
+            })),
         }
       : undefined,
     steering: context.steering.slice(-3).map((item) => compactText(item, 220)),
@@ -442,9 +452,25 @@ function compactBackendContext(context: AgentStepContext["backend"]) {
 }
 
 function compactSpecContext(context: CompactSpecContext): CompactSpecContext {
+  const selectedRequirements = selectRelevantSpecRequirements(context);
+  const requirementBudget = Math.max(
+    12,
+    selectedRequirements.primaryRequirements.length,
+  );
+  const criterionBudget = Math.max(
+    12,
+    selectedRequirements.primaryAcceptanceCriteria.length,
+  );
+
   return {
     ...context,
-    acceptanceCriteria: context.acceptanceCriteria.slice(0, 12).map((criterion) => ({
+    acceptanceCriteria: [
+      ...selectedRequirements.primaryAcceptanceCriteria,
+      ...selectedRequirements.secondaryAcceptanceCriteria.slice(
+        0,
+        Math.max(0, criterionBudget - selectedRequirements.primaryAcceptanceCriteria.length),
+      ),
+    ].map((criterion) => ({
       ...criterion,
       description: compactText(criterion.description, 420),
     })),
@@ -468,10 +494,45 @@ function compactSpecContext(context: CompactSpecContext): CompactSpecContext {
       ...task,
       title: compactText(task.title, 220),
     })),
-    requirements: context.requirements.slice(0, 12).map((requirement) => ({
+    requirements: [
+      ...selectedRequirements.primaryRequirements,
+      ...selectedRequirements.secondaryRequirements.slice(
+        0,
+        Math.max(0, requirementBudget - selectedRequirements.primaryRequirements.length),
+      ),
+    ].map((requirement) => ({
       ...requirement,
       description: compactText(requirement.description, 420),
     })),
+  };
+}
+
+function selectRelevantSpecRequirements(context: CompactSpecContext): {
+  primaryRequirements: CompactSpecContext["requirements"];
+  primaryAcceptanceCriteria: CompactSpecContext["acceptanceCriteria"];
+  secondaryRequirements: CompactSpecContext["requirements"];
+  secondaryAcceptanceCriteria: CompactSpecContext["acceptanceCriteria"];
+} {
+  const requirementIds = new Set(context.currentTask.requirementIds);
+  const acceptanceCriteriaIds = new Set(context.currentTask.acceptanceCriteriaIds);
+  const primaryRequirements = context.requirements.filter((requirement) =>
+    requirementIds.has(requirement.id),
+  );
+  const secondaryRequirements = context.requirements.filter((requirement) =>
+    !requirementIds.has(requirement.id),
+  );
+  const primaryAcceptanceCriteria = context.acceptanceCriteria.filter((criterion) =>
+    acceptanceCriteriaIds.has(criterion.id),
+  );
+  const secondaryAcceptanceCriteria = context.acceptanceCriteria.filter((criterion) =>
+    !acceptanceCriteriaIds.has(criterion.id),
+  );
+
+  return {
+    primaryRequirements,
+    primaryAcceptanceCriteria,
+    secondaryRequirements,
+    secondaryAcceptanceCriteria,
   };
 }
 

@@ -1,4 +1,5 @@
 import type { TaskContract, TaskType } from "../types";
+import { AGENT_TASK_BUDGETS } from "../budget/agentBudget";
 
 const DEFAULT_ALLOWED_PATHS = [
   "app/**",
@@ -154,6 +155,10 @@ function isReadOnlyQuestion(objective: string, lowerObjective: string) {
     return true;
   }
 
+  if (/(^|\b)(answer|reply|respond)\b|回答|回复/i.test(objective)) {
+    return true;
+  }
+
   if (hasImplementationIntent(objective)) {
     return false;
   }
@@ -170,38 +175,5 @@ function hasBackendFeatureIntent(objective: string) {
 }
 
 function budgetForTaskType(taskType: TaskType): TaskContract["budget"] {
-  switch (taskType) {
-    case "answer":
-      return {
-        maxModelTurns: 4,
-        maxToolCalls: 8,
-        maxMutations: 0,
-        maxRepairCycles: 0,
-      };
-    case "copy_edit":
-    case "style_edit":
-    case "component_edit":
-      return {
-        maxModelTurns: 14,
-        maxToolCalls: 30,
-        maxMutations: 8,
-        maxRepairCycles: 2,
-      };
-    case "add_page":
-    case "backend_feature":
-    case "full_site":
-      return {
-        maxModelTurns: 16,
-        maxToolCalls: 52,
-        maxMutations: 18,
-        maxRepairCycles: 3,
-      };
-    case "deployment":
-      return {
-        maxModelTurns: 4,
-        maxToolCalls: 12,
-        maxMutations: 2,
-        maxRepairCycles: 1,
-      };
-  }
+  return { ...AGENT_TASK_BUDGETS[taskType] };
 }

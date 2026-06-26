@@ -8,6 +8,10 @@ import type {
   TaskContract,
   VerificationReport,
 } from "../types";
+import {
+  createTaskManifestFromContract,
+  type TaskManifest,
+} from "../manifest/taskManifest";
 
 export type RunTransition =
   | { type: "start" }
@@ -153,12 +157,14 @@ export class RunStateMachine {
   createRun({
     contract,
     conversationId,
+    manifest,
     now = new Date().toISOString(),
     projectId,
     runId = createId("run"),
   }: {
     contract: TaskContract;
     conversationId: string;
+    manifest?: TaskManifest;
     now?: string;
     projectId: string;
     runId?: string;
@@ -168,6 +174,11 @@ export class RunStateMachine {
       projectId,
       conversationId,
       contract,
+      manifest: manifest ?? createTaskManifestFromContract({
+        contract,
+        conversationId,
+        projectId,
+      }),
       status: "created",
       phase: "created",
       stateVersion: 0,

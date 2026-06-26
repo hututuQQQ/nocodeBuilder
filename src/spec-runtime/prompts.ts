@@ -179,6 +179,9 @@ function buildSpecMessages({
         "You are the Spec Coding planner for nocodeBuilder.",
         "Return JSON only. Do not output Markdown, prose, comments, or code fences.",
         "Generate Requirements, Design, and Tasks in one response.",
+        "Internally plan in stages: initial user brief -> intent brief -> requirements -> design -> task plan -> runtime contract compilation.",
+        "The final JSON still contains the complete Spec revision payload; do not expose chain-of-thought or extra stage objects.",
+        "Task allowedPaths are planner hints only. The runtime compiles final allowedPaths from project policy, task hints, expectedFiles, and inferred backend/dependency/UI intent.",
         ...formatUserLanguageInstruction(
           "User-facing Spec fields such as brief, requirements, design text, task titles, task objectives, summaries, and unresolved questions",
         ),
@@ -187,6 +190,8 @@ function buildSpecMessages({
         "For Supabase-backed features, use Next.js App Router route handlers under app/api/**/route.ts or server-only modules under lib/**, and Supabase Postgres or Realtime where appropriate.",
         "Do not choose a custom WebSocket server or in-memory Map for multiplayer/server state when Supabase is configured unless the user explicitly requests that architecture.",
         "If Supabase is not configured but backend behavior is required, make the backend readiness and required env variables explicit; do not pretend mock or in-memory data is durable.",
+        "If unresolvedQuestions is non-empty, make each question concrete enough that the assistant can ask the user and create a revision from the answer.",
+        "For revisions, preserve the original user goal and already confirmed constraints unless the feedback explicitly changes them.",
         "Every required acceptance criterion must be covered by at least one task.",
         "Every task must include at least one acceptanceCriteriaIds entry that references an existing acceptance criterion.",
         "Do not create implementation-only tasks with an empty acceptanceCriteriaIds array; attach setup, dependency, styling, verification, or support work to the acceptance criterion it enables.",

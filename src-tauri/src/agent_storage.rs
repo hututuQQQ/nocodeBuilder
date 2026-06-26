@@ -18,7 +18,7 @@ const ARTIFACTS_DIR: &str = "artifacts";
 const METADATA_DIR: &str = ".aibuilder";
 const SITE_SPEC_FILE: &str = "site-spec.json";
 const SOURCE_MAP_FILE: &str = "source-map.json";
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +27,7 @@ pub struct AgentRunRecord {
     pub project_id: String,
     pub conversation_id: String,
     pub contract: Value,
+    pub manifest: Value,
     pub status: String,
     pub phase: String,
     pub state_version: i64,
@@ -49,6 +50,7 @@ pub struct AgentRunCreateInput {
     pub project_id: String,
     pub conversation_id: String,
     pub contract: Value,
+    pub manifest: Value,
     pub status: String,
     pub phase: String,
     pub started_at: String,
@@ -795,6 +797,7 @@ async fn init_database(pool: &SqlitePool) -> Result<(), String> {
             project_id TEXT NOT NULL,
             conversation_id TEXT NOT NULL,
             contract_json TEXT NOT NULL,
+            manifest_json TEXT NOT NULL DEFAULT '{}',
             status TEXT NOT NULL,
             phase TEXT NOT NULL,
             state_version INTEGER NOT NULL,
@@ -959,6 +962,8 @@ async fn create_agent_run_with_pool(
 ) -> Result<AgentRunRecord, String> {
     let contract_json = serde_json::to_string(&run.contract)
         .map_err(|error| format!("agent-storage: failed to encode contract: {error}"))?;
+    let manifest_json = serde_json::to_string(&run.manifest)
+        .map_err(|error| format!("agent-storage: failed to encode manifest: {error}"))?;
     let is_write_run = is_write_task_contract(&run.contract);
 
     let mut transaction = pool.begin().await.map_err(|error| {
@@ -992,16 +997,17 @@ async fn create_agent_run_with_pool(
     sqlx::query(
         r#"
         INSERT INTO agent_runs (
-            id, project_id, conversation_id, contract_json, status, phase, state_version,
+            id, project_id, conversation_id, contract_json, manifest_json, status, phase, state_version,
             model_turns, tool_calls, mutation_count, repair_cycles, is_write_run,
             cancel_requested, pause_requested, started_at, updated_at, completed_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0, 0, 0, 0, ?7, 0, 0, ?8, ?9, NULL)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, 0, 0, 0, ?8, 0, 0, ?9, ?10, NULL)
         "#,
     )
     .bind(&run.id)
     .bind(&run.project_id)
     .bind(&run.conversation_id)
     .bind(contract_json)
+    .bind(manifest_json)
     .bind(&run.status)
     .bind(&run.phase)
     .bind(bool_to_i64(is_write_run))
@@ -1389,12 +1395,18 @@ fn row_to_run(row: sqlx::sqlite::SqliteRow) -> Result<AgentRunRecord, String> {
         .map_err(|error| format!("agent-storage: invalid contract json: {error}"))?;
     let contract = serde_json::from_str(&contract_json)
         .map_err(|error| format!("agent-storage: failed to parse contract json: {error}"))?;
+    let manifest_json: String = row
+        .try_get("manifest_json")
+        .unwrap_or_else(|_| fallback_manifest_json(&contract));
+    let manifest = serde_json::from_str(&manifest_json)
+        .map_err(|error| format!("agent-storage: failed to parse manifest json: {error}"))?;
 
     Ok(AgentRunRecord {
         id: row.try_get("id").map_err(row_error)?,
         project_id: row.try_get("project_id").map_err(row_error)?,
         conversation_id: row.try_get("conversation_id").map_err(row_error)?,
         contract,
+        manifest,
         status: row.try_get("status").map_err(row_error)?,
         phase: row.try_get("phase").map_err(row_error)?,
         state_version: row.try_get("state_version").map_err(row_error)?,
@@ -1426,6 +1438,57 @@ fn row_to_event(row: sqlx::sqlite::SqliteRow) -> Result<AgentEventRecord, String
             format!("agent-storage: failed to parse event artifact ids: {error}")
         })?,
     })
+}
+
+fn fallback_manifest_json(contract: &Value) -> String {
+    let objective = contract
+        .get("objective")
+        .and_then(Value::as_str)
+        .unwrap_or("Agent task");
+    let task_type = contract
+        .get("taskType")
+        .and_then(Value::as_str)
+        .unwrap_or("component_edit");
+    let allowed_paths = contract
+        .pointer("/scope/allowedPaths")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let forbidden_paths = contract
+        .pointer("/scope/forbiddenPaths")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let expected_files = contract
+        .pointer("/source/expectedFiles")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+
+    json!({
+        "rawUserGoal": objective,
+        "mode": if contract.pointer("/source/mode").and_then(Value::as_str) == Some("spec") { "spec" } else { "chat" },
+        "projectGoal": objective,
+        "conversationId": "",
+        "projectId": "",
+        "runtimeContract": {
+            "taskType": task_type,
+            "compiledAllowedPaths": allowed_paths,
+            "forbiddenPaths": forbidden_paths,
+            "expectedFiles": expected_files,
+            "permissions": {
+                "fileWrite": contract.pointer("/permissions/fileWrite").and_then(Value::as_bool).unwrap_or(true),
+                "dependencyChange": contract.pointer("/permissions/dependencyChange").and_then(Value::as_str).unwrap_or("ask"),
+                "databaseChange": contract.pointer("/permissions/databaseChange").and_then(Value::as_str).unwrap_or("deny"),
+                "fileDelete": contract.pointer("/permissions/fileDelete").and_then(Value::as_str).unwrap_or("ask"),
+                "previewDeployment": "ask",
+                "productionDeployment": "ask"
+            }
+        },
+        "antiDriftRules": [
+            "TaskManifest is the source of truth.",
+            "Do not expand scope beyond compiledAllowedPaths."
+        ],
+        "knownRisks": []
+    })
+    .to_string()
 }
 
 fn row_to_report(row: sqlx::sqlite::SqliteRow) -> Result<VerificationReportRecord, String> {
@@ -1558,6 +1621,7 @@ fn row_to_checkpoint(row: sqlx::sqlite::SqliteRow) -> Result<AgentCheckpointReco
 
 async fn migrate_agent_run_columns(pool: &SqlitePool) -> Result<(), String> {
     let has_is_write_run = table_has_column(pool, "agent_runs", "is_write_run").await?;
+    let has_manifest_json = table_has_column(pool, "agent_runs", "manifest_json").await?;
 
     if !has_is_write_run {
         sqlx::query("ALTER TABLE agent_runs ADD COLUMN is_write_run INTEGER NOT NULL DEFAULT 1")
@@ -1565,6 +1629,15 @@ async fn migrate_agent_run_columns(pool: &SqlitePool) -> Result<(), String> {
             .await
             .map_err(|error| {
                 format!("agent-storage: failed to add run write-kind column: {error}")
+            })?;
+    }
+
+    if !has_manifest_json {
+        sqlx::query("ALTER TABLE agent_runs ADD COLUMN manifest_json TEXT NOT NULL DEFAULT '{}'")
+            .execute(pool)
+            .await
+            .map_err(|error| {
+                format!("agent-storage: failed to add run manifest column: {error}")
             })?;
     }
 
@@ -1584,6 +1657,15 @@ async fn migrate_agent_run_columns(pool: &SqlitePool) -> Result<(), String> {
             .await
             .map_err(|error| {
                 format!("agent-storage: failed to backfill run write-kind: {error}")
+            })?;
+
+        sqlx::query("UPDATE agent_runs SET manifest_json = ?1 WHERE id = ?2 AND manifest_json = '{}'")
+            .bind(fallback_manifest_json(&contract))
+            .bind(&id)
+            .execute(pool)
+            .await
+            .map_err(|error| {
+                format!("agent-storage: failed to backfill run manifest: {error}")
             })?;
     }
 
@@ -1971,26 +2053,29 @@ mod tests {
                 project_id: "project-1".to_string(),
                 conversation_id: "conversation-1".to_string(),
                 contract: json!({ "objective": "test" }),
+                manifest: json!({ "rawUserGoal": "test" }),
                 status: "created".to_string(),
                 phase: "created".to_string(),
                 started_at: "2026-01-01T00:00:00Z".to_string(),
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
             };
             let contract_json = serde_json::to_string(&run.contract).expect("contract json");
+            let manifest_json = serde_json::to_string(&run.manifest).expect("manifest json");
 
             sqlx::query(
                 r#"
                 INSERT INTO agent_runs (
-                    id, project_id, conversation_id, contract_json, status, phase,
+                    id, project_id, conversation_id, contract_json, manifest_json, status, phase,
                     state_version, model_turns, tool_calls, mutation_count, repair_cycles,
                     cancel_requested, pause_requested, started_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0, 0, 0, 0, 0, 0, ?7, ?8)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, 0, 0, 0, 0, 0, ?8, ?9)
                 "#,
             )
             .bind(&run.id)
             .bind(&run.project_id)
             .bind(&run.conversation_id)
             .bind(contract_json)
+            .bind(manifest_json)
             .bind(&run.status)
             .bind(&run.phase)
             .bind(&run.started_at)
@@ -2435,15 +2520,16 @@ mod tests {
         sqlx::query(
             r#"
             INSERT INTO agent_runs (
-                id, project_id, conversation_id, contract_json, status, phase,
+                id, project_id, conversation_id, contract_json, manifest_json, status, phase,
                 state_version, model_turns, tool_calls, mutation_count, repair_cycles,
                 cancel_requested, pause_requested, started_at, updated_at
-            ) VALUES (?1, 'project-1', 'conversation-1', ?2, 'created', 'created',
+            ) VALUES (?1, 'project-1', 'conversation-1', ?2, ?3, 'created', 'created',
                 0, 0, 0, 0, 0, 0, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
             "#,
         )
         .bind(run_id)
         .bind(contract_json)
+        .bind(json!({ "rawUserGoal": "test" }).to_string())
         .execute(pool)
         .await
         .expect("insert test run");
@@ -2458,6 +2544,7 @@ mod tests {
                 "objective": "test",
                 "taskType": task_type
             }),
+            manifest: json!({ "rawUserGoal": "test" }),
             status: "created".to_string(),
             phase: "created".to_string(),
             started_at: "2026-01-01T00:00:00Z".to_string(),
