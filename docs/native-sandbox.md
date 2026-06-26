@@ -120,21 +120,21 @@ On Windows, `initialize_windows_sandbox` provisions app-owned directories, the h
 
 ## Platform Verification Status
 
-General Rust regression coverage: passed in GitHub Actions PR run `28216868921` (`test`, `cargo test --manifest-path src-tauri/Cargo.toml`, completed 2026-06-26 04:25 UTC). This includes dev-server lifecycle coverage for `commands::dev_server::tests::stop_all_dev_servers_drains_registry_and_cleans_dev_workspaces`, dev-server random localhost port allocation coverage in `sandbox::manager::tests::local_server_policy_allocates_loopback_port`, and managed-proxy loopback-target rejection coverage in `sandbox::network::tests::proxy_client_rejects_loopback_targets_even_when_allowlisted`.
+General Rust regression coverage has passed in GitHub Actions PR checks (`test`, `cargo test --manifest-path src-tauri/Cargo.toml`). The PR body records the latest passing run id and completion times for the current head. This coverage includes dev-server lifecycle coverage for `commands::dev_server::tests::stop_all_dev_servers_drains_registry_and_cleans_dev_workspaces`, dev-server random localhost port allocation coverage in `sandbox::manager::tests::local_server_policy_allocates_loopback_port`, and managed-proxy loopback-target rejection coverage in `sandbox::network::tests::proxy_client_rejects_loopback_targets_even_when_allowlisted`.
 
-Windows automated target-OS Rust verification: passed in GitHub Actions PR run `28216868921` (`Platform Rust (windows-latest)`, `cargo test --manifest-path src-tauri/Cargo.toml`, completed 2026-06-26 04:24 UTC).
+Windows automated target-OS Rust verification: passed in GitHub Actions PR checks (`Platform Rust (windows-latest)`, `cargo test --manifest-path src-tauri/Cargo.toml`). The latest passing run id and completion time are recorded in the PR body for the current head.
 
-Windows elevated native sandbox smoke verification: passed in GitHub Actions PR run `28216868921` (`Windows Native Sandbox Smoke`, `NCB_RUN_WINDOWS_NATIVE_SMOKE=1 cargo test --manifest-path src-tauri/Cargo.toml --test windows_native_smoke -- --nocapture`, completed 2026-06-26 04:25 UTC). The smoke initializes setup elevated, verifies account/credential/ACL/WFP status readiness, launches the runner through the `NCB_Sandbox` SID, verifies the sandboxed command starts only after SID verification, verifies real-project `.env`, `.env.local`, and `.aibuilder` secrets cannot be read, verifies public HTTP access is blocked or terminated without an allowed marker, and verifies a descendant process cannot survive Job Object cleanup.
+Windows elevated native sandbox smoke verification: passed in GitHub Actions PR checks (`Windows Native Sandbox Smoke`, `NCB_RUN_WINDOWS_NATIVE_SMOKE=1 cargo test --manifest-path src-tauri/Cargo.toml --test windows_native_smoke -- --nocapture`). The smoke initializes setup elevated, verifies account/credential/ACL/WFP status readiness, launches the runner through the `NCB_Sandbox` SID, verifies the sandboxed command starts only after SID verification, verifies real-project `.env`, `.env.local`, and `.aibuilder` secrets cannot be read, verifies public HTTP access is blocked or terminated without an allowed marker, and verifies a descendant process cannot survive Job Object cleanup.
 
 Windows clean-machine verification: not executed in this environment.
 
 | Check | Command or action | Expected result | Actual result |
 | --- | --- | --- | --- |
-| Elevated setup/status smoke | GitHub Actions `Windows Native Sandbox Smoke` | Setup creates/verifies account, group, credential, ACLs, logon rights, and WFP filters before status is `ready` | Passed in PR run `28216868921` |
-| Runner account identity smoke | GitHub Actions `Windows Native Sandbox Smoke` | Runner reports the `NCB_Sandbox` account SID before command execution | Passed in PR run `28216868921` |
-| Real-project secret read smoke | GitHub Actions `Windows Native Sandbox Smoke` | Sandboxed command cannot read temporary real-project `.env`, `.env.local`, or `.aibuilder` secrets | Passed in PR run `28216868921` |
-| WFP public network smoke | GitHub Actions `Windows Native Sandbox Smoke` | Public HTTP probe is blocked or killed by the runner timeout without an allowed marker | Passed in PR run `28216868921` |
-| Job Object descendant cleanup smoke | GitHub Actions `Windows Native Sandbox Smoke` | Delayed descendant marker never appears after runner cleanup | Passed in PR run `28216868921` |
+| Elevated setup/status smoke | GitHub Actions `Windows Native Sandbox Smoke` | Setup creates/verifies account, group, credential, ACLs, logon rights, and WFP filters before status is `ready` | Passed in PR checks; latest run id is in the PR body |
+| Runner account identity smoke | GitHub Actions `Windows Native Sandbox Smoke` | Runner reports the `NCB_Sandbox` account SID before command execution | Passed in PR checks; latest run id is in the PR body |
+| Real-project secret read smoke | GitHub Actions `Windows Native Sandbox Smoke` | Sandboxed command cannot read temporary real-project `.env`, `.env.local`, or `.aibuilder` secrets | Passed in PR checks; latest run id is in the PR body |
+| WFP public network smoke | GitHub Actions `Windows Native Sandbox Smoke` | Public HTTP probe is blocked or killed by the runner timeout without an allowed marker | Passed in PR checks; latest run id is in the PR body |
+| Job Object descendant cleanup smoke | GitHub Actions `Windows Native Sandbox Smoke` | Delayed descendant marker never appears after runner cleanup | Passed in PR checks; latest run id is in the PR body |
 | First UAC setup | Launch app, call `initialize_windows_sandbox` | UAC helper creates account/group, ACLs, WFP filters, credential-store password, and status moves from `setup-required` to `ready` | Not executed on a clean Windows host |
 | Build identity | Run sandboxed `npm run build` | Runner command executes as `NCB_Sandbox`, not the interactive user | Not executed on a clean Windows host |
 | Install network | Run sandboxed `npm install` | Only managed proxy loopback traffic is allowed | Not executed on a clean Windows host |
@@ -142,13 +142,13 @@ Windows clean-machine verification: not executed in this environment.
 | Public network block | Malicious script opens a public outbound connection | Connection fails under WFP policy | Not executed on a clean Windows host |
 | Process-tree cleanup | Malicious script spawns descendants, then stop/cancel | Job Object kills descendants | Not executed on a clean Windows host |
 
-macOS automated Seatbelt verification: passed in GitHub Actions PR run `28216868921` (`Platform Rust (macos-14)`, `cargo test --manifest-path src-tauri/Cargo.toml`, completed 2026-06-26 04:22 UTC). The runtime smoke test invokes `/usr/bin/sandbox-exec`, verifies that the generated profile can read an allowed sandbox workspace file, and verifies that denied real-project `.env`, `.env.local`, and `.aibuilder` files remain unreadable.
+macOS automated Seatbelt verification: passed in GitHub Actions PR checks (`Platform Rust (macos-14)`, `cargo test --manifest-path src-tauri/Cargo.toml`). The latest passing run id and completion time are recorded in the PR body for the current head. The runtime smoke test invokes `/usr/bin/sandbox-exec`, verifies that the generated profile can read an allowed sandbox workspace file, and verifies that denied real-project `.env`, `.env.local`, and `.aibuilder` files remain unreadable.
 
 macOS full install/build/dev verification: not executed in this environment.
 
 | Check | Command or action | Expected result | Actual result |
 | --- | --- | --- | --- |
-| Seatbelt runtime smoke | GitHub Actions `Platform Rust (macos-14)` | Workspace read succeeds and denied real-project `.env`, `.env.local`, and `.aibuilder` reads fail under `/usr/bin/sandbox-exec` | Passed in PR run `28216868921` |
+| Seatbelt runtime smoke | GitHub Actions `Platform Rust (macos-14)` | Workspace read succeeds and denied real-project `.env`, `.env.local`, and `.aibuilder` reads fail under `/usr/bin/sandbox-exec` | Passed in PR checks; latest run id is in the PR body |
 | Install through proxy | Run sandboxed `npm install` | Fetches succeed only through managed proxy | Not executed on a macOS host |
 | Build | Run sandboxed `npm run build` | Build succeeds without public network | Not executed on a macOS host |
 | Dev server | Run sandboxed `npm run dev` | Server binds only localhost and readiness uses HTTP probe | Not executed on a macOS host |
