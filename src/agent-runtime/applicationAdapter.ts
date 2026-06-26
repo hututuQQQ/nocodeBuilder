@@ -10,6 +10,14 @@ import {
   type CompactSpecContext,
 } from "../agent/projectModifier";
 import {
+  DEFAULT_PROJECT_POLICY,
+  type ProjectPolicy,
+} from "../agent/project/projectPolicy";
+import {
+  normalizeProjectPath,
+  uniquePaths,
+} from "../agent/project/pathRules";
+import {
   buildProjectBackendContext,
   hasBackendIntent,
 } from "../agent/project/backendContext";
@@ -574,6 +582,7 @@ async function nextModelAction({
       run: context.run,
       state: store.get(),
     });
+    const generationPolicy = buildGenerationPolicyForRun(context.run, specContext);
     const generationPrompt = specContext
       ? appendSpecContextToPrompt(userRequest, specContext)
       : userRequest;
@@ -584,6 +593,7 @@ async function nextModelAction({
       backendContext,
       config,
       onDelta: stream.onModelDelta,
+      policy: generationPolicy,
       projectName: project.name,
       signal,
       userPrompt: generationPrompt,
@@ -1646,6 +1656,93 @@ async function readOptionalProjectFile(projectId: string, path: string) {
 
 function hasFilePath(fileTree: FileTree, path: string): boolean {
   return fileTree.path === path || (fileTree.children ?? []).some((child) => hasFilePath(child, path));
+}
+
+function buildGenerationPolicyForRun(
+  run: AgentRun,
+  specContext: CompactSpecContext | null,
+): ProjectPolicy {
+  if (run.contract.source?.mode !== "spec") {
+    return DEFAULT_PROJECT_POLICY;
+  }
+
+  const expectedFiles = normalizeRequiredPolicyPaths([
+    "package.json",
+    ...(specContext?.currentTask.expectedFiles?.length
+      ? specContext.currentTask.expectedFiles
+      : run.contract.source.expectedFiles ?? []),
+  ]);
+  const pathAllowance = collectPolicyPathAllowance([
+    ...run.contract.scope.allowedPaths,
+    ...(run.manifest?.runtimeContract.compiledAllowedPaths ?? []),
+    ...expectedFiles,
+  ]);
+
+  return {
+    ...DEFAULT_PROJECT_POLICY,
+    allowedDirectories: uniquePaths([
+      ...DEFAULT_PROJECT_POLICY.allowedDirectories,
+      ...pathAllowance.allowedDirectories,
+    ]),
+    generationTask:
+      "Generate only the files required for the current Spec task. Later Spec tasks may add pages or features.",
+    id: `${DEFAULT_PROJECT_POLICY.id}:spec-task`,
+    label: `${DEFAULT_PROJECT_POLICY.label} Spec task`,
+    requiredFiles: expectedFiles,
+    rootAllowedFiles: uniquePaths([
+      ...DEFAULT_PROJECT_POLICY.rootAllowedFiles,
+      ...pathAllowance.rootAllowedFiles,
+    ]),
+  };
+}
+
+function normalizeRequiredPolicyPaths(paths: string[]) {
+  return uniquePaths(
+    paths
+      .map((path) => normalizeProjectPath(path))
+      .filter(
+        (path): path is string =>
+          typeof path === "string" && !path.includes("*"),
+      ),
+  );
+}
+
+function collectPolicyPathAllowance(paths: string[]) {
+  const allowedDirectories: string[] = [];
+  const rootAllowedFiles: string[] = [];
+
+  for (const rawPath of paths) {
+    const path = normalizeProjectPath(rawPath);
+
+    if (!path || path.startsWith(".env") || path.includes("/.env")) {
+      continue;
+    }
+
+    if (path.includes("*")) {
+      const prefix = path.slice(0, path.indexOf("*")).replace(/\/+$/, "");
+      const topLevel = prefix.split("/").filter(Boolean)[0];
+
+      if (topLevel && prefix.includes("/")) {
+        allowedDirectories.push(topLevel);
+      } else if (topLevel && path.endsWith("/**")) {
+        allowedDirectories.push(topLevel);
+      }
+      continue;
+    }
+
+    const segments = path.split("/");
+
+    if (segments.length === 1) {
+      rootAllowedFiles.push(path);
+    } else if (segments[0]) {
+      allowedDirectories.push(segments[0]);
+    }
+  }
+
+  return {
+    allowedDirectories: uniquePaths(allowedDirectories),
+    rootAllowedFiles: uniquePaths(rootAllowedFiles),
+  };
 }
 
 async function buildCompactSpecContext({

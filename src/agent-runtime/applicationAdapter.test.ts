@@ -371,6 +371,7 @@ const {
   runSpecTaskRuntime,
 } = await import("./applicationAdapter");
 const conversationState = await import("../store/conversationState");
+const projectModifier = await import("../agent/projectModifier");
 
 describe("Application runtime adapter", () => {
   beforeEach(() => {
@@ -400,6 +401,7 @@ describe("Application runtime adapter", () => {
     fake.verifierPorts = [];
     fake.verificationStatuses = [];
     vi.mocked(conversationState.persistCurrentConversation).mockClear();
+    vi.mocked(projectModifier.requestProjectGeneration).mockClear();
   });
 
   it("completes a simple answer through the production adapter", async () => {
@@ -1479,6 +1481,91 @@ describe("Application runtime adapter", () => {
     expect(context.specContext?.acceptanceCriteria[0]?.description).toContain("Realtime");
     expect(context.specContext?.design.dataModel).toContain("rooms, room_players, game_states");
     expect(context.specContext?.design.integrations).toContain("Supabase Realtime");
+  });
+
+  it("uses Spec expected files as the initial generation required files", async () => {
+    const spec = createRuntimeSpec();
+    const revision = {
+      ...spec.revisions[0],
+      tasks: [
+        {
+          acceptanceCriteriaIds: ["criterion-1"],
+          allowedPaths: [
+            "package.json",
+            "next.config.*",
+            "tsconfig.json",
+            "tailwind.config.*",
+            "postcss.config.*",
+            "app/**",
+          ],
+          dependencyIds: [],
+          expectedFiles: [
+            "package.json",
+            "next.config.js",
+            "tsconfig.json",
+            "tailwind.config.ts",
+            "postcss.config.mjs",
+            "app/layout.tsx",
+            "app/globals.css",
+          ],
+          id: "task-foundation",
+          objective: "Create the base project files and install dependencies.",
+          requirementIds: ["story-1"],
+          status: "pending" as const,
+          title: "Project foundation",
+        },
+      ],
+    };
+    const scopedSpec: DevelopmentSpec = {
+      ...spec,
+      kind: "initial_build",
+      revisions: [revision],
+    };
+    const task = revision.tasks[0];
+    const store = createFakeStore();
+    (store as unknown as { set: (patch: Record<string, unknown>) => void }).set({
+      currentConversation: {
+        activeSpecId: scopedSpec.id,
+        id: scopedSpec.conversationId,
+        messages: [],
+        mode: "spec",
+        specIds: [scopedSpec.id],
+      },
+      currentSpec: scopedSpec,
+    });
+    const project = (store as unknown as { get: () => { currentProject: ProjectInfo } })
+      .get()
+      .currentProject;
+    fake.generationFiles = task.expectedFiles.map((path) => ({
+      content: path === "package.json"
+        ? "{\"scripts\":{\"build\":\"next build\"}}"
+        : "",
+      path,
+    }));
+    fake.actions = [{ type: "finish_candidate", summary: "Foundation generated" }];
+    fake.verificationStatuses = ["passed"];
+
+    const result = await runSpecTaskRuntime({
+      contract: compileSpecTaskContract({
+        executionMode: "generate",
+        revision,
+        spec: scopedSpec,
+        task,
+      }),
+      conversationId: scopedSpec.conversationId,
+      executionMode: "generate",
+      project,
+      runId: "run-spec-foundation-generation",
+      store: store as never,
+      taskObjective: task.objective,
+    });
+    const generationArgs = vi.mocked(projectModifier.requestProjectGeneration).mock
+      .calls[0]?.[0];
+
+    expect(result.run?.status).toBe("completed");
+    expect(generationArgs?.policy?.requiredFiles).toEqual(task.expectedFiles);
+    expect(generationArgs?.policy?.requiredFiles).not.toContain("app/page.tsx");
+    expect(generationArgs?.policy?.generationTask).toContain("current Spec task");
   });
 
   it("forwards read snapshots from runtime checkpoints into the production verifier", async () => {
