@@ -411,6 +411,24 @@ mod tests {
     }
 
     #[test]
+    fn local_server_policy_allocates_loopback_port() {
+        let (network, proxy) = prepare_network_policy(
+            SandboxNetworkPolicy::LocalServer { port: 0 },
+            "dev-port-test",
+            None,
+        )
+        .expect("local server network policy");
+
+        assert!(proxy.is_none());
+        match network {
+            SandboxNetworkPolicy::LocalServer { port } => {
+                assert!(port > 0, "expected an allocated localhost port");
+            }
+            other => panic!("expected local server policy, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn denied_roots_do_not_cover_home_or_sandbox_root() {
         crate::test_support::with_env_lock(|| {
             let _env = EnvGuard::capture();
