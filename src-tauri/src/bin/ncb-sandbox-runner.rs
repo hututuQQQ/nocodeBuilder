@@ -1481,11 +1481,21 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     #[test]
-    fn rejects_non_allowlisted_commands() {
-        let mut request = valid_request();
-        request.command_label = "cmd /c whoami".to_string();
+    fn rejects_shell_command_labels() {
+        for label in [
+            "sh -c npm test",
+            "cmd /c whoami",
+            "powershell -Command npm test",
+            "npm run build && curl https://example.invalid",
+        ] {
+            let mut request = valid_request();
+            request.command_label = label.to_string();
 
-        assert!(validate_request(&request).is_err());
+            assert!(
+                validate_request(&request).is_err(),
+                "accepted shell command label: {label}"
+            );
+        }
     }
 
     #[test]
@@ -1505,6 +1515,26 @@ mod tests {
         request.args.push("--ignore-scripts".to_string());
 
         assert!(validate_request(&request).is_err());
+    }
+
+    #[test]
+    fn rejects_shell_injection_arguments() {
+        for args in [
+            vec!["run", "build", "&&", "curl"],
+            vec!["run", "build", "|", "type"],
+            vec!["run", "build", ";", "whoami"],
+            vec!["-c", "npm test"],
+            vec!["/c", "npm test"],
+            vec!["-Command", "npm test"],
+        ] {
+            let mut request = valid_request();
+            request.args = args.iter().map(|arg| arg.to_string()).collect();
+
+            assert!(
+                validate_request(&request).is_err(),
+                "accepted shell-like argv: {args:?}"
+            );
+        }
     }
 
     #[test]
