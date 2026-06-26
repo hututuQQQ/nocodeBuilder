@@ -777,6 +777,67 @@ mod tests {
     }
 
     #[test]
+    fn write_back_only_copies_allowed_generated_files() {
+        let root = std::env::temp_dir().join(format!(
+            "ncb-sandbox-write-back-test-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let project = root.join("project");
+        let workspace_root = root.join("workspace");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(workspace_root.join("dist")).unwrap();
+        fs::write(project.join("package.json"), "{\"name\":\"real\"}").unwrap();
+        fs::write(workspace_root.join("package-lock.json"), "{\"lock\":true}").unwrap();
+        fs::write(workspace_root.join("pnpm-lock.yaml"), "lockfileVersion: 9").unwrap();
+        fs::write(workspace_root.join("next-env.d.ts"), "/// <reference />").unwrap();
+        fs::write(
+            workspace_root.join("package.json"),
+            "{\"name\":\"sandbox\"}",
+        )
+        .unwrap();
+        fs::write(workspace_root.join("dist").join("bundle.js"), "generated").unwrap();
+
+        let workspace = SandboxWorkspace {
+            project_id: "test".to_string(),
+            kind: SandboxWorkspaceKind::Run,
+            workspace_root,
+            cache_root: root.join("cache"),
+            tmp_root: root.join("tmp"),
+            source_manifest_path: root.join("state").join("source-manifest.json"),
+        };
+
+        let written = workspace.write_back_allowed_outputs(&project).unwrap();
+
+        assert_eq!(
+            written,
+            vec![
+                "package-lock.json".to_string(),
+                "pnpm-lock.yaml".to_string(),
+                "next-env.d.ts".to_string()
+            ]
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("package-lock.json")).unwrap(),
+            "{\"lock\":true}"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("pnpm-lock.yaml")).unwrap(),
+            "lockfileVersion: 9"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("next-env.d.ts")).unwrap(),
+            "/// <reference />"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("package.json")).unwrap(),
+            "{\"name\":\"real\"}"
+        );
+        assert!(!project.join("dist").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn run_and_dev_workspaces_do_not_delete_each_other() {
         with_sandbox_root("ncb-sandbox-workspace-lifecycle", |sandbox_root| {
             let project = sandbox_root.join("real-project");
