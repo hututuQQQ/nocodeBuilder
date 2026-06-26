@@ -695,12 +695,23 @@ mod tests {
 
     #[test]
     fn excludes_sensitive_and_generated_paths() {
-        assert!(is_excluded_relative(Path::new(".aibuilder/project.json")));
-        assert!(is_excluded_relative(Path::new(".env.local")));
-        assert!(is_excluded_relative(Path::new("app/.env.production")));
-        assert!(is_excluded_relative(Path::new(
-            "node_modules/react/index.js"
-        )));
+        for excluded in [
+            ".aibuilder/project.json",
+            ".git/config",
+            ".env",
+            ".env.local",
+            "app/.env.production",
+            "node_modules/react/index.js",
+            ".next/server/app.js",
+            "dist/client.js",
+            "build/server.js",
+            "coverage/lcov.info",
+        ] {
+            assert!(
+                is_excluded_relative(Path::new(excluded)),
+                "expected '{excluded}' to be excluded from sandbox source sync"
+            );
+        }
         assert!(!is_excluded_relative(Path::new("app/page.tsx")));
     }
 
@@ -720,20 +731,42 @@ mod tests {
         let project = root.join("project");
         let workspace = root.join("workspace");
         fs::create_dir_all(project.join(".aibuilder")).unwrap();
+        fs::create_dir_all(project.join(".git")).unwrap();
         fs::create_dir_all(project.join("node_modules")).unwrap();
+        fs::create_dir_all(project.join(".next")).unwrap();
+        fs::create_dir_all(project.join("dist")).unwrap();
+        fs::create_dir_all(project.join("build")).unwrap();
+        fs::create_dir_all(project.join("coverage")).unwrap();
         fs::create_dir_all(project.join("app")).unwrap();
         fs::write(project.join(".aibuilder").join("project.json"), "{}").unwrap();
+        fs::write(project.join(".git").join("config"), "[remote]").unwrap();
         fs::write(project.join(".env"), "SECRET=1").unwrap();
         fs::write(project.join("node_modules").join("dep.js"), "").unwrap();
+        fs::write(project.join(".next").join("server.js"), "generated").unwrap();
+        fs::write(project.join("dist").join("client.js"), "generated").unwrap();
+        fs::write(project.join("build").join("server.js"), "generated").unwrap();
+        fs::write(project.join("coverage").join("lcov.info"), "generated").unwrap();
         fs::write(project.join("app").join("page.tsx"), "export default null").unwrap();
         fs::create_dir_all(&workspace).unwrap();
 
         sync_project_to_workspace(&project, &workspace).unwrap();
 
         assert!(workspace.join("app").join("page.tsx").is_file());
-        assert!(!workspace.join(".aibuilder").exists());
-        assert!(!workspace.join(".env").exists());
-        assert!(!workspace.join("node_modules").exists());
+        for excluded in [
+            ".aibuilder",
+            ".git",
+            ".env",
+            "node_modules",
+            ".next",
+            "dist",
+            "build",
+            "coverage",
+        ] {
+            assert!(
+                !workspace.join(excluded).exists(),
+                "expected '{excluded}' to be omitted from sandbox workspace"
+            );
+        }
 
         let _ = fs::remove_dir_all(root);
     }
@@ -748,11 +781,25 @@ mod tests {
         let workspace_root = root.join("workspace");
         let state = root.join("state");
         fs::create_dir_all(project.join("app")).unwrap();
-        fs::create_dir_all(workspace_root.join("node_modules")).unwrap();
+        for generated_dir in ["node_modules", ".next", "dist", "build", "coverage"] {
+            fs::create_dir_all(workspace_root.join(generated_dir)).unwrap();
+        }
         fs::create_dir_all(&state).unwrap();
         fs::write(project.join("app").join("page.tsx"), "one").unwrap();
         fs::write(project.join("app").join("removed.tsx"), "remove me").unwrap();
-        fs::write(workspace_root.join("node_modules").join("dep.js"), "dep").unwrap();
+        for generated in [
+            ("node_modules", "dep.js"),
+            (".next", "server.js"),
+            ("dist", "bundle.js"),
+            ("build", "output.js"),
+            ("coverage", "lcov.info"),
+        ] {
+            fs::write(
+                workspace_root.join(generated.0).join(generated.1),
+                "sandbox-generated",
+            )
+            .unwrap();
+        }
 
         let workspace = SandboxWorkspace {
             project_id: "test".to_string(),
@@ -765,13 +812,42 @@ mod tests {
 
         workspace.sync_source_changes_from(&project).unwrap();
         fs::remove_file(project.join("app").join("removed.tsx")).unwrap();
+        fs::create_dir_all(project.join(".aibuilder")).unwrap();
+        fs::create_dir_all(project.join(".git")).unwrap();
+        fs::create_dir_all(project.join("node_modules")).unwrap();
+        fs::create_dir_all(project.join(".next")).unwrap();
+        fs::create_dir_all(project.join("dist")).unwrap();
+        fs::create_dir_all(project.join("build")).unwrap();
+        fs::create_dir_all(project.join("coverage")).unwrap();
         fs::write(project.join(".env"), "SECRET=1").unwrap();
+        fs::write(project.join(".aibuilder").join("project.json"), "{}").unwrap();
+        fs::write(project.join(".git").join("config"), "[remote]").unwrap();
+        fs::write(project.join("node_modules").join("dep.js"), "project dep").unwrap();
+        fs::write(project.join(".next").join("server.js"), "project build").unwrap();
+        fs::write(project.join("dist").join("bundle.js"), "project build").unwrap();
+        fs::write(project.join("build").join("output.js"), "project build").unwrap();
+        fs::write(project.join("coverage").join("lcov.info"), "project build").unwrap();
         workspace.sync_source_changes_from(&project).unwrap();
 
         assert!(workspace_root.join("app").join("page.tsx").is_file());
         assert!(!workspace_root.join("app").join("removed.tsx").exists());
-        assert!(workspace_root.join("node_modules").join("dep.js").is_file());
         assert!(!workspace_root.join(".env").exists());
+        assert!(!workspace_root.join(".aibuilder").exists());
+        assert!(!workspace_root.join(".git").exists());
+        for generated in [
+            ("node_modules", "dep.js"),
+            (".next", "server.js"),
+            ("dist", "bundle.js"),
+            ("build", "output.js"),
+            ("coverage", "lcov.info"),
+        ] {
+            assert_eq!(
+                fs::read_to_string(workspace_root.join(generated.0).join(generated.1)).unwrap(),
+                "sandbox-generated",
+                "expected sandbox-generated '{}' output to survive source sync",
+                generated.0
+            );
+        }
 
         let _ = fs::remove_dir_all(root);
     }
