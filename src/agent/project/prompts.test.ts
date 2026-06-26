@@ -122,7 +122,10 @@ describe("project prompts", () => {
     };
 
     expect(systemContent).toContain(
-      "If exact edit_file old_string text is no longer visible, reread only the smallest useful range",
+      "If exact edit_file old_string text is no longer visible there, reread only the smallest useful range",
+    );
+    expect(systemContent).toContain(
+      "Copy edit_file old_string from file.content only, never from numberedContent.",
     );
     expect(userPayload.instructions).toContain(
       "Avoid repeating full-file read_files for the same unchanged path; when exact text is missing, reread the smallest useful range with offset/limit.",

@@ -188,7 +188,7 @@ const TOOL_METADATA: Array<
   legacyTool("glob_files", "Find allowed project files by glob pattern.", true, true, "none", false, "never"),
   legacyTool(
     "edit_file",
-    "Make a focused text replacement in a previously read file. old_string must match exactly and be unique unless replace_all is true.",
+    "Make a focused text replacement in a previously read file. old_string must match file.content exactly and be unique unless replace_all is true.",
     false,
     false,
     "workspace_write",
