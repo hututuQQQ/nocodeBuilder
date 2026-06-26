@@ -726,12 +726,16 @@ function validateSpecTaskStateConsistency(
 function isSuccessfulFinalBuildCommand(command: unknown) {
   return (
     command === "npm run build" ||
-    command === "npm install && npm run build"
+    command === "npm install && npm run build" ||
+    command === "pnpm build" ||
+    command === "pnpm install && pnpm build"
   );
 }
 
 function isFinalBuildOrInstallCommand(command: unknown) {
-  return command === "npm install" || isSuccessfulFinalBuildCommand(command);
+  return command === "npm install" ||
+    command === "pnpm install" ||
+    isSuccessfulFinalBuildCommand(command);
 }
 
 function isSupportedFailedFinalVerificationCommand(command: unknown) {

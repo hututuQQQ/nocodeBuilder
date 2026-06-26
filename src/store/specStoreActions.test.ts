@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentApproval, AgentRun, VerificationReport } from "../agent-core/types";
+import type {
+  AgentApproval,
+  AgentRun,
+  AgentRunCheckpoint,
+  VerificationReport,
+} from "../agent-core/types";
 import type { ProjectConversation, ProjectConversationSummary, ProjectInfo } from "../services/projects";
 import type { DevelopmentSpec, GeneratedSpecRevisionPayload, SpecRevision } from "../spec-core/types";
 import { computePersistedAcceptanceResults } from "../spec-core/validators";
@@ -15,10 +20,12 @@ import {
 const fake = vi.hoisted(() => ({
   agentRuns: new Map<string, unknown>(),
   approvals: [] as AgentApproval[],
+  buildProjectBackendContext: vi.fn(),
   checkpoints: new Map<string, unknown>(),
   createProjectConversation: vi.fn(),
   createSpec: vi.fn(),
   deleteUnattachedSpec: vi.fn(),
+  events: new Map<string, unknown[]>(),
   listProjectConversations: vi.fn(),
   listFiles: vi.fn(),
   readFile: vi.fn(),
@@ -39,6 +46,11 @@ vi.mock("../agent/projectModifier", () => ({
   getContextFilePaths: vi.fn(() => []),
 }));
 
+vi.mock("../agent/project/backendContext", () => ({
+  buildProjectBackendContext: (...args: unknown[]) =>
+    fake.buildProjectBackendContext(...args),
+}));
+
 vi.mock("../agent-runtime/runController", () => ({
   runSpecTaskRuntime: (...args: unknown[]) => fake.runSpecTaskRuntime(...args),
 }));
@@ -56,6 +68,9 @@ vi.mock("../services/agentRuntime", () => ({
     ),
     listApprovals: vi.fn(async (_projectId: string, runId: string) =>
       fake.approvals.filter((approval) => approval.runId === runId),
+    ),
+    listEvents: vi.fn(async (_projectId: string, runId: string) =>
+      fake.events.get(runId) ?? [],
     ),
     readSiteSourceMap: vi.fn(async () => null),
     readSiteSpec: vi.fn(async () => null),
@@ -110,10 +125,12 @@ describe("spec store actions", () => {
   beforeEach(() => {
     fake.agentRuns = new Map();
     fake.approvals = [];
+    fake.buildProjectBackendContext.mockReset();
     fake.checkpoints = new Map();
     fake.createProjectConversation.mockReset();
     fake.createSpec.mockReset();
     fake.deleteUnattachedSpec.mockReset();
+    fake.events = new Map();
     fake.listProjectConversations.mockReset();
     fake.listFiles.mockReset();
     fake.readFile.mockReset();
@@ -124,10 +141,14 @@ describe("spec store actions", () => {
     fake.runSpecTaskRuntime.mockReset();
     fake.saveSpec.mockReset();
     fake.saveProjectConversation.mockReset();
+    __specStoreActionsTestUtils.resetSpecExecutionLease();
     fake.specs = new Map();
     fake.switchProjectConversationMode.mockReset();
     fake.verificationReports = new Map();
     clearAllSpecExecutionCancellationsForTests();
+    fake.buildProjectBackendContext.mockResolvedValue({
+      supabase: { configured: true },
+    });
     fake.createSpec.mockImplementation(async (_projectId: string, spec: DevelopmentSpec) => {
       fake.specs.set(spec.id, spec);
       return spec;
@@ -151,7 +172,13 @@ describe("spec store actions", () => {
       name: "app",
       path: "",
     });
-    fake.readFile.mockResolvedValue("");
+    fake.readFile.mockImplementation(async (_projectId: string, path: string) => {
+      if (path === "pnpm-lock.yaml") {
+        throw new Error("not found");
+      }
+
+      return "";
+    });
     fake.requestFeatureSpec.mockResolvedValue(createGeneratedPayload());
     fake.requestInitialSpec.mockResolvedValue(createGeneratedPayload());
     fake.requestSpecRevision.mockResolvedValue(createGeneratedPayload());
@@ -1028,6 +1055,104 @@ describe("spec store actions", () => {
     });
   });
 
+  it("passes previous run context into automatic Spec task retries", async () => {
+    const revision = createExecutableRevision({
+      tasks: [createExecutableTask("task-1")],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "review",
+    });
+    const store = createStore({
+      currentConversation: createConversation("project-1", {
+        activeSpecId: spec.id,
+        conversationId: spec.conversationId,
+        mode: "spec",
+        specIds: [spec.id],
+        title: "Spec iteration",
+      }),
+      currentSpec: spec,
+    });
+    fake.runSpecTaskRuntime.mockImplementation(async (input: RuntimeInput) => {
+      if (fake.runSpecTaskRuntime.mock.calls.length === 1) {
+        fake.agentRuns.set(input.runId, createRun(input.runId, {
+          completedAt: "2026-01-01T00:02:00.000Z",
+          modelTurns: 44,
+          phase: "budget_exceeded",
+          status: "budget_exceeded",
+        }));
+        fake.checkpoints.set(input.runId, createCheckpoint(input.runId, {
+          changedFiles: ["app/api/rooms/route.ts"],
+          observations: [
+            JSON.stringify({
+              content: "Invalid model response: unsupported Supabase default value \"''\".",
+              ok: false,
+              summary: "Model response validation failed",
+              tool: "model_validation",
+            }),
+          ],
+        }));
+        fake.verificationReports.set(
+          input.runId,
+          createVerificationReport(input.runId, "failed"),
+        );
+        fake.events.set(input.runId, [
+          {
+            artifactIds: [],
+            id: "event-context-budget",
+            payload: {
+              failureKind: "context_budget",
+              reason: "Fake AI request exceeded the model context length.",
+            },
+            runId: input.runId,
+            sequence: 1,
+            timestamp: "2026-01-01T00:02:00.000Z",
+            type: "run.budget_exceeded",
+          },
+        ]);
+
+        return {
+          run: createRun(input.runId, {
+            completedAt: "2026-01-01T00:02:00.000Z",
+            phase: "budget_exceeded",
+            status: "budget_exceeded",
+          }),
+          verificationReport: createVerificationReport(input.runId, "failed"),
+        };
+      }
+
+      expect(input.resumeObservation).toMatchObject({
+        ok: false,
+        tool: "spec_retry_context",
+      });
+      expect(input.resumeObservation?.content).toContain("Previous run status: budget_exceeded");
+      expect(input.resumeObservation?.content).toContain("Terminal failure kind: context_budget");
+      expect(input.resumeObservation?.content).toContain("context length");
+      expect(input.resumeObservation?.content).toContain("app/api/rooms/route.ts");
+      expect(input.resumeObservation?.content).toContain("model_validation");
+      expect(input.resumeObservation?.content).toContain("unsupported Supabase default value");
+      const passedReport = createVerificationReport(input.runId, "passed");
+      fake.verificationReports.set(input.runId, passedReport);
+
+      return {
+        run: createRun(input.runId, {
+          completedAt: "2026-01-01T00:03:00.000Z",
+          phase: "completed",
+          status: "completed",
+        }),
+        verificationReport: passedReport,
+      };
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.approveAndExecuteCurrentSpec();
+
+    expect(fake.runSpecTaskRuntime.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(fake.runSpecTaskRuntime.mock.calls[1][0].resumeObservation?.content)
+      .toContain("Previous run status: budget_exceeded");
+  });
+
   it("does not project a stale Spec task result into the current Spec", async () => {
     const revision = createExecutableRevision({
       tasks: [createExecutableTask("task-1")],
@@ -1121,6 +1246,257 @@ describe("spec store actions", () => {
       runId: expect.stringMatching(/^run-/),
       status: "running",
     });
+  });
+
+  it("recovers a stale busy flag when the persisted running task already failed", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-stale-failed",
+          status: "running",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    fake.agentRuns.set("run-stale-failed", createRun("run-stale-failed", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "failed",
+      status: "failed",
+    }));
+    fake.runSpecTaskRuntime.mockImplementation(async (input: RuntimeInput) => ({
+      run: createRun(input.runId, {
+        phase: "paused",
+        status: "paused",
+      }),
+      verificationReport: null,
+    }));
+    const store = createStore({
+      currentSpec: spec,
+      isExecutingSpec: true,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution({ recoverStaleRun: true });
+
+    const task = store.get().currentSpec?.revisions[0].tasks[0];
+    expect(fake.runSpecTaskRuntime).toHaveBeenCalledTimes(1);
+    expect(task).toMatchObject({
+      runId: expect.stringMatching(/^run-/),
+      status: "running",
+    });
+    expect(task?.runId).not.toBe("run-stale-failed");
+    expect(task?.autoRetryCount).toBe(1);
+    expect(store.get().isExecutingSpec).toBe(false);
+    expect(store.get().terminalLogs).toContain(
+      "[spec] Recovering orphaned Spec execution lock for a terminal task run.",
+    );
+  });
+
+  it("does not recover a terminal task run while the active lease is current", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-terminal",
+          status: "running",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    fake.agentRuns.set("run-terminal", createRun("run-terminal", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "failed",
+      status: "failed",
+    }));
+    __specStoreActionsTestUtils.setSpecExecutionLease(createExecutionLease(spec));
+    const store = createStore({
+      currentSpec: spec,
+      isExecutingSpec: true,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution({ recoverStaleRun: true });
+
+    expect(fake.runSpecTaskRuntime).not.toHaveBeenCalled();
+    expect(store.get().currentSpec?.revisions[0].tasks[0]).toMatchObject({
+      runId: "run-terminal",
+      status: "running",
+    });
+    expect(store.get().terminalLogs).toContain(
+      "[spec] Reconcile request skipped because the active Spec execution lease is still current.",
+    );
+  });
+
+  it("recovers when the active execution lease times out", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-timed-out",
+          status: "running",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    fake.agentRuns.set("run-timed-out", createRun("run-timed-out", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "failed",
+      status: "failed",
+    }));
+    fake.runSpecTaskRuntime.mockImplementation(async (input: RuntimeInput) => ({
+      run: createRun(input.runId, {
+        phase: "paused",
+        status: "paused",
+      }),
+      verificationReport: null,
+    }));
+    __specStoreActionsTestUtils.setSpecExecutionLease(
+      createExecutionLease(spec, "2000-01-01T00:00:00.000Z"),
+    );
+    const store = createStore({
+      currentSpec: spec,
+      isExecutingSpec: true,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution({ recoverStaleRun: true });
+
+    const task = store.get().currentSpec?.revisions[0].tasks[0];
+    expect(fake.runSpecTaskRuntime).toHaveBeenCalledTimes(1);
+    expect(task).toMatchObject({
+      runId: expect.stringMatching(/^run-/),
+      status: "running",
+    });
+    expect(task?.runId).not.toBe("run-timed-out");
+    expect(store.get().terminalLogs).toContain(
+      "[spec] Recovering stale Spec execution lease after heartbeat timeout.",
+    );
+  });
+
+  it("does not let a superseded session save stale task results", async () => {
+    const revision = createExecutableRevision({
+      approvedAt: "2026-01-01T00:00:01.000Z",
+      tasks: [createExecutableTask("task-1")],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "approved",
+    });
+    let firstRunId = "";
+    let resolveFirstRun!: (value: {
+      run: AgentRun;
+      verificationReport: VerificationReport;
+    }) => void;
+    fake.runSpecTaskRuntime.mockImplementation(async (input: RuntimeInput) => {
+      if (!firstRunId) {
+        firstRunId = input.runId;
+        return new Promise((resolve) => {
+          resolveFirstRun = resolve;
+        });
+      }
+
+      return {
+        run: createRun(input.runId, {
+          phase: "paused",
+          status: "paused",
+        }),
+        verificationReport: null,
+      };
+    });
+    const store = createStore({ currentSpec: spec });
+    const actions = createSpecActions(store as never);
+
+    const firstExecution = actions.continueCurrentSpecExecution();
+    await flushPromises();
+    fake.agentRuns.set(firstRunId, createRun(firstRunId, {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "failed",
+      status: "failed",
+    }));
+    __specStoreActionsTestUtils.setSpecExecutionLease(
+      createExecutionLease(spec, "2000-01-01T00:00:00.000Z"),
+    );
+
+    await actions.continueCurrentSpecExecution({ recoverStaleRun: true });
+    const recoveredRunId = store.get().currentSpec?.revisions[0].tasks[0].runId;
+
+    resolveFirstRun({
+      run: createRun(firstRunId, {
+        completedAt: "2026-01-01T00:03:00.000Z",
+        phase: "completed",
+        status: "completed",
+      }),
+      verificationReport: createVerificationReport(firstRunId, "passed"),
+    });
+    await firstExecution;
+
+    expect(fake.runSpecTaskRuntime).toHaveBeenCalledTimes(2);
+    expect(store.get().currentSpec?.revisions[0].tasks[0]).toMatchObject({
+      runId: recoveredRunId,
+      status: "running",
+    });
+    expect(recoveredRunId).not.toBe(firstRunId);
+  });
+
+  it("does not retry the current running Spec task while execution is active", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-stale-failed",
+          status: "running",
+        }),
+        createExecutableTask("task-2", {
+          dependencyIds: ["task-1"],
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    fake.agentRuns.set("run-stale-failed", createRun("run-stale-failed", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "failed",
+      status: "failed",
+    }));
+    fake.runSpecTaskRuntime.mockImplementation(async (input: RuntimeInput) => ({
+      run: createRun(input.runId, {
+        phase: "paused",
+        status: "paused",
+      }),
+      verificationReport: null,
+    }));
+    const store = createStore({
+      currentSpec: spec,
+      isExecutingSpec: true,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.retryCurrentSpecTaskExecution();
+
+    const tasks = store.get().currentSpec?.revisions[0].tasks ?? [];
+    expect(fake.runSpecTaskRuntime).not.toHaveBeenCalled();
+    expect(tasks[0]).toMatchObject({
+      runId: "run-stale-failed",
+      status: "running",
+    });
+    expect(tasks[1]).toMatchObject({ status: "pending" });
+    expect(store.get().isExecutingSpec).toBe(true);
+    expect(store.get().terminalLogs).toContain(
+      "[spec] Retry request skipped because Spec execution is already busy.",
+    );
   });
 
   it("does not continue execution for a stale Spec from another conversation", async () => {
@@ -1419,6 +1795,106 @@ describe("spec store actions", () => {
       blockedByTaskId: "task-1",
       status: "blocked",
     });
+  });
+
+  it("uses newly introduced verifier failures as the Spec task failure message", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          autoRetryCount: 2,
+          runId: "run-new-failure",
+          status: "running",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    fake.agentRuns.set("run-new-failure", createRun("run-new-failure", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "failed",
+      status: "failed",
+    }));
+    fake.verificationReports.set("run-new-failure", {
+      ...createVerificationReport("run-new-failure", "failed"),
+      missingEvidence: [],
+      newlyIntroducedFailures: ["npm run build failed: TypeScript error in app/page.tsx."],
+      repairFeedback: [],
+    });
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    const task = store.get().currentSpec?.revisions[0].tasks[0];
+    expect(task).toMatchObject({
+      error: "npm run build failed: TypeScript error in app/page.tsx.",
+      runId: "run-new-failure",
+      status: "failed",
+    });
+  });
+
+  it("does not auto-retry a loop-exhausted terminal run during reconcile", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-loop",
+          status: "running",
+        }),
+        createExecutableTask("task-2", {
+          dependencyIds: ["task-1"],
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    fake.agentRuns.set("run-loop", createRun("run-loop", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "budget_exceeded",
+      status: "budget_exceeded",
+    }));
+    fake.events.set("run-loop", [
+      {
+        artifactIds: [],
+        id: "event-loop",
+        payload: {
+          failureKind: "loop_exhausted",
+          reason: "The same failure repeated after one focused rescue attempt.",
+        },
+        runId: "run-loop",
+        sequence: 1,
+        timestamp: "2026-01-01T00:02:00.000Z",
+        type: "run.budget_exceeded",
+      },
+    ]);
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    const tasks = store.get().currentSpec?.revisions[0].tasks ?? [];
+    expect(fake.runSpecTaskRuntime).not.toHaveBeenCalled();
+    expect(store.get().currentSpec?.status).toBe("blocked");
+    expect(tasks[0]).toMatchObject({
+      error: "The same failure repeated after one focused rescue attempt.",
+      runId: "run-loop",
+      status: "failed",
+    });
+    expect(tasks[0]?.autoRetryCount).toBeUndefined();
+    expect(tasks[1]).toMatchObject({
+      blockedByTaskId: "task-1",
+      status: "blocked",
+    });
+    expect(store.get().terminalLogs.join("\n")).not.toContain("Auto-retrying task task-1");
   });
 
   it("blocks completion when a required acceptance criterion is pending", async () => {
@@ -2063,6 +2539,66 @@ describe("spec store actions", () => {
     ]);
     expect(store.get().currentSpec?.finalVerification?.command).toBe(
       "npm install && npm run build",
+    );
+  });
+
+  it("uses pnpm for final verification when pnpm-lock.yaml is present", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-1",
+          status: "passed",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      kind: "feature",
+      revisions: [revision],
+      status: "verifying",
+    });
+    fake.agentRuns.set("run-1", createRun("run-1", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "completed",
+      status: "completed",
+    }));
+    fake.verificationReports.set("run-1", createVerificationReport("run-1", "passed"));
+    fake.checkpoints.set("run-1", {
+      packageChanged: true,
+    });
+    const runProjectCommand = vi.fn(async (_projectId: string, command: string) => ({
+      output: `${command} ok`,
+      success: true,
+    }));
+    const store = createStore({
+      currentSpec: spec,
+      fileTree: {
+        children: [
+          {
+            kind: "file",
+            name: "pnpm-lock.yaml",
+            path: "pnpm-lock.yaml",
+          },
+        ],
+        kind: "directory",
+        name: "",
+        path: "",
+      },
+      runProjectCommand,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    expect(runProjectCommand.mock.calls.map((call) => call[1])).toEqual([
+      "pnpm install",
+      "pnpm build",
+    ]);
+    expect(store.get().currentSpec?.finalVerification?.command).toBe(
+      "pnpm install && pnpm build",
+    );
+    expect(store.get().currentSpec?.finalVerification?.output).toContain(
+      "pnpm install ok",
     );
   });
 
@@ -3501,6 +4037,26 @@ function createStore(patch: Partial<StoreState> = {}) {
   };
 }
 
+function createExecutionLease(
+  spec: DevelopmentSpec,
+  updatedAt = new Date().toISOString(),
+) {
+  return {
+    conversationId: spec.conversationId,
+    revisionId: spec.currentRevisionId,
+    sessionId: "spec-session-test",
+    specId: spec.id,
+    startedAt: updatedAt,
+    updatedAt,
+  };
+}
+
+async function flushPromises() {
+  for (let index = 0; index < 10; index += 1) {
+    await Promise.resolve();
+  }
+}
+
 function createProject(patch: Partial<ProjectInfo> = {}): ProjectInfo {
   return {
     createdAt: "2026-01-01T00:00:00.000Z",
@@ -3775,6 +4331,27 @@ function createRun(runId: string, patch: Partial<AgentRun> = {}): AgentRun {
   };
 }
 
+function createCheckpoint(
+  runId: string,
+  patch: Partial<AgentRunCheckpoint> = {},
+): AgentRunCheckpoint {
+  return {
+    changedFiles: [],
+    createdAt: "2026-01-01T00:02:00.000Z",
+    deletedFiles: [],
+    id: `checkpoint-${runId}`,
+    observations: [],
+    packageChanged: false,
+    plan: null,
+    readSnapshots: [],
+    repairFeedback: [],
+    runId,
+    steeringWatermark: 0,
+    workspaceFingerprint: "workspace:fingerprint",
+    ...patch,
+  };
+}
+
 function createVerificationReport(
   runId: string,
   status: VerificationReport["status"],
@@ -3845,6 +4422,12 @@ function createSpecRunContract(
 }
 
 type RuntimeInput = {
+  resumeObservation?: {
+    content?: string;
+    ok: boolean;
+    summary: string;
+    tool: string;
+  };
   runId: string;
 };
 

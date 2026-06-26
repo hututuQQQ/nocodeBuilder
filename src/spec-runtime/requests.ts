@@ -4,6 +4,7 @@ import type { ChatMessage as LlmChatMessage } from "../agent/llm/types";
 import {
   buildFeatureSpecMessages,
   buildInitialSpecMessages,
+  buildSpecQuestionMessages,
   buildSpecRevisionMessages,
 } from "./prompts";
 import { validateGeneratedSpecRevisionPayload } from "../spec-core/validators";
@@ -12,12 +13,14 @@ import type { GeneratedSpecRevisionPayload } from "../spec-core/types";
 const SPEC_VALIDATION_RETRY_LIMIT = 1;
 
 export async function requestInitialSpec({
+  backendContext,
   config,
   onDelta,
   projectBrief,
   projectName,
   signal,
 }: {
+  backendContext?: unknown;
   config: AiProviderConfig;
   onDelta?: (delta: string) => void;
   projectBrief: string;
@@ -27,7 +30,11 @@ export async function requestInitialSpec({
   const client = createSpecChatClient(config);
   return requestValidatedSpecPayload({
     client,
-    messages: buildInitialSpecMessages({ projectBrief, projectName }),
+    messages: buildInitialSpecMessages({
+      backendContext,
+      projectBrief,
+      projectName,
+    }),
     onDelta,
     signal,
   });
@@ -60,21 +67,61 @@ export async function requestSpecRevision({
   currentRevision,
   feedback,
   onDelta,
+  planningContext,
   signal,
 }: {
   config: AiProviderConfig;
   currentRevision: unknown;
   feedback: string;
   onDelta?: (delta: string) => void;
+  planningContext?: unknown;
   signal?: AbortSignal;
 }) {
   const client = createSpecChatClient(config);
   return requestValidatedSpecPayload({
     client,
-    messages: buildSpecRevisionMessages({ currentRevision, feedback }),
+    messages: buildSpecRevisionMessages({
+      currentRevision,
+      feedback,
+      planningContext,
+    }),
     onDelta,
     signal,
   });
+}
+
+export async function requestSpecChatAnswer({
+  config,
+  conversationMessages,
+  currentRevision,
+  onDelta,
+  planningContext,
+  question,
+  signal,
+}: {
+  config: AiProviderConfig;
+  conversationMessages?: unknown[];
+  currentRevision: unknown;
+  onDelta?: (delta: string) => void;
+  planningContext?: unknown;
+  question: string;
+  signal?: AbortSignal;
+}) {
+  const client = createSpecChatClient(config);
+  const response = await client.chatJson<unknown>(
+    buildSpecQuestionMessages({
+      conversationMessages,
+      currentRevision,
+      planningContext,
+      question,
+    }),
+    {
+      onDelta,
+      signal,
+    },
+  );
+
+  return validateSpecChatAnswer(response);
 }
 
 function createSpecChatClient(config: AiProviderConfig) {
@@ -83,6 +130,20 @@ function createSpecChatClient(config: AiProviderConfig) {
     model: config.model,
     provider: config.provider,
   });
+}
+
+function validateSpecChatAnswer(value: unknown) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Invalid Spec chat response: expected an object.");
+  }
+
+  const answer = (value as { answer?: unknown }).answer;
+
+  if (typeof answer !== "string" || !answer.trim()) {
+    throw new Error("Invalid Spec chat response: answer is required.");
+  }
+
+  return answer.trim();
 }
 
 async function requestValidatedSpecPayload({

@@ -5,13 +5,45 @@ import type { DevelopmentSpec } from "../spec-core/types";
 import { modifyCurrentProject } from "./agentWorkflow";
 import { createChatActions } from "./chatStoreActions";
 
-vi.mock("./agentWorkflow", () => ({
+const mocks = vi.hoisted(() => ({
+  buildProjectBackendContext: vi.fn(),
+  getAiProviderConfig: vi.fn(),
+  requestSpecChatAnswer: vi.fn(),
+}));
+
+const workflowMocks = vi.hoisted(() => ({
   modifyCurrentProject: vi.fn(),
+}));
+
+vi.mock("../agent/project/backendContext", () => ({
+  buildProjectBackendContext: mocks.buildProjectBackendContext,
+}));
+
+vi.mock("../services/keyStore", () => ({
+  keyStore: {
+    getAiProviderConfig: mocks.getAiProviderConfig,
+  },
+}));
+
+vi.mock("../spec-runtime/requests", () => ({
+  requestSpecChatAnswer: mocks.requestSpecChatAnswer,
+}));
+
+vi.mock("./agentWorkflow", () => ({
+  modifyCurrentProject: workflowMocks.modifyCurrentProject,
 }));
 
 describe("chat store actions", () => {
   beforeEach(() => {
     vi.mocked(modifyCurrentProject).mockReset();
+    mocks.buildProjectBackendContext.mockReset();
+    mocks.getAiProviderConfig.mockReset();
+    mocks.requestSpecChatAnswer.mockReset();
+    mocks.buildProjectBackendContext.mockResolvedValue({
+      supabase: { configured: true },
+    });
+    mocks.getAiProviderConfig.mockResolvedValue(createConfig());
+    mocks.requestSpecChatAnswer.mockResolvedValue("This Spec uses Supabase.");
   });
 
   it("does not auto-create a Chat conversation when none is active", async () => {
@@ -85,7 +117,7 @@ describe("chat store actions", () => {
     }
   });
 
-  it("keeps review Spec messages in Spec guidance without modifying the project", async () => {
+  it("answers review Spec messages with the model without modifying the project", async () => {
     const store = createStore({
       currentConversation: createConversation({
         activeSpecId: "spec-1",
@@ -99,20 +131,29 @@ describe("chat store actions", () => {
     await actions.sendMessage("Please change the requirements");
 
     expect(modifyCurrentProject).not.toHaveBeenCalled();
+    expect(mocks.requestSpecChatAnswer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentRevision: expect.objectContaining({ id: "rev-1" }),
+        planningContext: {
+          backendContext: { supabase: { configured: true } },
+        },
+        question: "Please change the requirements",
+      }),
+    );
     expect(store.get().chatMessages).toHaveLength(2);
     expect(store.get().chatMessages[0]).toMatchObject({
       content: "Please change the requirements",
       role: "user",
     });
     expect(store.get().chatMessages[1]).toMatchObject({
-      content:
-        "Use Request revision to change this Spec, or Approve and start build when it is ready.",
+      content: "This Spec uses Supabase.",
       role: "assistant",
     });
     expect(store.get().currentConversation?.messages).toHaveLength(2);
   });
 
-  it("localizes Spec guidance for Chinese messages", async () => {
+  it("asks the user to configure a provider before review Spec Q&A", async () => {
+    mocks.getAiProviderConfig.mockResolvedValueOnce(null);
     const store = createStore({
       currentConversation: createConversation({
         activeSpecId: "spec-1",
@@ -123,13 +164,14 @@ describe("chat store actions", () => {
     });
     const actions = createChatActions(store as never);
 
-    await actions.sendMessage("请改一下需求");
+    await actions.sendMessage("Please explain the backend choice");
 
     expect(modifyCurrentProject).not.toHaveBeenCalled();
+    expect(mocks.requestSpecChatAnswer).not.toHaveBeenCalled();
     expect(store.get().chatMessages).toHaveLength(2);
     expect(store.get().chatMessages[1]).toMatchObject({
       content:
-        "使用 Request revision 修改这个 Spec，或者在准备好后点击 Approve 并开始构建。",
+        "Configure your AI provider first, then I can answer questions about this Spec.",
       role: "assistant",
     });
   });
@@ -306,12 +348,135 @@ describe("chat store actions", () => {
       "[spec] Steering blocked because the active AgentRun does not belong to the current Spec task.",
     );
   });
+
+  it("routes building Spec plan changes to revision instead of retry", async () => {
+    const retryCurrentSpecTaskExecution = vi.fn(async () => undefined);
+    const reviseCurrentSpec = vi.fn(async () => true);
+    const store = createStore({
+      retryCurrentSpecTaskExecution,
+      reviseCurrentSpec,
+      currentAgentRun: null,
+      currentConversation: createConversation({
+        activeSpecId: "spec-1",
+        mode: "spec",
+        specIds: ["spec-1"],
+      }),
+      currentSpec: createSpec({ runId: "run-current" }),
+    });
+    const actions = createChatActions(store as never);
+
+    await actions.sendMessage("改方案，换做法");
+
+    expect(retryCurrentSpecTaskExecution).not.toHaveBeenCalled();
+    expect(reviseCurrentSpec).toHaveBeenCalledWith("改方案，换做法");
+    expect(store.get().terminalLogs).toContain(
+      "[spec] Chat intent routed to request_revision during execution.",
+    );
+  });
+
+  it("reconciles an executing Spec when no live task run can be steered", async () => {
+    const retryCurrentSpecTaskExecution = vi.fn(async () => undefined);
+    const store = createStore({
+      retryCurrentSpecTaskExecution,
+      currentAgentRun: null,
+      currentConversation: createConversation({
+        activeSpecId: "spec-1",
+        mode: "spec",
+        specIds: ["spec-1"],
+      }),
+      currentSpec: createSpec({ runId: "run-failed" }),
+    });
+    const actions = createChatActions(store as never);
+
+    await actions.sendMessage("Can you fix the failed run?");
+
+    expect(retryCurrentSpecTaskExecution).toHaveBeenCalledTimes(1);
+    expect(store.get().chatMessages).toHaveLength(3);
+    expect(store.get().chatMessages[1]).toMatchObject({
+      content: expect.stringContaining("checking whether the current task can be retried"),
+      role: "assistant",
+    });
+    expect(store.get().chatMessages[2]).toMatchObject({
+      content: expect.stringContaining("still running on AgentRun run-failed"),
+      role: "assistant",
+    });
+    expect(store.get().terminalLogs).toContain(
+      "[spec] Chat message requested execution reconciliation.",
+    );
+  });
+
+  it("reports when reconciliation leaves a task pointing at a terminal run", async () => {
+    const retryCurrentSpecTaskExecution = vi.fn(async () => undefined);
+    const store = createStore({
+      retryCurrentSpecTaskExecution,
+      currentAgentRun: createRun("run-failed", {
+        contract: createSpecContract({ taskId: "task-1" }),
+        status: "failed",
+      }),
+      currentConversation: createConversation({
+        activeSpecId: "spec-1",
+        mode: "spec",
+        specIds: ["spec-1"],
+      }),
+      currentSpec: createSpec({ runId: "run-failed" }),
+    });
+    const actions = createChatActions(store as never);
+
+    await actions.sendMessage("Can you fix the failed run?");
+
+    expect(store.get().chatMessages).toHaveLength(3);
+    expect(store.get().chatMessages[2]).toMatchObject({
+      content: expect.stringContaining("terminal AgentRun run-failed (failed)"),
+      role: "assistant",
+    });
+  });
+
+  it("reports the new AgentRun after Spec reconciliation starts a retry", async () => {
+    const store = createStore({
+      currentAgentRun: null,
+      currentConversation: createConversation({
+        activeSpecId: "spec-1",
+        mode: "spec",
+        specIds: ["spec-1"],
+      }),
+      currentSpec: createSpec({ runId: "run-failed" }),
+    });
+    const retryCurrentSpecTaskExecution = vi.fn(async () => {
+      store.set({
+        currentSpec: createSpec({ runId: "run-retry" }),
+      });
+    });
+    store.set({ retryCurrentSpecTaskExecution });
+    const actions = createChatActions(store as never);
+
+    await actions.sendMessage("继续/同步状态并重试当前任务");
+
+    expect(retryCurrentSpecTaskExecution).toHaveBeenCalledTimes(1);
+    expect(store.get().chatMessages).toHaveLength(3);
+    expect(store.get().chatMessages[2]).toMatchObject({
+      content: expect.stringContaining("新的 AgentRun 是 run-retry"),
+      role: "assistant",
+    });
+  });
 });
+
+function createConfig() {
+  return {
+    apiKeyConfigured: true,
+    baseUrl: "https://api.example.test",
+    model: "test-model",
+    models: ["test-model"],
+    provider: "deepseek" as const,
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+}
 
 function createStore(patch: Partial<StoreState> = {}) {
   let state: StoreState = {
+    agentRuns: [],
     changeHistory: [],
     chatMessages: [],
+    continueCurrentSpecExecution: vi.fn(async () => undefined),
     conversationSummaries: [],
     createConversation: async () => null,
     currentAgentRun: null,
@@ -333,6 +498,7 @@ function createStore(patch: Partial<StoreState> = {}) {
     isSwitchingIterationMode: false,
     isVerifyingSpec: false,
     projectError: null,
+    retryCurrentSpecTaskExecution: vi.fn(async () => undefined),
     retrySpecTask: vi.fn(async () => undefined),
     retrySpecVerification: vi.fn(async () => undefined),
     sendAgentSteering: vi.fn(async () => undefined),
@@ -373,8 +539,10 @@ function createConversation(patch: Partial<StoreState["currentConversation"]> = 
 }
 
 type StoreState = {
+  agentRuns: AgentRun[];
   changeHistory: unknown[];
   chatMessages: unknown[];
+  continueCurrentSpecExecution: ReturnType<typeof vi.fn>;
   conversationSummaries: unknown[];
   createConversation: () => Promise<null>;
   currentAgentRun: AgentRun | null;
@@ -410,6 +578,8 @@ type StoreState = {
   isSwitchingIterationMode: boolean;
   isVerifyingSpec: boolean;
   projectError: string | null;
+  retryCurrentSpecTaskExecution: ReturnType<typeof vi.fn>;
+  reviseCurrentSpec?: ReturnType<typeof vi.fn>;
   retrySpecTask: ReturnType<typeof vi.fn>;
   retrySpecVerification: ReturnType<typeof vi.fn>;
   sendAgentSteering: ReturnType<typeof vi.fn>;

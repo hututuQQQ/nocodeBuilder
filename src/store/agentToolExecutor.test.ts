@@ -164,6 +164,165 @@ describe("agentToolExecutor update_design_tokens", () => {
       { content: ":root { --old: value; }", path: "styles/nocode-tokens.css" },
     ]);
   });
+
+  it("keeps command diagnostics locations and code frames", async () => {
+    const result = await executeAgentTool(
+      createFakeStore({
+        command: "npm run build",
+        exitCode: 1,
+        output: [
+          "Failed to compile.",
+          "",
+          "./lib/game/controller.ts:118:46",
+          "Type error: Argument of type 'HandEvaluation' is not assignable to parameter of type 'HandRank'.",
+          "  116 |",
+          "  117 |   const handDescriptions = playerEvaluations.map(",
+          "> 118 |     (e) => `${e.player.name}: ${describeHand(e.hand)}`",
+          "      |                                              ^",
+        ].join("\n"),
+        success: false,
+      }),
+      createProject(),
+      {
+        args: { command: "npm run build" },
+        rationale: "Check build",
+        tool: "run_command",
+        type: "tool_call",
+      },
+      1,
+      createAgentRunState(),
+    );
+
+    expect(result.observation.ok).toBe(false);
+    expect(result.observation.content).toContain('"path": "lib/game/controller.ts"');
+    expect(result.observation.content).toContain('"line": 118');
+    expect(result.observation.content).toContain("describeHand(e.hand)");
+  });
+
+  it("returns exact read content separately from the numbered preview", async () => {
+    const content = "const a = 1;\r\nconst b = 2;";
+    fake.readFile.mockResolvedValue(content);
+
+    const result = await executeAgentTool(
+      createFakeStore(),
+      createProject(),
+      {
+        args: { paths: ["app/page.tsx"] },
+        rationale: "Read page",
+        tool: "read_files",
+        type: "tool_call",
+      },
+      1,
+      createAgentRunState(),
+    );
+    const payload = JSON.parse(result.observation.content ?? "{}") as {
+      files: Array<{
+        content: string;
+        numberedContent: string;
+        totalLines: number;
+      }>;
+    };
+
+    expect(payload.files[0]).toMatchObject({
+      content,
+      numberedContent: "1 | const a = 1;\n2 | const b = 2;",
+      totalLines: 2,
+    });
+  });
+
+  it("edits CRLF files when old_string uses LF line endings", async () => {
+    const content = "const a = 1;\r\nconst b = 2;";
+    const runState = createAgentRunState();
+    fake.readFile.mockResolvedValue(content);
+    mockWriteAgentFilesAsChangeRecord(content);
+
+    await executeAgentTool(
+      createFakeStore(),
+      createProject(),
+      {
+        args: { paths: ["app/page.tsx"] },
+        rationale: "Read page",
+        tool: "read_files",
+        type: "tool_call",
+      },
+      1,
+      runState,
+    );
+    const result = await executeAgentTool(
+      createFakeStore(),
+      createProject(),
+      {
+        args: {
+          new_string: "const a = 3;\nconst b = 4;",
+          old_string: "const a = 1;\nconst b = 2;",
+          path: "app/page.tsx",
+          summary: "Update constants",
+        },
+        rationale: "Update page",
+        tool: "edit_file",
+        type: "tool_call",
+      },
+      2,
+      runState,
+    );
+    const writtenFiles = fake.writeAgentFiles.mock.calls[0]?.[2] as Array<{
+      content: string;
+      path: string;
+    }>;
+
+    expect(result.observation.ok).toBe(true);
+    expect(writtenFiles[0]).toEqual({
+      content: "const a = 3;\r\nconst b = 4;",
+      path: "app/page.tsx",
+    });
+  });
+
+  it("strips read_files numbered prefixes before matching edit_file text", async () => {
+    const content = "const a = 1;\nconst b = 2;";
+    const runState = createAgentRunState();
+    fake.readFile.mockResolvedValue(content);
+    mockWriteAgentFilesAsChangeRecord(content);
+
+    await executeAgentTool(
+      createFakeStore(),
+      createProject(),
+      {
+        args: { paths: ["app/page.tsx"] },
+        rationale: "Read page",
+        tool: "read_files",
+        type: "tool_call",
+      },
+      1,
+      runState,
+    );
+    const result = await executeAgentTool(
+      createFakeStore(),
+      createProject(),
+      {
+        args: {
+          new_string: "1 | const a = 3;\n2 | const b = 4;",
+          old_string: "1 | const a = 1;\n2 | const b = 2;",
+          path: "app/page.tsx",
+          summary: "Update constants",
+        },
+        rationale: "Update page",
+        tool: "edit_file",
+        type: "tool_call",
+      },
+      2,
+      runState,
+    );
+    const writtenFiles = fake.writeAgentFiles.mock.calls[0]?.[2] as Array<{
+      content: string;
+      path: string;
+    }>;
+
+    expect(result.observation.ok).toBe(true);
+    expect(writtenFiles[0]).toEqual({
+      content: "const a = 3;\nconst b = 4;",
+      path: "app/page.tsx",
+    });
+  });
 });
 
 function updateDesignTokensStep(): AgentToolCallStep {
@@ -214,7 +373,40 @@ function createProject() {
   };
 }
 
-function createFakeStore() {
+function mockWriteAgentFilesAsChangeRecord(beforeContent: string) {
+  fake.writeAgentFiles.mockImplementation(
+    async (
+      _store: unknown,
+      project: { id: string },
+      files: Array<{ content: string; path: string }>,
+      summary: string,
+    ) => ({
+      createdAt: "2026-01-01T00:00:00.000Z",
+      files: files.map((file) => ({
+        action: "modified",
+        additions: 1,
+        afterContent: file.content,
+        beforeContent,
+        deletions: 1,
+        path: file.path,
+        sampleAddedLines: [],
+        sampleRemovedLines: [],
+        unifiedDiff: `--- a/${file.path}\n+++ b/${file.path}`,
+      })),
+      id: "change-1",
+      kind: "agent",
+      projectId: project.id,
+      summary,
+    }),
+  );
+}
+
+function createFakeStore(commandResult?: {
+  command: string;
+  exitCode: number | null;
+  output: string;
+  success: boolean;
+}) {
   let state = {
     currentProject: { id: "project-1" },
     fileTree: {
@@ -229,6 +421,7 @@ function createFakeStore() {
         },
       ],
     },
+    runProjectCommand: vi.fn(async () => commandResult ?? null),
   };
 
   return {

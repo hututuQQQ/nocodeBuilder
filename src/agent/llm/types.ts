@@ -17,6 +17,7 @@ export type LlmErrorCode =
   | "api_key"
   | "network"
   | "http"
+  | "context_budget"
   | "response_parse"
   | "json_parse";
 
@@ -56,4 +57,5 @@ export type RawChatCompletionResponse = {
 export type ChatJsonOptions = {
   onDelta?: (delta: string) => void;
   signal?: AbortSignal;
+  timeoutMs?: number;
 };

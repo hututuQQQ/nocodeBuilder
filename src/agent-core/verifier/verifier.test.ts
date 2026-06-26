@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { compileTaskContract } from "../contract/taskContract";
-import type { SiteSpec } from "../types";
+import type { SiteSpec, TaskType } from "../types";
 import { RunStateMachine } from "../runtime/runStateMachine";
 import { AgentVerifier, verifyScope } from "./verifier";
 
@@ -373,6 +373,64 @@ describe("AgentVerifier", () => {
     });
   });
 
+  it("includes concise command diagnostics in repair feedback", async () => {
+    const run = createRun("Build the site", "full_site");
+    const verifier = new AgentVerifier({
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: {
+            build: "next build",
+          },
+          dependencies: { next: "15.0.0" },
+        }),
+      }),
+      runCommand: async (command) =>
+        command === "npm run build"
+          ? {
+              command,
+              exitCode: 1,
+              output: [
+                "Creating an optimized production build ...",
+                "Failed to compile.",
+                "./lib/game/controller.ts:118:46",
+                "Type error: Argument of type 'HandEvaluation' is not assignable to parameter of type 'HandRank'.",
+                "  116 |",
+                "  117 |   const handDescriptions = playerEvaluations.map(",
+                "> 118 |     (e) => `${e.player.name}: ${describeHand(e.hand)}`",
+                "      |                                              ^",
+              ].join("\n"),
+              success: false,
+            }
+          : null,
+    });
+
+    const report = await verifier.verify({
+      baselineCommandResults: {
+        build: {
+          command: "npm run build",
+          exitCode: 0,
+          output: "ok",
+          success: true,
+        },
+      },
+      changedFiles: ["app/page.tsx"],
+      packageChanged: false,
+      run,
+    });
+
+    expect(report.status).toBe("failed");
+    expect(report.repairFeedback.join("\n")).toContain("Diagnostics:");
+    expect(report.repairFeedback.join("\n")).toContain(
+      "./lib/game/controller.ts:118:46",
+    );
+    expect(report.repairFeedback.join("\n")).toContain(
+      "Type error: Argument of type 'HandEvaluation' is not assignable to parameter of type 'HandRank'.",
+    );
+    expect(report.repairFeedback.join("\n")).toContain(
+      "describeHand(e.hand)",
+    );
+  });
+
   it("verifies dependency additions without package approval keys", async () => {
     const baseRun = createRun("Change dependency setup", "full_site");
     const run = {
@@ -462,6 +520,162 @@ describe("AgentVerifier", () => {
       .toMatchObject({
         required: true,
         status: "inconclusive",
+      });
+  });
+
+  it("passes a spec task with no new mutations when expected files were inspected and technical checks pass", async () => {
+    const run = createRun("实现首页Lobby组件，通过API与Supabase交互存储房间信息。", "backend_feature");
+    run.contract = {
+      ...run.contract,
+      source: {
+        acceptanceCriteriaIds: ["criterion-2", "criterion-3"],
+        expectedFiles: ["components/Lobby.tsx", "app/api/rooms/route.ts"],
+        mode: "spec",
+        requirementIds: ["story-2"],
+        revisionId: "rev-1",
+        specId: "spec-1",
+        taskId: "task-6",
+      },
+    };
+    const verifier = new AgentVerifier({
+      httpProbe: async () => ({
+        ok: true,
+        status: 200,
+        summary: "ok",
+      }),
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+      }),
+      runCommand: async (command) => ({
+        command,
+        exitCode: 0,
+        output: "ok",
+        success: true,
+      }),
+    });
+
+    const report = await verifier.verify({
+      changedFiles: [],
+      packageChanged: false,
+      previewUrl: "http://localhost:3000",
+      readSnapshots: [
+        {
+          contentHash: "hash-1",
+          path: "components/Lobby.tsx",
+          readAt: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          contentHash: "hash-2",
+          path: "app/api/rooms/route.ts",
+          readAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      run,
+    });
+
+    expect(report.status).toBe("passed");
+    expect(report.checks.find((check) => check.id === "acceptance:request-addressed"))
+      .toMatchObject({
+        status: "passed",
+        summary: expect.stringContaining("Existing workspace evidence inspected expected file(s)"),
+      });
+  });
+
+  it("does not pass a no-mutation spec task when inspected files miss expected files", async () => {
+    const run = createRun("实现首页Lobby组件，通过API与Supabase交互存储房间信息。", "backend_feature");
+    run.contract = {
+      ...run.contract,
+      source: {
+        acceptanceCriteriaIds: ["criterion-2"],
+        expectedFiles: ["components/Lobby.tsx", "app/api/rooms/route.ts"],
+        mode: "spec",
+        requirementIds: ["story-2"],
+        revisionId: "rev-1",
+        specId: "spec-1",
+        taskId: "task-6",
+      },
+    };
+    const verifier = new AgentVerifier({
+      httpProbe: async () => ({
+        ok: true,
+        status: 200,
+        summary: "ok",
+      }),
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+      }),
+      runCommand: async (command) => ({
+        command,
+        exitCode: 0,
+        output: "ok",
+        success: true,
+      }),
+    });
+
+    const report = await verifier.verify({
+      changedFiles: [],
+      packageChanged: false,
+      previewUrl: "http://localhost:3000",
+      readSnapshots: [
+        {
+          contentHash: "hash-1",
+          path: "app/page.tsx",
+          readAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      run,
+    });
+
+    expect(report.status).toBe("inconclusive");
+    expect(report.checks.find((check) => check.id === "acceptance:request-addressed"))
+      .toMatchObject({
+        status: "inconclusive",
+      });
+  });
+
+  it("passes a database task when a schema tool produced external evidence", async () => {
+    const run = createRun("Create Supabase tables", "full_site");
+    const verifier = new AgentVerifier({
+      httpProbe: async () => ({
+        ok: true,
+        status: 200,
+        summary: "ok",
+      }),
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+      }),
+      runCommand: async (command) => ({
+        command,
+        exitCode: 0,
+        output: "ok",
+        success: true,
+      }),
+    });
+
+    const report = await verifier.verify({
+      changedFiles: [],
+      externalEffects: [
+        "Supabase schema applied for table(s): profiles, rooms, game_states.",
+      ],
+      packageChanged: false,
+      previewUrl: "http://localhost:3000",
+      run,
+    });
+
+    expect(report.status).toBe("passed");
+    expect(report.checks.find((check) => check.id === "acceptance:request-addressed"))
+      .toMatchObject({
+        status: "passed",
+        summary: expect.stringContaining("Supabase schema applied"),
       });
   });
 
@@ -1119,7 +1333,7 @@ describe("AgentVerifier", () => {
   });
 });
 
-function createRun(objective: string, taskType: "answer" | "full_site") {
+function createRun(objective: string, taskType: TaskType) {
   return new RunStateMachine().createRun({
     contract: compileTaskContract({ objective, taskType }),
     conversationId: "conversation-1",

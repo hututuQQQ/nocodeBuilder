@@ -1,4 +1,5 @@
 import { modifyCurrentProject } from "./agentWorkflow";
+import { buildProjectBackendContext } from "../agent/project/backendContext";
 import type { AppState } from "./appStore";
 import { createChatMessage } from "./chatMessages";
 import { appendLogs } from "./commandLogs";
@@ -7,9 +8,22 @@ import {
   persistConversation,
 } from "./conversationState";
 import type { StoreAccess } from "./storeAccess";
-import type { SpecTask } from "../spec-core/types";
+import type { DevelopmentSpec, SpecTask } from "../spec-core/types";
+import { keyStore, type AiProviderConfig } from "../services/keyStore";
+import { getProjectErrorMessage } from "../services/projects";
+import { agentRuntimeApi } from "../services/agentRuntime";
+import { requestSpecChatAnswer } from "../spec-runtime/requests";
+import { routeSpecUserMessage } from "../spec-runtime/specMessageRouter";
 import {
-  canRetrySpecVerification,
+  diagnoseSpecBlock,
+  type SpecBlockDiagnosis,
+} from "../spec-core/blockTriage";
+import {
+  getDefaultAiBaseUrl,
+  getDefaultAiModel,
+  DEFAULT_AI_PROVIDER,
+} from "../services/aiProviders";
+import {
   getCurrentSpecRevision,
 } from "../spec-core/validators";
 import { localizeUserFacingMessage } from "../agent/languagePolicy";
@@ -189,46 +203,19 @@ async function handleSpecConversationMessage(
     return;
   }
 
+  if (spec && ["approved", "building"].includes(spec.status)) {
+    await handleExecutingSpecMessage(store, message, spec);
+    return;
+  }
+
+  if (spec?.status === "review") {
+    await handleReviewSpecMessage(store, message, spec);
+    return;
+  }
+
   if (spec?.status === "blocked") {
-    const recovery = getBlockedSpecChatRecovery(spec);
-
-    if (recovery?.type === "verification") {
-      const assistantMessage = createChatMessage(
-        "assistant",
-        localizeUserFacingMessage(message, {
-          en: "I'll retry final verification with your note in the conversation context.",
-          zhHans: "我会结合你在对话里的说明，重试最终验证。",
-        }),
-      );
-      const nextConversation = appendConversationMessage(store, assistantMessage);
-      void persistConversation(store, nextConversation);
-      set((state) => ({
-        terminalLogs: appendLogs(state.terminalLogs, [
-          "[spec] Chat message requested final verification retry.",
-        ]),
-      }));
-      await get().retrySpecVerification();
-      return;
-    }
-
-    if (recovery?.type === "task") {
-      const assistantMessage = createChatMessage(
-        "assistant",
-        localizeUserFacingMessage(message, {
-          en: `I'll retry ${recovery.task.title} with your note in the conversation context.`,
-          zhHans: `我会结合你在对话里的说明，重试 ${recovery.task.title}。`,
-        }),
-      );
-      const nextConversation = appendConversationMessage(store, assistantMessage);
-      void persistConversation(store, nextConversation);
-      set((state) => ({
-        terminalLogs: appendLogs(state.terminalLogs, [
-          `[spec] Chat message requested retry for task ${recovery.task.id}.`,
-        ]),
-      }));
-      await get().retrySpecTask(recovery.task.id);
-      return;
-    }
+    await handleBlockedSpecMessage(store, message, spec);
+    return;
   }
 
   const guidance = spec
@@ -242,41 +229,482 @@ async function handleSpecConversationMessage(
   void persistConversation(store, nextConversation);
 }
 
-function getBlockedSpecChatRecovery(spec: NonNullable<AppState["currentSpec"]>):
-  | { type: "task"; task: SpecTask }
-  | { type: "verification" }
-  | null {
-  if (canRetrySpecVerification(spec)) {
-    return { type: "verification" };
+async function handleReviewSpecMessage(
+  store: StoreAccess,
+  message: string,
+  spec: NonNullable<AppState["currentSpec"]>,
+) {
+  const routed = await routeSpecUserMessage({
+    message,
+    spec,
+    currentRevision: getCurrentSpecRevision(spec),
+    conversationMessages: store.get().currentConversation?.messages.slice(-12) ?? [],
+    status: spec.status,
+    config: await getSpecRouterConfig(),
+  });
+
+  if (routed.intent === "approve_and_run") {
+    appendSpecAssistantMessage(store, message, {
+      en: "Approved. I’ll start executing this Spec now.",
+      zhHans: "已确认，我现在开始执行这个 Spec。",
+    });
+    store.set((state) => ({
+      terminalLogs: appendLogs(state.terminalLogs, [
+        "[spec] Chat intent routed to approve_and_run.",
+      ]),
+    }));
+    await store.get().approveAndExecuteCurrentSpec();
+    return;
   }
 
+  if (
+    routed.intent === "request_revision" ||
+    routed.intent === "add_implementation_note"
+  ) {
+    if (typeof store.get().reviseCurrentSpec !== "function") {
+      await answerReviewSpecQuestion(store, message, spec);
+      return;
+    }
+
+    const feedback =
+      routed.revisionFeedback ??
+      routed.implementationNote ??
+      message;
+    appendSpecAssistantMessage(store, message, {
+      en: "I’ll revise the Spec with that direction.",
+      zhHans: "我会按这条说明修订 Spec。",
+    });
+    store.set((state) => ({
+      terminalLogs: appendLogs(state.terminalLogs, [
+        `[spec] Chat intent routed to ${routed.intent}.`,
+      ]),
+    }));
+    await store.get().reviseCurrentSpec(feedback);
+    return;
+  }
+
+  if (routed.intent === "ask_question") {
+    await answerReviewSpecQuestion(store, message, spec);
+    return;
+  }
+
+  appendSpecAssistantMessage(store, message, {
+    en: routed.answer ?? "Tell me whether you want to revise the Spec or approve it for execution.",
+    zhHans: routed.answer ?? "你可以直接说明要修订 Spec，还是确认并开始执行。",
+  });
+}
+
+async function handleBlockedSpecMessage(
+  store: StoreAccess,
+  message: string,
+  spec: NonNullable<AppState["currentSpec"]>,
+) {
+  const diagnosis = await diagnoseCurrentSpecBlock(store, spec);
+  const routed = await routeSpecUserMessage({
+    message,
+    spec,
+    currentRevision: getCurrentSpecRevision(spec),
+    conversationMessages: store.get().currentConversation?.messages.slice(-12) ?? [],
+    status: spec.status,
+    blockDiagnosis: diagnosis,
+    config: await getSpecRouterConfig(),
+  });
+
+  if (routed.intent === "diagnose_block") {
+    appendSpecAssistantMessage(store, message, {
+      en: formatBlockDiagnosisForUser(diagnosis),
+      zhHans: formatBlockDiagnosisForUser(diagnosis),
+    });
+    return;
+  }
+
+  if (routed.intent === "retry_with_note") {
+    await applyBlockedSpecRecovery(store, diagnosis, routed.retryNote ?? message);
+    return;
+  }
+
+  if (routed.intent === "request_revision") {
+    appendSpecAssistantMessage(store, message, {
+      en: "I’ll create a revised Spec plan from this blocked state.",
+      zhHans: "我会基于当前阻塞状态创建一个新的 Spec 修订版本。",
+    });
+    await store.get().reviseCurrentSpec(routed.revisionFeedback ?? message);
+    return;
+  }
+
+  if (routed.intent === "switch_to_chat") {
+    appendSpecAssistantMessage(store, message, {
+      en: "Switching this iteration back to Chat.",
+      zhHans: "正在把这个迭代切回 Chat。",
+    });
+    await store.get().switchCurrentIterationToChat({ cancelActiveSpec: true });
+    return;
+  }
+
+  if (isActionableRecovery(diagnosis)) {
+    await applyBlockedSpecRecovery(store, diagnosis, "");
+    return;
+  }
+
+  appendSpecAssistantMessage(store, message, {
+    en: formatBlockDiagnosisForUser(diagnosis),
+    zhHans: formatBlockDiagnosisForUser(diagnosis),
+  });
+}
+
+async function handleExecutingSpecMessage(
+  store: StoreAccess,
+  message: string,
+  spec: NonNullable<AppState["currentSpec"]>,
+) {
+  const routed = await routeSpecUserMessage({
+    message,
+    spec,
+    currentRevision: getCurrentSpecRevision(spec),
+    conversationMessages: store.get().currentConversation?.messages.slice(-12) ?? [],
+    status: spec.status,
+    config: await getSpecRouterConfig(),
+  });
+
+  if (routed.intent === "diagnose_block") {
+    const diagnosis = formatExecutingSpecDiagnosis(store, spec);
+    appendSpecAssistantMessage(store, message, {
+      en: diagnosis,
+      zhHans: diagnosis,
+    });
+    store.set((state) => ({
+      terminalLogs: appendLogs(state.terminalLogs, [
+        "[spec] Chat intent routed to diagnose execution state.",
+      ]),
+    }));
+    return;
+  }
+
+  if (routed.intent === "request_revision") {
+    const feedback = routed.revisionFeedback ?? message;
+    appendSpecAssistantMessage(store, message, {
+      en: "I'll try to revise the Spec plan from the current execution state.",
+      zhHans: "我会尝试基于当前执行状态修订 Spec 方案。",
+    });
+    store.set((state) => ({
+      terminalLogs: appendLogs(state.terminalLogs, [
+        "[spec] Chat intent routed to request_revision during execution.",
+      ]),
+    }));
+
+    if (typeof store.get().reviseCurrentSpec !== "function") {
+      appendSpecAssistantMessage(store, message, {
+        en: "I cannot safely revise this executing Spec from the current store state. No retry was started.",
+        zhHans: "当前状态下我无法安全修订这个正在执行的 Spec。没有启动重试。",
+      });
+      return;
+    }
+
+    const revised = await store.get().reviseCurrentSpec(feedback);
+
+    if (!revised) {
+      appendSpecAssistantMessage(store, message, {
+        en: "I could not safely revise this Spec right now. No retry was started; wait for the active execution boundary or cancel first.",
+        zhHans:
+          "我现在无法安全修订这个 Spec。没有启动重试；请等待当前执行边界结束，或先取消执行。",
+      });
+    }
+    return;
+  }
+
+  if (routed.intent === "retry_with_note") {
+    await reconcileExecutingSpec(store, message, spec);
+    return;
+  }
+
+  appendSpecAssistantMessage(store, message, {
+    en: "There is no live Spec task run that can accept steering. I did not retry automatically; ask to retry/sync the task, or request a Spec revision if the plan should change.",
+    zhHans:
+      "当前没有可接收 steering 的实时 Spec 任务运行。我没有自动重试；你可以要求重试/同步任务，或在方案需要变化时请求 Spec 修订。",
+  });
+}
+
+async function reconcileExecutingSpec(
+  store: StoreAccess,
+  message: string,
+  spec: NonNullable<AppState["currentSpec"]>,
+) {
+  const before = getSpecExecutionSnapshot(spec);
+  appendSpecAssistantMessage(store, message, {
+    en: "I found no live Spec task run that can accept steering. I am syncing the Spec state now and checking whether the current task can be retried.",
+    zhHans:
+      "我没有找到可接收 steering 的实时 Spec 任务运行。现在会同步 Spec 状态，并检查当前任务是否可以重试。",
+  });
+  store.set((state) => ({
+    terminalLogs: appendLogs(state.terminalLogs, [
+      "[spec] Chat message requested execution reconciliation.",
+    ]),
+  }));
+  await store.get().retryCurrentSpecTaskExecution();
+  const resultMessage = describeSpecExecutionReconcileResult(
+    before,
+    store.get(),
+    message,
+  );
+  const resultAssistantMessage = createChatMessage("assistant", resultMessage);
+  const resultConversation = appendConversationMessage(
+    store,
+    resultAssistantMessage,
+  );
+  void persistConversation(store, resultConversation);
+}
+
+function formatExecutingSpecDiagnosis(
+  store: StoreAccess,
+  spec: NonNullable<AppState["currentSpec"]>,
+) {
+  const snapshot = getSpecExecutionSnapshot(spec);
+  const liveRun = store.get().currentAgentRun;
+  const running = snapshot.runningTask;
+  const liveRunSummary = liveRun
+    ? `Current AgentRun: ${liveRun.id} (${liveRun.status}).`
+    : "No live AgentRun is currently attached.";
+  const runningSummary = running
+    ? `Recorded running task: ${running.title} (${running.status})${running.runId ? ` on ${running.runId}` : ""}.`
+    : "No task is currently recorded as running.";
+
+  return [
+    `Spec status: ${snapshot.specStatus}.`,
+    runningSummary,
+    liveRunSummary,
+  ].join("\n");
+}
+
+async function diagnoseCurrentSpecBlock(
+  store: StoreAccess,
+  spec: NonNullable<AppState["currentSpec"]>,
+): Promise<SpecBlockDiagnosis> {
   const revision = getCurrentSpecRevision(spec);
   const task =
     revision.tasks.find((candidate) =>
-      canRetrySpecTaskFromChat(candidate, revision.tasks),
-    ) ?? null;
+      ["failed", "blocked", "cancelled"].includes(candidate.status),
+    ) ??
+    revision.tasks.find((candidate) => candidate.status === "running") ??
+    null;
+  const latestRun = task?.runId
+    ? await agentRuntimeApi.getRun(spec.projectId, task.runId).catch(() => null)
+    : null;
+  const latestVerificationReport = latestRun?.id
+    ? await agentRuntimeApi
+        .getLatestVerificationReport(spec.projectId, latestRun.id)
+        .catch(() => null)
+    : null;
+  const diagnosis = diagnoseSpecBlock({
+    spec,
+    revision,
+    latestRun,
+    latestVerificationReport,
+    projectError: store.get().projectError,
+  });
 
-  return task ? { task, type: "task" } : null;
+  store.set((state) => ({
+    currentSpec: state.currentSpec?.id === spec.id
+      ? { ...state.currentSpec, blockDiagnosis: diagnosis }
+      : state.currentSpec,
+    historicalSpecs: (state.historicalSpecs ?? []).map((item) =>
+      item.id === spec.id ? { ...item, blockDiagnosis: diagnosis } : item,
+    ),
+    terminalLogs: appendLogs(state.terminalLogs, [
+      `[spec:block] ${diagnosis.kind}: ${diagnosis.summary}`,
+      `[spec:block] recovery=${diagnosis.recommendedPlan.action}`,
+    ]),
+  }));
+
+  return diagnosis;
 }
 
-function canRetrySpecTaskFromChat(
-  task: SpecTask,
-  tasks: SpecTask[],
+async function applyBlockedSpecRecovery(
+  store: StoreAccess,
+  diagnosis: SpecBlockDiagnosis,
+  retryNote: string,
 ) {
-  if (task.status === "failed" || task.status === "cancelled") {
-    return true;
+  const plan = diagnosis.recommendedPlan;
+
+  if (plan.action === "retry_verification") {
+    appendSpecAssistantMessage(store, retryNote, {
+      en: "I'll retry final verification with your note in the conversation context.",
+      zhHans: "我会结合你的说明重试最终验证。",
+    });
+    await store.get().retrySpecVerification();
+    return;
   }
 
-  if (task.status !== "blocked") {
-    return false;
+  if (plan.action === "retry_task" || plan.action === "expand_scope_and_retry") {
+    const taskTitle = getSpecRecoveryTaskTitle(store, plan.taskId);
+    appendSpecAssistantMessage(store, retryNote, {
+      en: `I'll retry ${taskTitle} with your note in the conversation context.`,
+      zhHans: "我会带上你的说明重试这个阻塞任务。",
+    });
+    store.set((state) => ({
+      terminalLogs: appendLogs(state.terminalLogs, [
+        `[spec] Chat message requested retry for task ${plan.taskId}.`,
+      ]),
+    }));
+    if (retryNote.trim()) {
+      await store.get().retrySpecTask(plan.taskId, retryNote);
+    } else {
+      await store.get().retrySpecTask(plan.taskId);
+    }
+    return;
   }
 
-  return task.dependencyIds.every((dependencyId) =>
-    tasks.some(
-      (candidate) =>
-        candidate.id === dependencyId && candidate.status === "passed",
-    ),
+  if (plan.action === "revise_spec") {
+    if (typeof store.get().reviseCurrentSpec !== "function") {
+      appendSpecAssistantMessage(store, retryNote, {
+        en: "This Spec is blocked. Retry the failed task from the Spec summary, or request a revision if the plan needs to change.",
+        zhHans:
+          "这个 Spec 已经阻塞。可以在 Spec 摘要里重试失败任务；如果计划需要调整，请请求修订。",
+      });
+      return;
+    }
+
+    appendSpecAssistantMessage(store, retryNote, {
+      en: "This looks like a plan issue, so I’ll revise the Spec instead of blindly retrying.",
+      zhHans: "这更像是计划问题，我会修订 Spec，而不是直接重试。",
+    });
+    await store.get().reviseCurrentSpec(plan.feedback);
+    return;
+  }
+
+  if (plan.action === "continue_in_chat") {
+    appendSpecAssistantMessage(store, retryNote, {
+      en: plan.reason,
+      zhHans: plan.reason,
+    });
+    await store.get().switchCurrentIterationToChat({ cancelActiveSpec: true });
+    return;
+  }
+
+  appendSpecAssistantMessage(store, retryNote, {
+    en: plan.question,
+    zhHans: plan.question,
+  });
+}
+
+function getSpecRecoveryTaskTitle(store: StoreAccess, taskId: string) {
+  const spec = store.get().currentSpec;
+
+  if (!spec) {
+    return "the blocked task";
+  }
+
+  const task = getCurrentSpecRevision(spec).tasks.find((item) => item.id === taskId);
+
+  return task?.title ?? "the blocked task";
+}
+
+function appendSpecAssistantMessage(
+  store: StoreAccess,
+  userMessage: string,
+  message: { en: string; zhHans: string },
+) {
+  const assistantMessage = createChatMessage(
+    "assistant",
+    localizeUserFacingMessage(userMessage, message),
   );
+  const conversation = appendConversationMessage(store, assistantMessage);
+  void persistConversation(store, conversation);
+}
+
+async function getSpecRouterConfig(): Promise<AiProviderConfig> {
+  return {
+    provider: DEFAULT_AI_PROVIDER,
+    apiKeyConfigured: false,
+    model: getDefaultAiModel(DEFAULT_AI_PROVIDER),
+    models: [getDefaultAiModel(DEFAULT_AI_PROVIDER)],
+    baseUrl: getDefaultAiBaseUrl(DEFAULT_AI_PROVIDER),
+    updatedAt: "",
+  };
+}
+
+function isActionableRecovery(diagnosis: SpecBlockDiagnosis) {
+  return [
+    "retry_task",
+    "expand_scope_and_retry",
+    "retry_verification",
+    "revise_spec",
+  ].includes(diagnosis.recommendedPlan.action);
+}
+
+function formatBlockDiagnosisForUser(diagnosis: SpecBlockDiagnosis) {
+  return [
+    `Block kind: ${diagnosis.kind}`,
+    diagnosis.summary,
+    `Recovery plan: ${diagnosis.recommendedPlan.action}`,
+  ].join("\n");
+}
+
+async function answerReviewSpecQuestion(
+  store: StoreAccess,
+  message: string,
+  spec: NonNullable<AppState["currentSpec"]>,
+) {
+  const { get, set } = store;
+  const config = await keyStore.getAiProviderConfig();
+
+  if (!config) {
+    const assistantMessage = createChatMessage(
+      "assistant",
+      localizeUserFacingMessage(message, {
+        en: "Configure your AI provider first, then I can answer questions about this Spec.",
+        zhHans: "请先配置 AI provider，然后我就可以回答这个 Spec 相关的问题。",
+      }),
+    );
+    const nextConversation = appendConversationMessage(store, assistantMessage);
+    void persistConversation(store, nextConversation);
+    set({ projectError: "Configure your AI provider first." });
+    return;
+  }
+
+  try {
+    const projectId = get().currentProject?.id ?? spec.projectId;
+    const answer = await requestSpecChatAnswer({
+      config,
+      conversationMessages: get().currentConversation?.messages.slice(-12) ?? [],
+      currentRevision: getCurrentSpecRevision(spec),
+      planningContext: await buildSpecChatPlanningContext(projectId),
+      question: message,
+    });
+    const assistantMessage = createChatMessage("assistant", answer);
+    const nextConversation = appendConversationMessage(store, assistantMessage);
+    void persistConversation(store, nextConversation);
+    set((state) => ({
+      terminalLogs: appendLogs(state.terminalLogs, [
+        "[spec] Answered review question with model context.",
+      ]),
+    }));
+  } catch (error) {
+    const details = getProjectErrorMessage(error);
+    const assistantMessage = createChatMessage(
+      "assistant",
+      localizeUserFacingMessage(message, {
+        en: `I could not answer this Spec question: ${details}`,
+        zhHans: `我暂时没法回答这个 Spec 问题：${details}`,
+      }),
+    );
+    const nextConversation = appendConversationMessage(store, assistantMessage);
+    void persistConversation(store, nextConversation);
+    set({ projectError: details });
+  }
+}
+
+async function buildSpecChatPlanningContext(projectId: string) {
+  try {
+    return {
+      backendContext: await buildProjectBackendContext(projectId, {
+        includeSchema: true,
+      }),
+    };
+  } catch (error) {
+    return {
+      backendContextError: getProjectErrorMessage(error),
+    };
+  }
 }
 
 function guidanceForSpecStatus(status: string, userMessage: string) {
@@ -329,6 +757,132 @@ function guidanceForSpecStatus(status: string, userMessage: string) {
         zhHans: "当前处于 Spec 模式。请使用 Spec 控件继续。",
       });
   }
+}
+
+type SpecExecutionSnapshot = {
+  runningTask: Pick<SpecTask, "id" | "runId" | "status" | "title"> | null;
+  specId: string;
+  specStatus: DevelopmentSpec["status"];
+  tasks: Array<Pick<SpecTask, "error" | "id" | "runId" | "status" | "title">>;
+};
+
+function getSpecExecutionSnapshot(spec: DevelopmentSpec): SpecExecutionSnapshot {
+  const revision = getCurrentSpecRevision(spec);
+  const tasks = revision.tasks.map((task) => ({
+    error: task.error,
+    id: task.id,
+    runId: task.runId,
+    status: task.status,
+    title: task.title,
+  }));
+
+  return {
+    runningTask:
+      tasks.find((task) => task.status === "running") ?? null,
+    specId: spec.id,
+    specStatus: spec.status,
+    tasks,
+  };
+}
+
+function describeSpecExecutionReconcileResult(
+  before: SpecExecutionSnapshot,
+  state: AppState,
+  userMessage: string,
+) {
+  const spec = state.currentSpec;
+
+  if (!spec || spec.id !== before.specId) {
+    return localizeUserFacingMessage(userMessage, {
+      en: "Spec sync finished, but the active Spec changed before I could verify the retry result.",
+      zhHans: "Spec 同步已结束，但当前 Spec 已切换，所以我没法确认这次重试结果。",
+    });
+  }
+
+  const after = getSpecExecutionSnapshot(spec);
+  const beforeRunning = before.runningTask;
+  const afterRunning = after.runningTask;
+
+  if (
+    afterRunning?.runId &&
+    afterRunning.runId !== beforeRunning?.runId
+  ) {
+    return localizeUserFacingMessage(userMessage, {
+      en: `Synced and retried ${afterRunning.title}. New AgentRun: ${afterRunning.runId}.`,
+      zhHans: `已同步状态并重试 ${afterRunning.title}。新的 AgentRun 是 ${afterRunning.runId}。`,
+    });
+  }
+
+  const knownRuns = state.currentAgentRun
+    ? [state.currentAgentRun, ...state.agentRuns]
+    : state.agentRuns;
+  const terminalRunForRunningTask =
+    afterRunning?.runId
+      ? knownRuns.find(
+          (run) =>
+            run.id === afterRunning.runId &&
+            ["completed", "failed", "cancelled", "budget_exceeded"].includes(
+              run.status,
+            ),
+        )
+      : null;
+
+  if (afterRunning?.runId && terminalRunForRunningTask) {
+    return localizeUserFacingMessage(userMessage, {
+      en: `Spec sync did not start a retry. ${afterRunning.title} still points at terminal AgentRun ${afterRunning.runId} (${terminalRunForRunningTask.status}).`,
+      zhHans: `Spec 同步没有启动重试。${afterRunning.title} 仍然指向已结束的 AgentRun ${afterRunning.runId}（${terminalRunForRunningTask.status}）。`,
+    });
+  }
+
+  if (afterRunning?.runId) {
+    return localizeUserFacingMessage(userMessage, {
+      en: `Synced state. ${afterRunning.title} is still running on AgentRun ${afterRunning.runId}.`,
+      zhHans: `已同步状态。${afterRunning.title} 仍在运行，AgentRun 是 ${afterRunning.runId}。`,
+    });
+  }
+
+  const failedTask =
+    after.tasks.find((task) =>
+      ["failed", "cancelled", "blocked"].includes(task.status),
+    ) ?? null;
+
+  if (failedTask) {
+    const detail = failedTask.error ? `: ${failedTask.error}` : ".";
+    return localizeUserFacingMessage(userMessage, {
+      en: `Synced state. ${failedTask.title} is ${failedTask.status}${detail}`,
+      zhHans: `已同步状态。${failedTask.title} 当前是 ${failedTask.status}${detail}`,
+    });
+  }
+
+  if (spec.status === "verifying") {
+    return localizeUserFacingMessage(userMessage, {
+      en: "Synced state. All tasks are done and final verification is running.",
+      zhHans: "已同步状态。所有任务已完成，正在进行最终验证。",
+    });
+  }
+
+  if (spec.status === "completed") {
+    return localizeUserFacingMessage(userMessage, {
+      en: "Synced state. This Spec is already complete.",
+      zhHans: "已同步状态。这个 Spec 已经完成。",
+    });
+  }
+
+  if (state.projectError) {
+    return localizeUserFacingMessage(userMessage, {
+      en: `Spec sync did not start a retry: ${state.projectError}`,
+      zhHans: `Spec 同步没有启动重试：${state.projectError}`,
+    });
+  }
+
+  const previousRun = beforeRunning?.runId
+    ? ` Previous AgentRun: ${beforeRunning.runId}.`
+    : "";
+
+  return localizeUserFacingMessage(userMessage, {
+    en: `Spec sync finished, but no retry started.${previousRun}`,
+    zhHans: `Spec 同步已结束，但没有启动新的重试。${beforeRunning?.runId ? `上一个 AgentRun 是 ${beforeRunning.runId}。` : ""}`,
+  });
 }
 
 function isTerminalRun(run: AppState["currentAgentRun"]) {

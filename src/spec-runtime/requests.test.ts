@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../agent/llm/types";
 import type { AiProviderConfig } from "../services/keyStore";
-import { requestFeatureSpec, requestInitialSpec } from "./requests";
+import {
+  requestFeatureSpec,
+  requestInitialSpec,
+  requestSpecChatAnswer,
+} from "./requests";
 
 const mocks = vi.hoisted(() => ({
   chatJson: vi.fn(),
@@ -61,6 +65,29 @@ describe("Spec runtime requests", () => {
     expect(repairMessage?.content).toContain(
       "Every task.acceptanceCriteriaIds array must contain at least one existing acceptance criterion id.",
     );
+  });
+
+  it("returns a validated Spec chat answer", async () => {
+    mocks.chatJson.mockResolvedValueOnce({
+      answer: "Use Supabase because the project has backend configuration.",
+    });
+
+    const answer = await requestSpecChatAnswer({
+      config: createConfig(),
+      currentRevision: createGeneratedPayload(),
+      planningContext: { backendContext: { supabase: { configured: true } } },
+      question: "Why Supabase?",
+    });
+
+    expect(answer).toBe(
+      "Use Supabase because the project has backend configuration.",
+    );
+    const messages = mocks.chatJson.mock.calls[0][0] as ChatMessage[];
+
+    expect(String(messages[0].content)).toContain(
+      "Answer questions about the current Spec revision without changing it.",
+    );
+    expect(String(messages[1].content)).toContain("Why Supabase?");
   });
 });
 

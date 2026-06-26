@@ -188,7 +188,7 @@ const TOOL_METADATA: Array<
   legacyTool("glob_files", "Find allowed project files by glob pattern.", true, true, "none", false, "never"),
   legacyTool(
     "edit_file",
-    "Make a focused text replacement in a previously read file. old_string must match exactly and be unique unless replace_all is true.",
+    "Make a focused text replacement in a previously read file. old_string must match file.content exactly and be unique unless replace_all is true.",
     false,
     false,
     "workspace_write",
@@ -225,7 +225,7 @@ const TOOL_METADATA: Array<
   ),
   legacyTool(
     "apply_supabase_schema",
-    "Create missing Supabase tables and add missing columns for the current project. Non-destructive; requires the project .env Supabase DB URL and secret key.",
+    "Create missing Supabase tables and add missing columns for the current project. Non-destructive; requires the project .env Supabase DB URL and secret key. Use canonical column types and safe defaultValue literals only.",
     false,
     false,
     "database_write",

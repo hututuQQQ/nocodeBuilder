@@ -1,4 +1,5 @@
 import type { TaskContract, TaskType } from "../types";
+import { AGENT_TASK_BUDGETS } from "../budget/agentBudget";
 
 const DEFAULT_ALLOWED_PATHS = [
   "app/**",
@@ -106,7 +107,15 @@ function inferTaskType(objective: string): TaskType {
     return "deployment";
   }
 
-  if (/(database|supabase|crud|auth|login|orders|backend|api|数据库|登录|后台)/i.test(objective)) {
+  if (hasImplementationIntent(objective) && hasBackendFeatureIntent(objective)) {
+    return "backend_feature";
+  }
+
+  if (isReadOnlyQuestion(objective, text)) {
+    return "answer";
+  }
+
+  if (/(database|supabase|crud|auth|login|orders|backend|api|server|server-side|multiplayer|multi-player|online|realtime|real-time|websocket|room|rooms|\u540e\u7aef|\u670d\u52a1\u7aef|\u6570\u636e\u5e93|\u63a5\u53e3|\u8054\u673a|\u591a\u4eba|\u5b9e\u65f6|\u623f\u95f4|数据库|登录|后台)/i.test(objective)) {
     return "backend_feature";
   }
 
@@ -133,39 +142,38 @@ function inferTaskType(objective: string): TaskType {
   return "component_edit";
 }
 
-function budgetForTaskType(taskType: TaskType): TaskContract["budget"] {
-  switch (taskType) {
-    case "answer":
-      return {
-        maxModelTurns: 2,
-        maxToolCalls: 8,
-        maxMutations: 0,
-        maxRepairCycles: 0,
-      };
-    case "copy_edit":
-    case "style_edit":
-    case "component_edit":
-      return {
-        maxModelTurns: 14,
-        maxToolCalls: 30,
-        maxMutations: 8,
-        maxRepairCycles: 2,
-      };
-    case "add_page":
-    case "backend_feature":
-    case "full_site":
-      return {
-        maxModelTurns: 16,
-        maxToolCalls: 52,
-        maxMutations: 18,
-        maxRepairCycles: 3,
-      };
-    case "deployment":
-      return {
-        maxModelTurns: 4,
-        maxToolCalls: 12,
-        maxMutations: 2,
-        maxRepairCycles: 1,
-      };
+function isReadOnlyQuestion(objective: string, lowerObjective: string) {
+  if (hasImplementationIntent(objective)) {
+    return false;
   }
+
+  const asksForInformation =
+    /(question|explain|why|status|what\s+is|where\s+(is|are|can)|is\s+there|do\s+we\s+have|does\s+.*\s+have|currently|right\s+now|can'?t\s+find|cannot\s+find|not\s+found)/i.test(lowerObjective) ||
+    /(\u4ec0\u4e48|\u4e3a\u4ec0\u4e48|\u5982\u4f55|\u600e\u4e48|\u54ea\u91cc|\u5728\u54ea|\u6709\u6ca1\u6709|\u662f\u5426|\u76ee\u524d|\u5f53\u524d|\u73b0\u5728|\u627e\u4e0d\u5230|\u6ca1\u6709\u627e\u5230)/u.test(objective);
+
+  if (asksForInformation) {
+    return true;
+  }
+
+  if (/(^|\b)(answer|reply|respond)\b|回答|回复/i.test(objective)) {
+    return true;
+  }
+
+  if (hasImplementationIntent(objective)) {
+    return false;
+  }
+
+  return /(\?|\u5417|\u4e48)/u.test(objective);
+}
+
+function hasImplementationIntent(objective: string) {
+  return /(add|create|build|implement|fix|update|change|modify|remove|delete|wire|integrate|generate|\u65b0\u589e|\u6dfb\u52a0|\u521b\u5efa|\u5b9e\u73b0|\u4fee\u590d|\u4fee\u6539|\u6539\u6210|\u5220\u9664|\u63a5\u5165|\u96c6\u6210|\u751f\u6210|\u6784\u5efa|\u52a0\u4e00\u4e2a|\u505a\u4e00\u4e2a|\u80fd\u4e0d\u80fd.*(\u52a0|\u6dfb\u52a0|\u5b9e\u73b0|\u505a|\u521b\u5efa|\u63a5\u5165|\u96c6\u6210)|\u5e2e\u6211.*(\u52a0|\u6dfb\u52a0|\u5b9e\u73b0|\u505a|\u521b\u5efa|\u63a5\u5165|\u96c6\u6210)|\u662f\u5426\u53ef\u4ee5.*(\u5b9e\u73b0|\u6dfb\u52a0|\u63a5\u5165|\u96c6\u6210)|\u53ef\u4e0d\u53ef\u4ee5.*(\u5b9e\u73b0|\u6dfb\u52a0|\u63a5\u5165|\u96c6\u6210))/i.test(objective);
+}
+
+function hasBackendFeatureIntent(objective: string) {
+  return /(database|supabase|crud|auth|login|sign in|signup|orders|backend|api|server|server-side|multiplayer|multi-player|online|realtime|real-time|websocket|room|rooms|\u540e\u7aef|\u670d\u52a1\u7aef|\u6570\u636e\u5e93|\u63a5\u53e3|\u8054\u673a|\u591a\u4eba|\u5b9e\u65f6|\u623f\u95f4|\u767b\u5f55|\u6ce8\u518c|\u8ba4\u8bc1|\u540e\u53f0|鏁版嵁搴搢鐧诲綍|鍚庡彴)/i.test(objective);
+}
+
+function budgetForTaskType(taskType: TaskType): TaskContract["budget"] {
+  return { ...AGENT_TASK_BUDGETS[taskType] };
 }

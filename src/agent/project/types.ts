@@ -1,5 +1,10 @@
 import type { ProjectFileInput } from "../../services/projects";
 import type {
+  AgentBudgetState,
+  RunContextSummary,
+} from "../../agent-core/types";
+import type { TaskManifest } from "../../agent-core/manifest/taskManifest";
+import type {
   ProjectMemoryContext,
   TaskLedger,
   WorkingSummary,
@@ -198,16 +203,85 @@ export type ProjectChatMessage = {
   content: string;
 };
 
+export type CompactSpecContext = {
+  acceptanceCriteria: Array<{
+    description: string;
+    id: string;
+    required: boolean;
+  }>;
+  brief: string;
+  currentTask: {
+    acceptanceCriteriaIds: string[];
+    allowedPaths: string[];
+    dependencyIds: string[];
+    expectedFiles: string[];
+    id: string;
+    objective: string;
+    requirementIds: string[];
+    status: string;
+    title: string;
+  };
+  design: {
+    dataModel: string[];
+    integrations: string[];
+    summary: string;
+    technicalDecisions: string[];
+    verificationStrategy: string[];
+  };
+  executionMode?: "generate" | "modify";
+  goal: string;
+  kind: string;
+  relatedTasks: Array<{
+    id: string;
+    status: string;
+    title: string;
+  }>;
+  requirements: Array<{
+    description: string;
+    id: string;
+  }>;
+  revisionId: string;
+  specId: string;
+  specStatus: string;
+  taskProgress: {
+    blocked: number;
+    failed: number;
+    passed: number;
+    pending: number;
+    running: number;
+    total: number;
+  };
+};
+
+export type ContextCompressionReport = {
+  finalChars: number;
+  rawChars: number;
+  retainedObservations: number;
+  summarizedObservations: number;
+};
+
 export type AgentStepContext = {
   backend: ProjectBackendContext | null;
+  budgetState: AgentBudgetState;
+  contextReport: ContextCompressionReport;
   diagnostics: string | null;
   devServerStatus: string;
   fileTree: string | null;
-  memory: ProjectMemoryContext | null;
+  manifest: TaskManifest;
+  memory: (ProjectMemoryContext & {
+    selectedSiteNodeId?: string | null;
+    siteSpecPages?: Array<{
+      id: string;
+      route: string;
+      title: string;
+    }>;
+  }) | null;
   observations: AgentObservation[];
   previewUrl: string | null;
   projectName: string;
   recentMessages: ProjectChatMessage[];
+  runContextSummary: RunContextSummary;
+  specContext?: CompactSpecContext;
   steering: string[];
   taskLedger: TaskLedger | null;
   workingSummary: WorkingSummary | null;
