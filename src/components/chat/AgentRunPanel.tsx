@@ -383,8 +383,15 @@ function isApprovalPending(approval: AgentApproval) {
   return (
     !approval.decision &&
     !approval.resolvedAt &&
-    new Date(approval.expiresAt).getTime() > Date.now()
+    !approval.consumedAt &&
+    !isApprovalExpired(approval)
   );
+}
+
+function isApprovalExpired(approval: AgentApproval) {
+  const expiresAt = new Date(approval.expiresAt).getTime();
+
+  return Number.isNaN(expiresAt) || expiresAt <= Date.now();
 }
 
 function isTerminalRun(run: AgentRun) {

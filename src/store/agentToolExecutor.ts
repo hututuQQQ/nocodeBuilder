@@ -72,6 +72,7 @@ export type AgentToolResult = {
   deletedFiles?: string[];
   didChangeFiles?: boolean;
   didChangePackage?: boolean;
+  externalEffects?: string[];
   observation: AgentObservation;
 };
 
@@ -372,8 +373,12 @@ async function executeAgentToolCore(
       }
       case "apply_supabase_schema": {
         const result = await applySupabaseSchema(project.id, step.args);
+        const tableNames = step.args.tables.map((table) => table.name).join(", ");
 
         return {
+          externalEffects: [
+            `Supabase schema applied for table(s): ${tableNames}. ${step.args.summary}`,
+          ],
           observation: createAgentObservation({
             content: JSON.stringify(result, null, 2),
             ok: true,
@@ -1193,15 +1198,17 @@ function formatCommandObservation(result: CommandResult) {
 function extractCommandDiagnostics(output: string) {
   const diagnostics: Array<{
     column?: number;
+    codeFrame?: string[];
     line?: number;
     message: string;
     path?: string;
   }> = [];
-  const lines = output.split(/\r?\n/);
+  const lines = output.split(/\r?\n/).map((line) => stripAnsi(line).trimEnd());
   const pathPattern =
-    "(?:app|components|lib|data|public)/[^\\s:(]+|package\\.json|tsconfig\\.json|next\\.config\\.[^\\s:(]+|tailwind\\.config\\.[^\\s:(]+";
+    "(?:\\.\\/)?(?:(?:app|components|lib|data|public)/[^\\s:(]+|package\\.json|tsconfig\\.json|next\\.config\\.[^\\s:(]+|tailwind\\.config\\.[^\\s:(]+)";
 
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
     const colonMatch = line.match(
       new RegExp(`(${pathPattern}):(\\d+):(\\d+)\\s*-?\\s*(.*)`),
     );
@@ -1211,11 +1218,13 @@ function extractCommandDiagnostics(output: string) {
     const match = colonMatch ?? parenMatch;
 
     if (match) {
+      const following = collectFollowingCodeFrame(lines, index + 1);
       diagnostics.push({
         column: Number(match[3]),
+        codeFrame: following.length > 0 ? following : undefined,
         line: Number(match[2]),
-        message: match[4]?.trim() || line.trim(),
-        path: match[1],
+        message: collectDiagnosticMessage(lines, index, match[4]?.trim() || line.trim()),
+        path: (match[1] ?? "").replace(/^\.\//, ""),
       });
     } else if (/^(?:Type error|Error|Failed to compile)/i.test(line.trim())) {
       diagnostics.push({
@@ -1229,6 +1238,46 @@ function extractCommandDiagnostics(output: string) {
   }
 
   return diagnostics;
+}
+
+function collectDiagnosticMessage(
+  lines: string[],
+  locationIndex: number,
+  fallback: string,
+) {
+  for (let index = locationIndex + 1; index < Math.min(lines.length, locationIndex + 4); index += 1) {
+    const line = lines[index]?.trim() ?? "";
+
+    if (/^(?:Type error|Error|Failed)/i.test(line)) {
+      return line;
+    }
+  }
+
+  return fallback;
+}
+
+function collectFollowingCodeFrame(lines: string[], startIndex: number) {
+  const frame: string[] = [];
+
+  for (let index = startIndex; index < Math.min(lines.length, startIndex + 8); index += 1) {
+    const line = lines[index] ?? "";
+
+    if (!line.trim() && frame.length > 0) {
+      break;
+    }
+
+    if (/^\s*(?:>?\s*\d+\s*\||\|)/.test(line)) {
+      frame.push(line.trim());
+    } else if (frame.length > 0) {
+      break;
+    }
+  }
+
+  return frame;
+}
+
+function stripAnsi(value: string) {
+  return value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
 function truncateToolOutput(content: string) {

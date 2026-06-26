@@ -4,6 +4,7 @@ import { normalizeApprovalHash } from "../policy/policyEngine";
 import type {
   AgentApproval,
   AgentEvent,
+  AgentReadSnapshot,
   AgentRun,
   AgentRunCheckpoint,
   TaskContract,
@@ -13,6 +14,7 @@ import type {
 import {
   RunController,
   type HeadlessModelAction,
+  readRunDriveStateMetadata,
   type RunContextBundle,
   type RunControllerPorts,
 } from "./runController";
@@ -99,6 +101,118 @@ describe("Headless RunController", () => {
     expect(ports.contexts[1]?.observations).toContain("Build failed");
     expect(ports.events.map((event) => event.type)).toContain("verification.completed");
     expect(ports.events.map((event) => event.type)).toContain("run.completed");
+  });
+
+  it("feeds model validation errors back as observations before retrying", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        createModelValidationAction("Invalid model response: unsupported Supabase column type \"int2\"."),
+        { type: "finish_candidate", summary: "Schema fixed" },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    const controller = new RunController(ports);
+
+    const run = await controller.start({
+      contract: compileTaskContract({ objective: "Create Supabase tables" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-model-validation",
+    });
+
+    expect(run.status).toBe("completed");
+    expect(run.modelTurns).toBe(2);
+    expect(ports.contexts[1]?.observations.join("\n")).toContain("model_validation");
+    expect(ports.contexts[1]?.observations.join("\n")).toContain("unsupported Supabase column type");
+    expect(ports.events.map((event) => event.type)).toContain("model.failed");
+    expect(ports.events.map((event) => event.type)).toContain("run.completed");
+
+    const latestCheckpoint =
+      ports.checkpointRecords[ports.checkpointRecords.length - 1];
+    const metadata = readRunDriveStateMetadata(latestCheckpoint?.plan);
+    expect(metadata.consecutiveModelValidationFailures).toBe(0);
+  });
+
+  it("auto-completes a Spec run after a passed tool verification", async () => {
+    const specContract: TaskContract = {
+      ...compileTaskContract({ objective: "Implement task file" }),
+      source: {
+        acceptanceCriteriaIds: ["criterion-1"],
+        expectedFiles: ["app/page.tsx"],
+        mode: "spec",
+        requirementIds: ["story-1"],
+        revisionId: "revision-1",
+        specId: "spec-1",
+        taskId: "task-1",
+      },
+    };
+    const ports = createFakePorts({
+      modelActions: [
+        {
+          type: "tool_call",
+          tool: "edit_file",
+          args: {
+            new_string: "Hello",
+            old_string: "Hi",
+            path: "app/page.tsx",
+            summary: "Update page",
+          },
+        },
+        { type: "tool_call", tool: "read_files", args: { paths: ["app/page.tsx"] } },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    const controller = new RunController(ports);
+
+    const run = await controller.start({
+      contract: specContract,
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-spec-autocomplete",
+    });
+
+    expect(run.status).toBe("completed");
+    expect(run.modelTurns).toBe(1);
+    expect(run.toolCalls).toBe(1);
+    expect(ports.modelCalls).toBe(1);
+    expect(ports.events.map((event) => event.type)).toContain("run.completed");
+  });
+
+  it("stops repeated model validation observations after one loop rescue", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        createModelValidationAction("Invalid model response: unsupported Supabase default value \"''\"."),
+        createModelValidationAction("Invalid model response: unsupported Supabase default value \"''\"."),
+        createModelValidationAction("Invalid model response: unsupported Supabase default value \"''\"."),
+      ],
+      verificationStatuses: [],
+    });
+    const controller = new RunController(ports);
+
+    const run = await controller.start({
+      contract: compileTaskContract({ objective: "Create Supabase tables" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-model-validation-exhausted",
+    });
+
+    expect(run.status).toBe("budget_exceeded");
+    expect(run.modelTurns).toBe(3);
+    expect(
+      ports.events.filter((event) => event.type === "model.failed"),
+    ).toHaveLength(3);
+    expect(ports.events.find((event) => event.type === "run.budget_exceeded")?.payload)
+      .toMatchObject({
+        failureKind: "loop_exhausted",
+      });
+    const latestCheckpoint =
+      ports.checkpointRecords[ports.checkpointRecords.length - 1];
+    expect(latestCheckpoint?.observations.join("\n")).toContain(
+      "model_validation",
+    );
+    expect(latestCheckpoint?.observations.join("\n")).toContain(
+      "loop_rescue",
+    );
   });
 
   it("scenario E resumes a waiting approval run after approved exact args hash", async () => {
@@ -277,6 +391,133 @@ describe("Headless RunController", () => {
       .toHaveLength(0);
   });
 
+  it("keeps an unresolved approval waiting before expiresAt", async () => {
+    const deleteArgs = { paths: ["components/Old.tsx"], summary: "Remove obsolete component" };
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "tool_call", tool: "delete_files", args: deleteArgs },
+        { type: "finish_candidate", summary: "Should not run before approval" },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    const controller = new RunController(ports);
+
+    const waiting = await controller.start({
+      contract: compileTaskContract({ objective: "Remove obsolete component" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-approval-late",
+    });
+    ports.approvalRecords[0]!.expiresAt = "2026-01-01T00:10:00.000Z";
+
+    const stillWaiting = await controller.resume(waiting.id);
+
+    expect(stillWaiting.status).toBe("waiting_approval");
+    expect(stillWaiting.modelTurns).toBe(1);
+    expect(ports.approvalRecords[0]?.decision).toBeUndefined();
+    expect(ports.events.map((event) => event.type)).not.toContain("approval.expired");
+    expect(ports.events.filter((event) => event.type === "approval.requested"))
+      .toHaveLength(1);
+  });
+
+  it("marks expired unresolved approvals as expired and replans", async () => {
+    const deleteArgs = { paths: ["components/Old.tsx"], summary: "Remove obsolete component" };
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "tool_call", tool: "delete_files", args: deleteArgs },
+        { type: "tool_call", tool: "delete_files", args: deleteArgs },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    const controller = new RunController(ports);
+
+    const waiting = await controller.start({
+      contract: compileTaskContract({ objective: "Remove obsolete component" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-approval-expired-unresolved",
+    });
+    const staleApproval = ports.approvalRecords[0]!;
+    staleApproval.expiresAt = "2000-01-01T00:00:00.000Z";
+
+    const replanned = await controller.resume(waiting.id);
+
+    expect(replanned.status).toBe("waiting_approval");
+    expect(replanned.modelTurns).toBe(2);
+    expect(replanned.toolCalls).toBe(0);
+    expect(staleApproval).toMatchObject({
+      decision: "expired",
+      resolvedAt: "2026-01-01T00:00:00.000Z",
+    });
+    expect(ports.events.map((event) => event.type)).toContain("approval.expired");
+    expect(ports.approvalRecords).toHaveLength(2);
+    expect(ports.approvalRecords[1]).toMatchObject({
+      targetResources: ["components/Old.tsx"],
+      toolName: "delete_files",
+    });
+    expect(ports.approvalRecords[1]).not.toHaveProperty("decision");
+    expect(ports.approvalRecords[1]).not.toHaveProperty("resolvedAt");
+    const expiredCheckpointEvent = ports.events.find(
+      (event) =>
+        event.type === "checkpoint.created" &&
+        event.payload &&
+        typeof event.payload === "object" &&
+        "reason" in event.payload &&
+        event.payload.reason === "approval-expired",
+    );
+    const expiredCheckpointId =
+      expiredCheckpointEvent?.payload &&
+      typeof expiredCheckpointEvent.payload === "object" &&
+      "checkpointId" in expiredCheckpointEvent.payload
+        ? expiredCheckpointEvent.payload.checkpointId
+        : undefined;
+    const expiredCheckpoint = ports.checkpointRecords.find(
+      (checkpoint) => checkpoint.id === expiredCheckpointId,
+    );
+    expect(
+      expiredCheckpoint
+        ? readRunDriveStateMetadata(expiredCheckpoint.plan).pendingApprovalAction
+        : "missing checkpoint",
+    ).toBeUndefined();
+  });
+
+  it("does not reuse an approval that was approved after expiresAt", async () => {
+    const deleteArgs = { paths: ["components/Old.tsx"], summary: "Remove obsolete component" };
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "tool_call", tool: "delete_files", args: deleteArgs },
+        { type: "tool_call", tool: "delete_files", args: deleteArgs },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    const controller = new RunController(ports);
+
+    const waiting = await controller.start({
+      contract: compileTaskContract({ objective: "Remove obsolete component" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-approval-late-approved",
+    });
+    const staleApproval = ports.approvalRecords[0]!;
+    staleApproval.decision = "approved";
+    staleApproval.expiresAt = "2026-01-01T00:00:00.000Z";
+    staleApproval.resolvedAt = "2026-01-01T00:00:01.000Z";
+
+    const freshWaiting = await controller.resume(waiting.id);
+
+    expect(freshWaiting.status).toBe("waiting_approval");
+    expect(freshWaiting.toolCalls).toBe(0);
+    expect(staleApproval.consumedAt).toBeUndefined();
+    expect(ports.events.filter((event) => event.type === "approval.consumed"))
+      .toHaveLength(0);
+    expect(ports.events.filter((event) => event.type === "tool.completed"))
+      .toHaveLength(0);
+    expect(ports.approvalRecords).toHaveLength(2);
+    expect(ports.approvalRecords[1]?.normalizedArgsHash).toBe(
+      normalizeApprovalHash("run-approval-late-approved", "delete_files", deleteArgs),
+    );
+  });
+
   it("scenario E returns a policy observation after approval is denied", async () => {
     const deleteArgs = { paths: ["components/Old.tsx"], summary: "Remove obsolete component" };
     const ports = createFakePorts({
@@ -417,6 +658,198 @@ describe("Headless RunController", () => {
     expect(
       ports.checkpointRecords[ports.checkpointRecords.length - 1]?.readSnapshots,
     ).toEqual([]);
+  });
+
+  it("persists a rolling run context summary in checkpoint metadata", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "tool_call", tool: "read_files", args: { paths: ["app/page.tsx"] } },
+        { type: "finish_candidate", summary: "Ready to verify" },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    const controller = new RunController(ports);
+
+    await controller.start({
+      contract: compileTaskContract({ objective: "Inspect and finish" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-summary",
+    });
+
+    const latestCheckpoint = ports.checkpointRecords[ports.checkpointRecords.length - 1];
+    const metadata = readRunDriveStateMetadata(latestCheckpoint.plan);
+
+    expect(metadata.userPlan).toBeNull();
+    expect(metadata.runContextSummary?.objective).toBe("Inspect and finish");
+    expect(metadata.runContextSummary?.summarizedObservationCount).toBeGreaterThanOrEqual(1);
+    expect(metadata.runContextSummary?.completed.join("\n")).toContain("read_files succeeded");
+  });
+
+  it("surfaces failed baseline diagnostics to the first model turn", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "finish_candidate", summary: "Repair can be planned from baseline" },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    const controller = new RunController(ports);
+
+    await controller.start({
+      baselineCommandResults: {
+        build: {
+          command: "npm run build",
+          exitCode: 1,
+          output: [
+            "Failed to compile.",
+            "./lib/game/controller.ts:164:9",
+            "Type error: Property 'rank' does not exist on type 'HandRank'.",
+          ].join("\n"),
+          success: false,
+        },
+      },
+      contract: compileTaskContract({ objective: "Repair build before continuing" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-baseline-diagnostics",
+    });
+
+    expect(ports.contexts[0]?.observations.join("\n")).toContain(
+      "baseline_diagnostics",
+    );
+    expect(ports.contexts[0]?.observations.join("\n")).toContain(
+      "lib/game/controller.ts:164:9",
+    );
+    expect(ports.contexts[0]?.runContextSummary.latestFailures.join("\n"))
+      .toContain("Baseline build failed before this run");
+  });
+
+  it("does not classify successful read_files content as latest failure", async () => {
+    const contract = compileTaskContract({ objective: "Inspect existing UI" });
+    const pausedRun = createPausedRun("run-read-summary", contract);
+    const readObservation = JSON.stringify({
+      files: [
+        {
+          content: "const [error, setError] = useState(''); return <p>网络错误，请重试</p>;",
+          path: "components/Lobby.tsx",
+        },
+      ],
+    });
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "finish_candidate", summary: "Already implemented" },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    ports.seedRun(pausedRun);
+    ports.seedCheckpoint({
+      id: "checkpoint-read-summary",
+      runId: pausedRun.id,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      workspaceFingerprint: "workspace:fingerprint",
+      plan: null,
+      observations: [readObservation],
+      changedFiles: [],
+      deletedFiles: [],
+      packageChanged: false,
+      readSnapshots: [],
+      repairFeedback: [],
+      steeringWatermark: 0,
+    });
+    const controller = new RunController(ports);
+
+    await controller.resume(pausedRun.id);
+
+    expect(ports.contexts[0]?.runContextSummary.latestFailures).toEqual([]);
+    expect(ports.contexts[0]?.runContextSummary.completed).toHaveLength(1);
+  });
+
+  it("summarizes successful structured observations without carrying raw file content", async () => {
+    const contract = compileTaskContract({ objective: "Continue from read" });
+    const pausedRun = createPausedRun("run-structured-summary", contract);
+    const readObservation = JSON.stringify({
+      content: JSON.stringify({
+        files: [
+          {
+            content: "x".repeat(6_000),
+            path: "components/Lobby.tsx",
+          },
+        ],
+      }),
+      ok: true,
+      summary: "Read 1 file(s): components/Lobby.tsx",
+      tool: "read_files",
+    });
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "finish_candidate", summary: "Already inspected" },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    ports.seedRun(pausedRun);
+    ports.seedCheckpoint({
+      id: "checkpoint-structured-summary",
+      runId: pausedRun.id,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      workspaceFingerprint: "workspace:fingerprint",
+      plan: null,
+      observations: [readObservation],
+      changedFiles: [],
+      deletedFiles: [],
+      packageChanged: false,
+      readSnapshots: [],
+      repairFeedback: [],
+      steeringWatermark: 0,
+    });
+    const controller = new RunController(ports);
+
+    await controller.resume(pausedRun.id);
+
+    expect(ports.contexts[0]?.runContextSummary.completed).toEqual([
+      "Read 1 file(s): components/Lobby.tsx",
+    ]);
+  });
+
+  it("falls back to deterministic context summary when the LLM summarizer fails", async () => {
+    const contract = compileTaskContract({ objective: "Continue long run" });
+    const pausedRun = createPausedRun("run-summary-fallback", contract);
+    const longObservations = Array.from(
+      { length: 9 },
+      (_, index) => `Observation ${index} ${"x".repeat(3_000)}`,
+    );
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "finish_candidate", summary: "Recovered" },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    ports.contextSummarizer = {
+      summarize: async () => {
+        throw new Error("summary model unavailable");
+      },
+    };
+    ports.seedRun(pausedRun);
+    ports.seedCheckpoint({
+      id: "checkpoint-summary-fallback",
+      runId: pausedRun.id,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      workspaceFingerprint: "workspace:fingerprint",
+      plan: null,
+      observations: longObservations,
+      changedFiles: ["app/page.tsx"],
+      deletedFiles: [],
+      packageChanged: false,
+      readSnapshots: [],
+      repairFeedback: [],
+      steeringWatermark: 0,
+    });
+    const controller = new RunController(ports);
+
+    const completed = await controller.resume(pausedRun.id);
+
+    expect(completed.status).toBe("completed");
+    expect(ports.contexts[0]?.runContextSummary.summarizedObservationCount)
+      .toBe(longObservations.length);
   });
 
   it("scenario H verifies answers once and completes without exhausting budget", async () => {
@@ -563,6 +996,61 @@ describe("Headless RunController", () => {
     expect(ports.events.filter((event) => event.type === "tool.completed")).toHaveLength(1);
   });
 
+  it("keeps answer tasks read-only when the model tries to write after inspection", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        {
+          type: "tool_call",
+          tool: "read_files",
+          args: { paths: ["lib/auth.ts"] },
+        },
+        {
+          type: "tool_call",
+          tool: "edit_file",
+          args: {
+            new_string: "Fixed",
+            old_string: "Broken",
+            path: "lib/auth.ts",
+            summary: "Fix auth",
+          },
+        },
+        {
+          type: "answer",
+          message: "注册失败是因为 profiles.user_id 没有被写入。",
+        },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    const controller = new RunController(ports);
+    const contract = compileTaskContract({
+      objective:
+        "为什么注册不了。null value in column \"user_id\" of relation \"profiles\" violates not-null constraint。",
+    });
+
+    const run = await controller.start({
+      contract,
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-answer-write-denied",
+    });
+
+    expect(contract.taskType).toBe("answer");
+    expect(run.status).toBe("completed");
+    expect(run.mutationCount).toBe(0);
+    expect(ports.events.some((event) =>
+      event.type === "run.budget_exceeded" &&
+      event.payload &&
+      typeof event.payload === "object" &&
+      "budget" in event.payload &&
+      event.payload.budget === "maxMutations",
+    )).toBe(false);
+    expect(ports.events.map((event) => event.type)).toContain("policy.denied");
+    expect(ports.events.filter((event) => event.type === "tool.completed")).toHaveLength(1);
+    expect(ports.contexts[2]?.observations).toContain(
+      "Policy denied edit_file: This task contract does not permit file writes.",
+    );
+  });
+
   it("does not continue repairing after the repair budget is exhausted", async () => {
     const ports = createFakePorts({
       modelActions: [
@@ -610,6 +1098,484 @@ describe("Headless RunController", () => {
     expect(run.status).toBe("budget_exceeded");
     expect(run.modelTurns).toBe(1);
     expect(run.toolCalls).toBe(1);
+  });
+
+  it("stops repeated verification failures after one loop rescue", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        {
+          type: "tool_call",
+          tool: "edit_file",
+          args: {
+            new_string: "Broken once",
+            old_string: "Hi",
+            path: "app/page.tsx",
+            summary: "First repair attempt",
+          },
+        },
+        {
+          type: "tool_call",
+          tool: "edit_file",
+          args: {
+            new_string: "Broken twice",
+            old_string: "Broken once",
+            path: "app/page.tsx",
+            summary: "Second repair attempt",
+          },
+        },
+        {
+          type: "tool_call",
+          tool: "edit_file",
+          args: {
+            new_string: "Broken third time",
+            old_string: "Broken twice",
+            path: "app/page.tsx",
+            summary: "Third repair attempt",
+          },
+        },
+      ],
+      verificationStatuses: ["failed", "failed", "failed"],
+    });
+    const controller = new RunController(ports);
+    const contract: TaskContract = {
+      ...compileTaskContract({ objective: "Fix repeated build failure" }),
+      budget: {
+        maxModelTurns: 8,
+        maxToolCalls: 8,
+        maxMutations: 8,
+        maxRepairCycles: 8,
+      },
+    };
+
+    const run = await controller.start({
+      contract,
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-loop-guard",
+    });
+
+    const terminalEvent = ports.events.find((event) => event.type === "run.budget_exceeded");
+    const rescueCheckpoint = ports.checkpointRecords.find((checkpoint) =>
+      checkpoint.observations.some((observation) =>
+        String(observation).includes('"tool":"loop_rescue"'),
+      ),
+    );
+
+    expect(run.status).toBe("budget_exceeded");
+    expect(run.modelTurns).toBe(3);
+    expect(rescueCheckpoint).toBeDefined();
+    expect(terminalEvent?.payload).toMatchObject({
+      failureKind: "loop_exhausted",
+    });
+  });
+
+  it("stops read-only no-progress loops after one focused rescue", async () => {
+    const readActions: HeadlessModelAction[] = Array.from(
+      { length: 20 },
+      (_, index) => ({
+        type: "tool_call",
+        tool: "read_files",
+        args: { paths: [`app/read-${index}.tsx`] },
+      }),
+    );
+    const ports = createFakePorts({
+      modelActions: readActions,
+      verificationStatuses: [],
+    });
+    const controller = new RunController(ports);
+    const contract: TaskContract = {
+      ...compileTaskContract({ objective: "Implement a feature from several files" }),
+      budget: {
+        maxModelTurns: 40,
+        maxToolCalls: 40,
+        maxMutations: 8,
+        maxRepairCycles: 8,
+      },
+      source: {
+        acceptanceCriteriaIds: ["criterion-1"],
+        expectedFiles: ["app/page.tsx", "components/Panel.tsx"],
+        mode: "spec",
+        requirementIds: ["story-1"],
+        revisionId: "revision-1",
+        specId: "spec-1",
+        taskId: "task-1",
+      },
+    };
+
+    const run = await controller.start({
+      contract,
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-read-only-stall",
+    });
+
+    const terminalEvent = ports.events.find((event) => event.type === "run.budget_exceeded");
+    const rescueCheckpoint = ports.checkpointRecords.find((checkpoint) =>
+      checkpoint.observations.some((observation) =>
+        String(observation).includes("Read-only exploration is repeating"),
+      ),
+    );
+    const rescueContext = ports.contexts.find((context) =>
+      context.observations.join("\n").includes("Read-only exploration is repeating"),
+    );
+
+    expect(run.status).toBe("budget_exceeded");
+    expect(run.modelTurns).toBeLessThan(contract.budget.maxModelTurns);
+    expect(run.toolCalls).toBeLessThan(contract.budget.maxToolCalls);
+    expect(rescueCheckpoint).toBeDefined();
+    expect(rescueContext).toBeDefined();
+    expect(terminalEvent?.payload).toMatchObject({
+      failureKind: "loop_exhausted",
+      reason: expect.stringContaining("Read-only exploration repeated"),
+    });
+  });
+
+  it("auto-verifies after read-only evidence satisfies missing expected files", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        {
+          type: "tool_call",
+          tool: "edit_file",
+          args: {
+            new_string: "Hello",
+            old_string: "Hi",
+            path: "app/page.tsx",
+            summary: "Update page",
+          },
+        },
+        {
+          type: "tool_call",
+          tool: "read_files",
+          args: { paths: ["components/Panel.tsx"] },
+        },
+        { type: "finish_candidate", summary: "Should not need another model turn" },
+      ],
+      verificationStatuses: [],
+    });
+    let verificationCount = 0;
+    ports.tools.execute = async ({ args, tool }): Promise<ToolResult> => {
+      if (tool === "edit_file") {
+        return {
+          artifactIds: [],
+          retryable: false,
+          status: "success",
+          summary: "Edited app/page.tsx.",
+          workspaceEffects: {
+            changedFiles: ["app/page.tsx"],
+            packageChanged: false,
+          },
+        };
+      }
+
+      const path = (args as { paths: string[] }).paths[0]!;
+      return {
+        artifactIds: [],
+        retryable: false,
+        status: "success",
+        structuredData: {
+          files: [{ content: "export function Panel() { return null; }", path }],
+        },
+        summary: `Read ${path}`,
+        workspaceEffects: {
+          changedFiles: [],
+          packageChanged: false,
+          readSnapshots: [
+            {
+              contentHash: `hash:${path}`,
+              path,
+              readAt: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+        },
+      };
+    };
+    ports.verifier.verify = async (input): Promise<VerificationReport> => {
+      verificationCount += 1;
+
+      if (verificationCount === 1) {
+        return {
+          artifactIds: [],
+          checks: [
+            {
+              id: "acceptance:request-addressed",
+              required: true,
+              status: "inconclusive",
+              summary: "Expected file evidence is missing for: components/Panel.tsx.",
+              title: "Acceptance: request-addressed",
+            },
+          ],
+          createdAt: "2026-01-01T00:00:00.000Z",
+          id: "report-missing-evidence",
+          missingEvidence: [
+            "Expected file evidence is missing for: components/Panel.tsx.",
+          ],
+          newlyIntroducedFailures: [],
+          repairFeedback: [],
+          runId: input.run.id,
+          status: "inconclusive",
+        };
+      }
+
+      return {
+        artifactIds: [],
+        checks: [
+          {
+            id: "acceptance:request-addressed",
+            required: true,
+            status: "passed",
+            summary: "Existing workspace evidence inspected expected file(s).",
+            title: "Acceptance: request-addressed",
+          },
+        ],
+        createdAt: "2026-01-01T00:00:00.000Z",
+        id: "report-evidence-passed",
+        missingEvidence: [],
+        newlyIntroducedFailures: [],
+        repairFeedback: [],
+        runId: input.run.id,
+        status: "passed",
+      };
+    };
+    const controller = new RunController(ports);
+    const contract: TaskContract = {
+      ...compileTaskContract({ objective: "Update page and panel" }),
+      source: {
+        acceptanceCriteriaIds: ["criterion-1"],
+        expectedFiles: ["app/page.tsx", "components/Panel.tsx"],
+        mode: "spec",
+        requirementIds: ["story-1"],
+        revisionId: "revision-1",
+        specId: "spec-1",
+        taskId: "task-1",
+      },
+    };
+
+    const run = await controller.start({
+      contract,
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-auto-evidence-verify",
+    });
+
+    expect(run.status).toBe("completed");
+    expect(verificationCount).toBe(2);
+    expect(ports.modelCalls).toBe(2);
+    expect(ports.events.filter((event) => event.type === "verification.completed"))
+      .toHaveLength(2);
+    expect(
+      ports.checkpointRecords.some((checkpoint) =>
+        checkpoint.runId === run.id &&
+        checkpoint.readSnapshots.some((snapshot) => snapshot.path === "components/Panel.tsx"),
+      ),
+    ).toBe(true);
+  });
+
+  it("auto-verifies a spec run once all expected files are read before mutation", async () => {
+    const expectedFiles = [
+      "components/ActionPanel.tsx",
+      "lib/game/controller.ts",
+      "app/api/game/route.ts",
+    ];
+    const ports = createFakePorts({
+      modelActions: [
+        {
+          type: "tool_calls",
+          calls: expectedFiles.map((path) => ({
+            type: "tool_call",
+            tool: "read_files",
+            args: { paths: [path] },
+          })),
+        },
+        {
+          type: "tool_call",
+          tool: "read_files",
+          args: { paths: ["components/ActionPanel.tsx"] },
+        },
+      ],
+      verificationStatuses: [],
+    });
+    let verificationCount = 0;
+    ports.tools.execute = async ({ args, tool }): Promise<ToolResult> => {
+      expect(tool).toBe("read_files");
+      const path = (args as { paths: string[] }).paths[0]!;
+      return {
+        artifactIds: [],
+        retryable: false,
+        status: "success",
+        structuredData: {
+          files: [{ content: `// ${path}`, path }],
+        },
+        summary: `Read ${path}`,
+        workspaceEffects: {
+          changedFiles: [],
+          packageChanged: false,
+          readSnapshots: [
+            {
+              contentHash: `hash:${path}`,
+              path,
+              readAt: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+        },
+      };
+    };
+    ports.verifier.verify = async (input): Promise<VerificationReport> => {
+      verificationCount += 1;
+      expect(input.changedFiles).toEqual([]);
+      expect(input.readSnapshots?.map((snapshot) => snapshot.path).sort())
+        .toEqual([...expectedFiles].sort());
+
+      return {
+        artifactIds: [],
+        checks: [
+          {
+            id: "acceptance:request-addressed",
+            required: true,
+            status: "passed",
+            summary: "Existing workspace evidence inspected expected file(s).",
+            title: "Acceptance: request-addressed",
+          },
+        ],
+        createdAt: "2026-01-01T00:00:00.000Z",
+        id: "report-expected-files-read",
+        missingEvidence: [],
+        newlyIntroducedFailures: [],
+        repairFeedback: [],
+        runId: input.run.id,
+        status: "passed",
+      };
+    };
+    const controller = new RunController(ports);
+    const contract: TaskContract = {
+      ...compileTaskContract({ objective: "Implement action panel integration" }),
+      source: {
+        acceptanceCriteriaIds: ["criterion-5", "criterion-6"],
+        expectedFiles,
+        mode: "spec",
+        requirementIds: ["story-4", "story-5"],
+        revisionId: "revision-1",
+        specId: "spec-1",
+        taskId: "task-8",
+      },
+    };
+
+    const run = await controller.start({
+      contract,
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-expected-files-read-auto-verify",
+    });
+
+    expect(run.status).toBe("completed");
+    expect(run.modelTurns).toBe(1);
+    expect(run.toolCalls).toBe(expectedFiles.length);
+    expect(verificationCount).toBe(1);
+    expect(
+      ports.checkpointRecords.some((checkpoint) =>
+        checkpoint.runId === run.id &&
+        checkpoint.id.includes("checkpoint") &&
+        readRunDriveStateMetadata(checkpoint.plan).expectedFileEvidenceAutoVerifyKey
+          ?.includes("components/ActionPanel.tsx"),
+      ),
+    ).toBe(true);
+  });
+
+  it("auto-reads missing spec expected files when read-only exploration skips them", async () => {
+    const expectedFiles = [
+      "components/ActionPanel.tsx",
+      "lib/game/controller.ts",
+      "app/api/game/route.ts",
+    ];
+    const ports = createFakePorts({
+      modelActions: [
+        {
+          type: "tool_call",
+          tool: "read_files",
+          args: { paths: ["components/ActionPanel.tsx"] },
+        },
+        {
+          type: "tool_call",
+          tool: "read_files",
+          args: { paths: ["lib/context/GameContext.tsx"] },
+        },
+        {
+          type: "tool_call",
+          tool: "read_files",
+          args: { paths: ["components/ActionPanel.tsx"] },
+        },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    ports.tools.execute = async ({ args, tool }): Promise<ToolResult> => {
+      expect(tool).toBe("read_files");
+      const path = (args as { paths: string[] }).paths[0]!;
+      return {
+        artifactIds: [],
+        retryable: false,
+        status: "success",
+        structuredData: {
+          files: [{ content: `// ${path}`, path }],
+        },
+        summary: `Read ${path}`,
+        workspaceEffects: {
+          changedFiles: [],
+          packageChanged: false,
+          readSnapshots: [
+            {
+              contentHash: `hash:${path}`,
+              path,
+              readAt: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+        },
+      };
+    };
+    const controller = new RunController(ports);
+    const contract: TaskContract = {
+      ...compileTaskContract({ objective: "Implement action panel integration" }),
+      source: {
+        acceptanceCriteriaIds: ["criterion-5", "criterion-6"],
+        expectedFiles,
+        mode: "spec",
+        requirementIds: ["story-4", "story-5"],
+        revisionId: "revision-1",
+        specId: "spec-1",
+        taskId: "task-8",
+      },
+    };
+
+    const run = await controller.start({
+      contract,
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-auto-read-missing-expected-files",
+    });
+
+    expect(run.status).toBe("completed");
+    expect(run.modelTurns).toBe(2);
+    expect(run.toolCalls).toBe(4);
+    expect(ports.verificationRequests).toHaveLength(1);
+    expect(
+      ports.verificationRequests[0]?.readSnapshots
+        .map((snapshot) => snapshot.path)
+        .sort(),
+    ).toEqual([
+      ...expectedFiles,
+      "lib/context/GameContext.tsx",
+    ].sort());
+    expect(
+      ports.events.some((event) =>
+        event.type === "plan.updated" &&
+        JSON.stringify(event.payload).includes("auto-reading-missing-expected-files"),
+      ),
+    ).toBe(true);
+    expect(
+      ports.checkpointRecords.some((checkpoint) =>
+        checkpoint.observations.some((observation) =>
+          String(observation).includes("Auto-reading missing expected file"),
+        ),
+      ),
+    ).toBe(true);
   });
 
   it("runs read-only tool_calls concurrently and records observations in order", async () => {
@@ -674,7 +1640,8 @@ describe("Headless RunController", () => {
     expect(run.status).toBe("completed");
     expect(run.toolCalls).toBe(2);
     expect(starts).toEqual(["app/a.tsx", "app/b.tsx"]);
-    expect(ports.contexts[1]?.observations).toEqual(["read:app/a.tsx", "read:app/b.tsx"]);
+    expect(ports.contexts[1]?.observations.join("\n")).toContain("read:app/a.tsx");
+    expect(ports.contexts[1]?.observations.join("\n")).toContain("read:app/b.tsx");
     expect(
       ports.checkpointRecords[ports.checkpointRecords.length - 1]?.readSnapshots,
     ).toEqual([
@@ -691,6 +1658,223 @@ describe("Headless RunController", () => {
     ]);
     expect(ports.events.map((event) => event.sequence)).toEqual(
       Array.from({ length: ports.events.length }, (_, index) => index + 1),
+    );
+  });
+
+  it("allows duplicate read_files when exact retained content may be needed", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "tool_call", tool: "read_files", args: { paths: ["app/page.tsx"] } },
+        { type: "tool_call", tool: "read_files", args: { paths: ["app/page.tsx"] } },
+        { type: "finish_candidate", summary: "Existing page inspected" },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    let readExecutions = 0;
+    ports.tools.execute = async ({ tool }): Promise<ToolResult> => {
+      if (tool !== "read_files") {
+        throw new Error(`Unexpected tool ${tool}`);
+      }
+
+      readExecutions += 1;
+      return {
+        artifactIds: [],
+        retryable: false,
+        status: "success",
+        structuredData: {
+          files: [
+            {
+              content: "export default function Page() {}",
+              path: "app/page.tsx",
+            },
+          ],
+        },
+        summary: "Read app/page.tsx",
+        workspaceEffects: {
+          changedFiles: [],
+          packageChanged: false,
+          readSnapshots: [
+            {
+              contentHash: "hash-1",
+              path: "app/page.tsx",
+              readAt: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+        },
+      };
+    };
+    const controller = new RunController(ports);
+
+    const run = await controller.start({
+      contract: compileTaskContract({ objective: "Inspect page" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-duplicate-read",
+    });
+
+    expect(run.status).toBe("completed");
+    expect(readExecutions).toBe(2);
+    expect(run.toolCalls).toBe(2);
+    expect(ports.events.some((event) =>
+      event.type === "tool.failed" &&
+      JSON.stringify(event.payload).includes("Duplicate read_files skipped"),
+    )).toBe(false);
+  });
+
+  it("allows repeated reads after a mutation so edits can recover exact text", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "tool_call", tool: "read_files", args: { paths: ["app/page.tsx"] } },
+        {
+          type: "tool_call",
+          tool: "edit_file",
+          args: {
+            new_string: "Hello",
+            old_string: "Hi",
+            path: "app/page.tsx",
+            summary: "Update page",
+          },
+        },
+        { type: "tool_call", tool: "read_files", args: { paths: ["app/page.tsx"] } },
+        { type: "tool_call", tool: "read_files", args: { paths: ["app/page.tsx"] } },
+        { type: "finish_candidate", summary: "Repair complete" },
+      ],
+      verificationStatuses: ["failed", "passed"],
+    });
+    let readExecutions = 0;
+    let editExecutions = 0;
+    ports.tools.execute = async ({ tool }): Promise<ToolResult> => {
+      if (tool === "read_files") {
+        readExecutions += 1;
+
+        return {
+          artifactIds: [],
+          retryable: false,
+          status: "success",
+          structuredData: {
+            files: [
+              {
+                content: "1 | export default function Page() {}",
+                contentHash: `hash-${readExecutions}`,
+                endLine: 1,
+                path: "app/page.tsx",
+                startLine: 1,
+                totalLines: 1,
+                truncated: false,
+              },
+            ],
+          },
+          summary: "Read app/page.tsx",
+          workspaceEffects: {
+            changedFiles: [],
+            packageChanged: false,
+            readSnapshots: [
+              {
+                contentHash: `hash-${readExecutions}`,
+                path: "app/page.tsx",
+                readAt: `2026-01-01T00:00:0${readExecutions}.000Z`,
+              },
+            ],
+          },
+        };
+      }
+
+      if (tool === "edit_file") {
+        editExecutions += 1;
+
+        return {
+          artifactIds: [],
+          retryable: false,
+          status: "success",
+          structuredData: "Edited app/page.tsx.",
+          summary: "Edited app/page.tsx.",
+          workspaceEffects: {
+            changedFiles: ["app/page.tsx"],
+            packageChanged: false,
+          },
+        };
+      }
+
+      throw new Error(`Unexpected tool ${tool}`);
+    };
+    const controller = new RunController(ports);
+
+    const run = await controller.start({
+      contract: compileTaskContract({ objective: "Repair page" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-reread-after-mutation",
+    });
+
+    expect(run.status).toBe("completed");
+    expect(readExecutions).toBe(3);
+    expect(editExecutions).toBe(1);
+    expect(run.toolCalls).toBe(4);
+    expect(ports.events.some((event) =>
+      event.type === "tool.failed" &&
+      JSON.stringify(event.payload).includes("Duplicate read_files skipped"),
+    )).toBe(false);
+  });
+
+  it("counts external database tool effects as verification evidence and mutation progress", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        {
+          type: "tool_call",
+          tool: "apply_supabase_schema",
+          args: {
+            summary: "Created Supabase tables",
+            tables: [
+              {
+                columns: [
+                  {
+                    dataType: "uuid",
+                    name: "id",
+                    nullable: false,
+                    primaryKey: true,
+                  },
+                ],
+                name: "profiles",
+              },
+            ],
+          },
+        },
+        { type: "finish_candidate", summary: "Schema applied" },
+      ],
+      verificationStatuses: ["passed", "passed"],
+    });
+    ports.tools.execute = async (): Promise<ToolResult> => ({
+      artifactIds: [],
+      retryable: false,
+      status: "success",
+      structuredData: "schema applied",
+      summary: "Created Supabase tables",
+      workspaceEffects: {
+        changedFiles: [],
+        externalEffects: ["Supabase schema applied for table(s): profiles, rooms."],
+        packageChanged: false,
+      },
+    });
+    const controller = new RunController(ports);
+
+    const contract = compileTaskContract({ objective: "Create Supabase tables" });
+    const run = await controller.start({
+      contract: {
+        ...contract,
+        permissions: {
+          ...contract.permissions,
+          databaseChange: "allow",
+        },
+      },
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-database-evidence",
+    });
+
+    expect(run.status).toBe("completed");
+    expect(run.mutationCount).toBe(1);
+    expect(ports.verificationRequests[0]?.externalEffects).toContain(
+      "Supabase schema applied for table(s): profiles, rooms.",
     );
   });
 
@@ -760,7 +1944,9 @@ function createFakePorts({
   const verificationRequests: Array<{
     changedFiles: string[];
     deletedFiles: string[];
+    externalEffects: string[];
     packageChanged: boolean;
+    readSnapshots: AgentReadSnapshot[];
     run: AgentRun;
   }> = [];
   let modelCalls = 0;
@@ -789,7 +1975,9 @@ function createFakePorts({
     verificationRequests: Array<{
       changedFiles: string[];
       deletedFiles: string[];
+      externalEffects: string[];
       packageChanged: boolean;
+      readSnapshots: AgentReadSnapshot[];
       run: AgentRun;
     }>;
   } = {
@@ -846,14 +2034,22 @@ function createFakePorts({
           .find((approval) => approval.runId === runId && !approval.decision && !approval.resolvedAt) ?? null,
       getPending: async (runId) =>
         approvals.find(
-          (approval) => approval.runId === runId && !approval.decision && !approval.resolvedAt,
+          (approval) =>
+            approval.runId === runId &&
+            !approval.decision &&
+            !approval.resolvedAt &&
+            new Date(approval.expiresAt).getTime() >
+              new Date(ports.clock.now()).getTime(),
         ) ?? null,
       listApprovedAuthorizations: async (runId) =>
         approvals.filter(
           (approval) =>
             approval.runId === runId &&
             approval.decision === "approved" &&
-            !approval.consumedAt,
+            approval.resolvedAt &&
+            !approval.consumedAt &&
+            new Date(approval.resolvedAt).getTime() <=
+              new Date(approval.expiresAt).getTime(),
         ),
       claimApprovedAuthorization: async ({
         approvalId,
@@ -964,7 +2160,9 @@ function createFakePorts({
         verificationRequests.push({
           changedFiles: [...input.changedFiles],
           deletedFiles: [...input.deletedFiles],
+          externalEffects: [...input.externalEffects],
           packageChanged: input.packageChanged,
+          readSnapshots: [...(input.readSnapshots ?? [])],
           run,
         });
 
@@ -990,6 +2188,21 @@ function createFakePorts({
   };
 
   return ports;
+}
+
+function createModelValidationAction(
+  validationError: string,
+): HeadlessModelAction {
+  return {
+    attempts: 3,
+    invalidResponsePreview: JSON.stringify({
+      type: "tool_call",
+      tool: "apply_supabase_schema",
+    }),
+    message: `Invalid model response repair exhausted after 3 attempt(s): ${validationError}`,
+    type: "model_validation_error",
+    validationError,
+  };
 }
 
 function createPausedRun(runId: string, contract: TaskContract): AgentRun {

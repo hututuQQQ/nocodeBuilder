@@ -17,6 +17,7 @@ export type LlmErrorCode =
   | "api_key"
   | "network"
   | "http"
+  | "context_budget"
   | "response_parse"
   | "json_parse";
 

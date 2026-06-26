@@ -164,6 +164,40 @@ describe("agentToolExecutor update_design_tokens", () => {
       { content: ":root { --old: value; }", path: "styles/nocode-tokens.css" },
     ]);
   });
+
+  it("keeps command diagnostics locations and code frames", async () => {
+    const result = await executeAgentTool(
+      createFakeStore({
+        command: "npm run build",
+        exitCode: 1,
+        output: [
+          "Failed to compile.",
+          "",
+          "./lib/game/controller.ts:118:46",
+          "Type error: Argument of type 'HandEvaluation' is not assignable to parameter of type 'HandRank'.",
+          "  116 |",
+          "  117 |   const handDescriptions = playerEvaluations.map(",
+          "> 118 |     (e) => `${e.player.name}: ${describeHand(e.hand)}`",
+          "      |                                              ^",
+        ].join("\n"),
+        success: false,
+      }),
+      createProject(),
+      {
+        args: { command: "npm run build" },
+        rationale: "Check build",
+        tool: "run_command",
+        type: "tool_call",
+      },
+      1,
+      createAgentRunState(),
+    );
+
+    expect(result.observation.ok).toBe(false);
+    expect(result.observation.content).toContain('"path": "lib/game/controller.ts"');
+    expect(result.observation.content).toContain('"line": 118');
+    expect(result.observation.content).toContain("describeHand(e.hand)");
+  });
 });
 
 function updateDesignTokensStep(): AgentToolCallStep {
@@ -214,7 +248,12 @@ function createProject() {
   };
 }
 
-function createFakeStore() {
+function createFakeStore(commandResult?: {
+  command: string;
+  exitCode: number | null;
+  output: string;
+  success: boolean;
+}) {
   let state = {
     currentProject: { id: "project-1" },
     fileTree: {
@@ -229,6 +268,7 @@ function createFakeStore() {
         },
       ],
     },
+    runProjectCommand: vi.fn(async () => commandResult ?? null),
   };
 
   return {

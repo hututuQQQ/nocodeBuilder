@@ -1,4 +1,5 @@
 import { modifyCurrentProject } from "./agentWorkflow";
+import { buildProjectBackendContext } from "../agent/project/backendContext";
 import type { AppState } from "./appStore";
 import { createChatMessage } from "./chatMessages";
 import { appendLogs } from "./commandLogs";
@@ -7,7 +8,10 @@ import {
   persistConversation,
 } from "./conversationState";
 import type { StoreAccess } from "./storeAccess";
-import type { SpecTask } from "../spec-core/types";
+import type { DevelopmentSpec, SpecTask } from "../spec-core/types";
+import { keyStore } from "../services/keyStore";
+import { getProjectErrorMessage } from "../services/projects";
+import { requestSpecChatAnswer } from "../spec-runtime/requests";
 import {
   canRetrySpecVerification,
   getCurrentSpecRevision,
@@ -189,6 +193,43 @@ async function handleSpecConversationMessage(
     return;
   }
 
+  if (spec && ["approved", "building"].includes(spec.status)) {
+    const before = getSpecExecutionSnapshot(spec);
+    const assistantMessage = createChatMessage(
+      "assistant",
+      localizeUserFacingMessage(message, {
+        en: "I found no live Spec task run that can accept steering. I am syncing the Spec state now and checking whether the current task can be retried.",
+        zhHans:
+          "我没有找到可接收 steering 的实时 Spec 任务运行。现在会同步 Spec 状态，并检查当前任务是否可以重试。",
+      }),
+    );
+    const nextConversation = appendConversationMessage(store, assistantMessage);
+    void persistConversation(store, nextConversation);
+    set((state) => ({
+      terminalLogs: appendLogs(state.terminalLogs, [
+        "[spec] Chat message requested execution reconciliation.",
+      ]),
+    }));
+    await get().retryCurrentSpecTaskExecution();
+    const resultMessage = describeSpecExecutionReconcileResult(
+      before,
+      get(),
+      message,
+    );
+    const resultAssistantMessage = createChatMessage("assistant", resultMessage);
+    const resultConversation = appendConversationMessage(
+      store,
+      resultAssistantMessage,
+    );
+    void persistConversation(store, resultConversation);
+    return;
+  }
+
+  if (spec?.status === "review") {
+    await answerReviewSpecQuestion(store, message, spec);
+    return;
+  }
+
   if (spec?.status === "blocked") {
     const recovery = getBlockedSpecChatRecovery(spec);
 
@@ -240,6 +281,74 @@ async function handleSpecConversationMessage(
   const assistantMessage = createChatMessage("assistant", guidance);
   const nextConversation = appendConversationMessage(store, assistantMessage);
   void persistConversation(store, nextConversation);
+}
+
+async function answerReviewSpecQuestion(
+  store: StoreAccess,
+  message: string,
+  spec: NonNullable<AppState["currentSpec"]>,
+) {
+  const { get, set } = store;
+  const config = await keyStore.getAiProviderConfig();
+
+  if (!config) {
+    const assistantMessage = createChatMessage(
+      "assistant",
+      localizeUserFacingMessage(message, {
+        en: "Configure your AI provider first, then I can answer questions about this Spec.",
+        zhHans: "请先配置 AI provider，然后我就可以回答这个 Spec 相关的问题。",
+      }),
+    );
+    const nextConversation = appendConversationMessage(store, assistantMessage);
+    void persistConversation(store, nextConversation);
+    set({ projectError: "Configure your AI provider first." });
+    return;
+  }
+
+  try {
+    const projectId = get().currentProject?.id ?? spec.projectId;
+    const answer = await requestSpecChatAnswer({
+      config,
+      conversationMessages: get().currentConversation?.messages.slice(-12) ?? [],
+      currentRevision: getCurrentSpecRevision(spec),
+      planningContext: await buildSpecChatPlanningContext(projectId),
+      question: message,
+    });
+    const assistantMessage = createChatMessage("assistant", answer);
+    const nextConversation = appendConversationMessage(store, assistantMessage);
+    void persistConversation(store, nextConversation);
+    set((state) => ({
+      terminalLogs: appendLogs(state.terminalLogs, [
+        "[spec] Answered review question with model context.",
+      ]),
+    }));
+  } catch (error) {
+    const details = getProjectErrorMessage(error);
+    const assistantMessage = createChatMessage(
+      "assistant",
+      localizeUserFacingMessage(message, {
+        en: `I could not answer this Spec question: ${details}`,
+        zhHans: `我暂时没法回答这个 Spec 问题：${details}`,
+      }),
+    );
+    const nextConversation = appendConversationMessage(store, assistantMessage);
+    void persistConversation(store, nextConversation);
+    set({ projectError: details });
+  }
+}
+
+async function buildSpecChatPlanningContext(projectId: string) {
+  try {
+    return {
+      backendContext: await buildProjectBackendContext(projectId, {
+        includeSchema: true,
+      }),
+    };
+  } catch (error) {
+    return {
+      backendContextError: getProjectErrorMessage(error),
+    };
+  }
 }
 
 function getBlockedSpecChatRecovery(spec: NonNullable<AppState["currentSpec"]>):
@@ -329,6 +438,132 @@ function guidanceForSpecStatus(status: string, userMessage: string) {
         zhHans: "当前处于 Spec 模式。请使用 Spec 控件继续。",
       });
   }
+}
+
+type SpecExecutionSnapshot = {
+  runningTask: Pick<SpecTask, "id" | "runId" | "status" | "title"> | null;
+  specId: string;
+  specStatus: DevelopmentSpec["status"];
+  tasks: Array<Pick<SpecTask, "error" | "id" | "runId" | "status" | "title">>;
+};
+
+function getSpecExecutionSnapshot(spec: DevelopmentSpec): SpecExecutionSnapshot {
+  const revision = getCurrentSpecRevision(spec);
+  const tasks = revision.tasks.map((task) => ({
+    error: task.error,
+    id: task.id,
+    runId: task.runId,
+    status: task.status,
+    title: task.title,
+  }));
+
+  return {
+    runningTask:
+      tasks.find((task) => task.status === "running") ?? null,
+    specId: spec.id,
+    specStatus: spec.status,
+    tasks,
+  };
+}
+
+function describeSpecExecutionReconcileResult(
+  before: SpecExecutionSnapshot,
+  state: AppState,
+  userMessage: string,
+) {
+  const spec = state.currentSpec;
+
+  if (!spec || spec.id !== before.specId) {
+    return localizeUserFacingMessage(userMessage, {
+      en: "Spec sync finished, but the active Spec changed before I could verify the retry result.",
+      zhHans: "Spec 同步已结束，但当前 Spec 已切换，所以我没法确认这次重试结果。",
+    });
+  }
+
+  const after = getSpecExecutionSnapshot(spec);
+  const beforeRunning = before.runningTask;
+  const afterRunning = after.runningTask;
+
+  if (
+    afterRunning?.runId &&
+    afterRunning.runId !== beforeRunning?.runId
+  ) {
+    return localizeUserFacingMessage(userMessage, {
+      en: `Synced and retried ${afterRunning.title}. New AgentRun: ${afterRunning.runId}.`,
+      zhHans: `已同步状态并重试 ${afterRunning.title}。新的 AgentRun 是 ${afterRunning.runId}。`,
+    });
+  }
+
+  const knownRuns = state.currentAgentRun
+    ? [state.currentAgentRun, ...state.agentRuns]
+    : state.agentRuns;
+  const terminalRunForRunningTask =
+    afterRunning?.runId
+      ? knownRuns.find(
+          (run) =>
+            run.id === afterRunning.runId &&
+            ["completed", "failed", "cancelled", "budget_exceeded"].includes(
+              run.status,
+            ),
+        )
+      : null;
+
+  if (afterRunning?.runId && terminalRunForRunningTask) {
+    return localizeUserFacingMessage(userMessage, {
+      en: `Spec sync did not start a retry. ${afterRunning.title} still points at terminal AgentRun ${afterRunning.runId} (${terminalRunForRunningTask.status}).`,
+      zhHans: `Spec 同步没有启动重试。${afterRunning.title} 仍然指向已结束的 AgentRun ${afterRunning.runId}（${terminalRunForRunningTask.status}）。`,
+    });
+  }
+
+  if (afterRunning?.runId) {
+    return localizeUserFacingMessage(userMessage, {
+      en: `Synced state. ${afterRunning.title} is still running on AgentRun ${afterRunning.runId}.`,
+      zhHans: `已同步状态。${afterRunning.title} 仍在运行，AgentRun 是 ${afterRunning.runId}。`,
+    });
+  }
+
+  const failedTask =
+    after.tasks.find((task) =>
+      ["failed", "cancelled", "blocked"].includes(task.status),
+    ) ?? null;
+
+  if (failedTask) {
+    const detail = failedTask.error ? `: ${failedTask.error}` : ".";
+    return localizeUserFacingMessage(userMessage, {
+      en: `Synced state. ${failedTask.title} is ${failedTask.status}${detail}`,
+      zhHans: `已同步状态。${failedTask.title} 当前是 ${failedTask.status}${detail}`,
+    });
+  }
+
+  if (spec.status === "verifying") {
+    return localizeUserFacingMessage(userMessage, {
+      en: "Synced state. All tasks are done and final verification is running.",
+      zhHans: "已同步状态。所有任务已完成，正在进行最终验证。",
+    });
+  }
+
+  if (spec.status === "completed") {
+    return localizeUserFacingMessage(userMessage, {
+      en: "Synced state. This Spec is already complete.",
+      zhHans: "已同步状态。这个 Spec 已经完成。",
+    });
+  }
+
+  if (state.projectError) {
+    return localizeUserFacingMessage(userMessage, {
+      en: `Spec sync did not start a retry: ${state.projectError}`,
+      zhHans: `Spec 同步没有启动重试：${state.projectError}`,
+    });
+  }
+
+  const previousRun = beforeRunning?.runId
+    ? ` Previous AgentRun: ${beforeRunning.runId}.`
+    : "";
+
+  return localizeUserFacingMessage(userMessage, {
+    en: `Spec sync finished, but no retry started.${previousRun}`,
+    zhHans: `Spec 同步已结束，但没有启动新的重试。${beforeRunning?.runId ? `上一个 AgentRun 是 ${beforeRunning.runId}。` : ""}`,
+  });
 }
 
 function isTerminalRun(run: AppState["currentAgentRun"]) {

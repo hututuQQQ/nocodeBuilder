@@ -4,14 +4,25 @@ import {
   requestAgentStep,
   requestProjectGeneration,
   type AgentObservation,
+  type AgentStepContext,
   type AgentStepResponse,
   type AgentToolCallStep,
+  type CompactSpecContext,
 } from "../agent/projectModifier";
 import {
   buildProjectBackendContext,
   hasBackendIntent,
 } from "../agent/project/backendContext";
+import {
+  buildAgentBudgetState,
+  compressAgentStepContext,
+} from "../agent/project/contextCompression";
 import { buildDynamicAgentContext } from "../agent/project/memory";
+import {
+  AgentStepValidationError,
+  requestRunContextSummary,
+} from "../agent/project/requests";
+import { LlmClientError } from "../agent/llm/errors";
 import { AgentVerifier, type BaselineCommandResults } from "../agent-core/verifier/verifier";
 import { compileTaskContract } from "../agent-core/contract/taskContract";
 import type { TaskContract } from "../agent-core/types";
@@ -26,7 +37,9 @@ import { isTerminalAgentRunStatus, RunStateMachine } from "../agent-core/runtime
 import type {
   AgentApproval,
   AgentEvent,
+  AgentRunFailureKind,
   AgentRun,
+  AgentRunCheckpoint,
   PreviewVerificationSession,
   ToolResult,
   VerificationReport,
@@ -43,6 +56,8 @@ import {
   type ProjectInfo,
 } from "../services/projects";
 import { agentRuntimeApi } from "../services/agentRuntime";
+import { specApi } from "../services/specs";
+import type { DevelopmentSpec, SpecRevision, SpecTask } from "../spec-core/types";
 import { appendLogs } from "../store/commandLogs";
 import { persistCurrentConversation } from "../store/conversationState";
 import type { AppState } from "../store/appStore";
@@ -80,6 +95,8 @@ type RunApplicationRuntimeInput = {
 };
 
 export type ApplicationRunResult = {
+  failureKind?: AgentRunFailureKind;
+  failureReason?: string;
   run: AgentRun | null;
   verificationReport: VerificationReport | null;
 };
@@ -248,6 +265,9 @@ async function runApplicationRuntime(
               input.conversationId ??
               store.get().currentConversation?.id ??
               "conversation-default",
+            initialObservations: input.resumeObservation
+              ? [JSON.stringify(input.resumeObservation)]
+              : undefined,
             projectId: project.id,
             runId: controllerRunId,
           },
@@ -255,14 +275,19 @@ async function runApplicationRuntime(
         );
 
     await completeStreamForRun(project.id, store, stream, finalRun);
+    const failureDetails = await getRunTerminalFailureDetails(project.id, finalRun);
     void persistRuntimeCurrentConversation(store, finalRun);
     return {
+      failureKind: failureDetails.failureKind,
+      failureReason: failureDetails.failureReason,
       run: finalRun,
       verificationReport: await getRunVerificationReport(project.id, finalRun),
     };
   } catch (error) {
     const message = getProjectErrorMessage(error);
+    const failureDetails = classifyRuntimeFailure(error, message);
     const cleanupResult = await cleanupRunAfterRuntimeError({
+      failureKind: failureDetails.failureKind,
       message,
       projectId: project.id,
       runId: controllerRunId,
@@ -280,6 +305,8 @@ async function runApplicationRuntime(
         ]),
       }));
       return {
+        failureKind: cleanupResult.failureKind,
+        failureReason: cleanupResult.message,
         run: cleanupResult.run,
         verificationReport: await getRunVerificationReport(
           project.id,
@@ -295,6 +322,8 @@ async function runApplicationRuntime(
       terminalLogs: appendLogs(state.terminalLogs, [`[agent:error] ${cleanupMessage}`]),
     }));
     return {
+      failureKind: cleanupResult.failureKind,
+      failureReason: cleanupResult.message,
       run: cleanupResult.run,
       verificationReport: await getRunVerificationReport(
         project.id,
@@ -362,6 +391,20 @@ function createApplicationPorts({
     checkpoints: {
       getLatest: (runId) => agentRuntimeApi.getLatestCheckpoint(project.id, runId),
       save: (checkpoint) => agentRuntimeApi.saveCheckpoint(project.id, checkpoint),
+    },
+    contextSummarizer: {
+      summarize: async (input) => {
+        const config = await keyStore.getAiProviderConfig();
+
+        if (!config) {
+          throw new Error("Configure your AI provider first.");
+        }
+
+        return requestRunContextSummary({
+          ...input,
+          config,
+        });
+      },
     },
     clock: {
       now: () => new Date().toISOString(),
@@ -509,8 +552,16 @@ async function nextModelAction({
   if (await shouldGenerateProject(store, mode, session)) {
     session.generationActionQueued = true;
     updateAgentStatus(stream, session.statusLines, "Generating initial project files.");
+    const specContext = await buildCompactSpecContext({
+      project,
+      run: context.run,
+      state: store.get(),
+    });
+    const generationPrompt = specContext
+      ? appendSpecContextToPrompt(userRequest, specContext)
+      : userRequest;
     const backendContext = await buildProjectBackendContext(project.id, {
-      includeSchema: hasBackendIntent(userRequest),
+      includeSchema: hasBackendIntent(generationPrompt),
     });
     const response = await requestProjectGeneration({
       backendContext,
@@ -518,7 +569,7 @@ async function nextModelAction({
       onDelta: stream.onModelDelta,
       projectName: project.name,
       signal,
-      userPrompt: userRequest,
+      userPrompt: generationPrompt,
     });
 
     return {
@@ -539,18 +590,41 @@ async function nextModelAction({
     store,
     userRequest,
   });
+  appendContextReportLog(store, agentContext);
   updateAgentStatus(
     stream,
     session.statusLines,
     `Planning step ${context.run.modelTurns + 1}.`,
   );
-  const step = await requestAgentStep({
-    config,
-    context: agentContext,
-    onDelta: stream.onModelDelta,
-    signal,
-    userRequest,
-  });
+  let step: AgentStepResponse;
+
+  try {
+    step = await requestAgentStep({
+      config,
+      context: agentContext,
+      onDelta: stream.onModelDelta,
+      signal,
+      userRequest,
+    });
+  } catch (error) {
+    if (error instanceof AgentStepValidationError) {
+      const status = "Model response failed validation; feeding error back as observation.";
+      appendTerminalLog(
+        store,
+        `[agent] ${status} ${error.validationError}`,
+      );
+      updateAgentStatus(stream, session.statusLines, status);
+      return {
+        attempts: error.attempts,
+        invalidResponsePreview: error.invalidResponsePreview,
+        message: error.message,
+        type: "model_validation_error",
+        validationError: error.validationError,
+      };
+    }
+
+    throw error;
+  }
 
   return mapAgentStepToHeadlessAction(step);
 }
@@ -656,6 +730,7 @@ async function executeToolPort({
     workspaceEffects: {
       changedFiles: result.didChangeFiles ? result.changedFiles ?? [] : [],
       deletedFiles: result.didChangeFiles ? result.deletedFiles ?? [] : [],
+      externalEffects: result.externalEffects ?? [],
       packageChanged: result.didChangePackage === true,
       readSnapshots: collectReadSnapshots(session.runState),
     },
@@ -675,7 +750,9 @@ async function verifyRunPort({
     baselinePackageJson?: string | null;
     changedFiles: string[];
     deletedFiles: string[];
+    externalEffects: string[];
     packageChanged: boolean;
+    readSnapshots?: AgentRunCheckpoint["readSnapshots"];
     run: AgentRun;
   };
   project: ProjectInfo;
@@ -726,8 +803,10 @@ async function verifyRunPort({
     baselinePackageJson: input.baselinePackageJson ?? session.baselinePackageJson,
     changedFiles: input.changedFiles,
     deletedFiles: input.deletedFiles,
+    externalEffects: input.externalEffects,
     packageChanged: input.packageChanged,
     previewUrl: store.get().previewUrl,
+    readSnapshots: input.readSnapshots,
     run: input.run,
   });
 
@@ -800,8 +879,14 @@ async function buildAgentStepContext({
       role: message.role,
       content: message.content,
     }));
+  const specContext = await buildCompactSpecContext({
+    project,
+    run: context.run,
+    state,
+  });
   const backendIntentText = [
     userRequest,
+    specContext ? stringifySpecContextForBackendIntent(specContext) : "",
     ...recentMessages.map((message) => message.content),
   ].join("\n");
   const backendContext = await buildProjectBackendContext(project.id, {
@@ -821,31 +906,52 @@ async function buildAgentStepContext({
   });
   const siteSpec = await agentRuntimeApi.readSiteSpec(project.id);
 
-  return {
+  const agentContext: AgentStepContext = {
     backend: backendContext,
+    budgetState: buildAgentBudgetState(context.run),
+    contextReport: {
+      finalChars: 0,
+      rawChars: 0,
+      retainedObservations: dynamicContext.observations.length,
+      summarizedObservations: 0,
+    },
     diagnostics: buildAgentDiagnostics(state.projectError, state.terminalLogs),
     devServerStatus: state.devServerStatus,
     fileTree: state.fileTree ? formatProjectFileTree(state.fileTree) : null,
-    memory: {
-      ...dynamicContext.memory,
-      selectedSiteNodeId: state.selectedSiteNodeId,
-      siteSpecPages: siteSpec?.pages.map((page) => ({
-        id: page.id,
-        route: page.route,
-        title: page.title,
-      })),
-    },
+    memory: dynamicContext.memory
+      ? {
+          ...dynamicContext.memory,
+          selectedSiteNodeId: state.selectedSiteNodeId,
+          siteSpecPages: siteSpec?.pages.map((page) => ({
+            id: page.id,
+            route: page.route,
+            title: page.title,
+          })),
+        }
+      : null,
     observations: dynamicContext.observations,
     previewUrl: state.previewUrl,
     projectName: project.name,
     recentMessages,
+    runContextSummary: context.runContextSummary,
+    specContext: specContext ?? undefined,
     steering: context.steering,
-    taskLedger: {
-      ...dynamicContext.taskLedger,
-      objective: context.run.contract.objective,
-    },
+    taskLedger: dynamicContext.taskLedger
+      ? {
+          ...dynamicContext.taskLedger,
+          objective: context.run.contract.objective,
+        }
+      : {
+          completed: [],
+          nextStep: "Choose the smallest useful next tool call or finish_candidate if complete.",
+          objective: context.run.contract.objective,
+          pending: [],
+          risks: [],
+        },
     workingSummary: dynamicContext.workingSummary,
   };
+
+  return compressAgentStepContext(agentContext);
 }
 
 function createApprovalPort(
@@ -1242,37 +1348,58 @@ async function validateReadSnapshotsForProject(
 }
 
 async function cleanupRunAfterRuntimeError({
+  failureKind,
   message,
   projectId,
   runId,
   signalAborted,
   store,
 }: {
+  failureKind?: AgentRunFailureKind;
   message: string;
   projectId: string;
   runId: string;
   signalAborted: boolean;
   store: StoreAccess;
-}): Promise<{ message: string; run: AgentRun | null }> {
+}): Promise<{ failureKind?: AgentRunFailureKind; message: string; run: AgentRun | null }> {
   try {
     const latestRun = await agentRuntimeApi.getRun(projectId, runId);
 
     if (!latestRun || shouldLeaveRunStateAfterError(latestRun)) {
-      return { message, run: latestRun };
+      const details = latestRun
+        ? await getRunTerminalFailureDetails(projectId, latestRun)
+        : {};
+      return {
+        failureKind: details.failureKind ?? failureKind,
+        message: details.failureReason ?? message,
+        run: latestRun,
+      };
     }
 
     const transition = latestRun.cancelRequested || signalAborted
       ? new RunStateMachine().transition(latestRun, { type: "cancel" })
-      : new RunStateMachine().transition(latestRun, { type: "fail", reason: message });
+      : failureKind === "context_budget"
+        ? new RunStateMachine().transition(latestRun, {
+            budget: "maxModelTurns",
+            failureKind,
+            reason: message,
+            type: "budget_exceeded",
+          })
+        : new RunStateMachine().transition(latestRun, { type: "fail", reason: message });
     const { run, event } = await agentRuntimeApi.transitionRun(
       projectId,
       latestRun,
       transition,
     );
     projectRunToStore(store, run, event);
-    return { message, run };
+    return {
+      failureKind: readFailureKindFromEvent(event) ?? failureKind,
+      message: readFailureReasonFromEvent(event) ?? message,
+      run,
+    };
   } catch (cleanupError) {
     return {
+      failureKind,
       message: [
         message,
         `Cleanup failed: ${getProjectErrorMessage(cleanupError)}`,
@@ -1333,7 +1460,99 @@ async function completeStreamForRun(
     return;
   }
 
-  stream.failWithTypewriter(`Run ended with status ${run.status}.`);
+  const failureDetails = await getRunTerminalFailureDetails(projectId, run);
+  stream.failWithTypewriter(
+    failureDetails.failureReason ?? `Run ended with status ${run.status}.`,
+  );
+}
+
+async function getRunTerminalFailureDetails(
+  projectId: string,
+  run: AgentRun | null,
+): Promise<{ failureKind?: AgentRunFailureKind; failureReason?: string }> {
+  if (!run || !["failed", "budget_exceeded"].includes(run.status)) {
+    return {};
+  }
+
+  const events = await agentRuntimeApi.listEvents(projectId, run.id).catch(() => []);
+  const terminalEvent = [...events]
+    .reverse()
+    .find((event) => event.type === "run.budget_exceeded" || event.type === "run.failed");
+
+  if (!terminalEvent) {
+    return {};
+  }
+
+  return {
+    failureKind: readFailureKindFromEvent(terminalEvent),
+    failureReason: readFailureReasonFromEvent(terminalEvent),
+  };
+}
+
+function classifyRuntimeFailure(
+  error: unknown,
+  message: string,
+): { failureKind?: AgentRunFailureKind; reason: string } {
+  if (
+    error instanceof LlmClientError &&
+    error.code === "context_budget"
+  ) {
+    return { failureKind: "context_budget", reason: message };
+  }
+
+  if (isContextBudgetMessage(message)) {
+    return { failureKind: "context_budget", reason: message };
+  }
+
+  return { reason: message };
+}
+
+function readFailureReasonFromEvent(event: AgentEvent) {
+  return isRecord(event.payload) && typeof event.payload.reason === "string"
+    ? event.payload.reason
+    : undefined;
+}
+
+function readFailureKindFromEvent(event: AgentEvent): AgentRunFailureKind | undefined {
+  if (!isRecord(event.payload)) {
+    return undefined;
+  }
+
+  return isAgentRunFailureKind(event.payload.failureKind)
+    ? event.payload.failureKind
+    : undefined;
+}
+
+function isAgentRunFailureKind(value: unknown): value is AgentRunFailureKind {
+  return value === "local_budget" ||
+    value === "context_budget" ||
+    value === "loop_exhausted";
+}
+
+function isContextBudgetMessage(message: string) {
+  const normalized = message.toLowerCase();
+
+  return [
+    "context_length_exceeded",
+    "context length",
+    "context window",
+    "maximum context",
+    "max context",
+    "too many tokens",
+    "token limit",
+    "tokens exceed",
+    "input tokens",
+    "input too long",
+    "prompt too long",
+    "request too large",
+    "reduce the length",
+    "exceeds the model",
+    "exceeded the model",
+  ].some((pattern) => normalized.includes(pattern));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function loadApprovedPackageChangeKeys(projectId: string, runId: string) {
@@ -1341,7 +1560,6 @@ async function loadApprovedPackageChangeKeys(projectId: string, runId: string) {
   const hasApprovedPackageChange = approvals.some(
     (approval) =>
       approval.decision === "approved" &&
-      wasResolvedBeforeExpiry(approval) &&
       approval.targetResources.some(
         (resource) => resource.replace(/\\/g, "/") === "package.json",
       ),
@@ -1357,7 +1575,6 @@ async function loadApprovedDeletionPaths(projectId: string, runId: string) {
     .filter(
       (approval) =>
         approval.decision === "approved" &&
-        wasResolvedBeforeExpiry(approval) &&
         approval.toolName === "delete_files",
     )
     .flatMap((approval) => approval.targetResources)
@@ -1406,6 +1623,169 @@ async function readOptionalProjectFile(projectId: string, path: string) {
 
 function hasFilePath(fileTree: FileTree, path: string): boolean {
   return fileTree.path === path || (fileTree.children ?? []).some((child) => hasFilePath(child, path));
+}
+
+async function buildCompactSpecContext({
+  project,
+  run,
+  state,
+}: {
+  project: ProjectInfo;
+  run: AgentRun;
+  state: AppState;
+}): Promise<CompactSpecContext | null> {
+  const source = run.contract.source;
+
+  if (source?.mode !== "spec") {
+    return null;
+  }
+
+  const spec = await loadSpecForRun(project.id, source.specId, state);
+
+  if (!spec) {
+    return null;
+  }
+
+  const revision = spec.revisions.find((item) => item.id === source.revisionId);
+  const task = revision?.tasks.find((item) => item.id === source.taskId);
+
+  if (!revision || !task) {
+    return null;
+  }
+
+  const requirementIds = new Set(
+    task.requirementIds.length > 0 ? task.requirementIds : source.requirementIds,
+  );
+  const acceptanceCriteriaIds = new Set(
+    task.acceptanceCriteriaIds.length > 0
+      ? task.acceptanceCriteriaIds
+      : source.acceptanceCriteriaIds,
+  );
+
+  return {
+    acceptanceCriteria: revision.requirements.acceptanceCriteria
+      .filter((criterion) => acceptanceCriteriaIds.has(criterion.id))
+      .map((criterion) => ({
+        description: criterion.description,
+        id: criterion.id,
+        required: criterion.required,
+      })),
+    brief: revision.brief,
+    currentTask: {
+      acceptanceCriteriaIds: task.acceptanceCriteriaIds,
+      allowedPaths: task.allowedPaths,
+      dependencyIds: task.dependencyIds,
+      expectedFiles: task.expectedFiles,
+      id: task.id,
+      objective: task.objective,
+      requirementIds: task.requirementIds,
+      status: task.status,
+      title: task.title,
+    },
+    design: {
+      dataModel: revision.design.dataModel,
+      integrations: revision.design.integrations,
+      summary: revision.design.summary,
+      technicalDecisions: revision.design.technicalDecisions,
+      verificationStrategy: revision.design.verificationStrategy,
+    },
+    executionMode: source.executionMode,
+    goal: revision.requirements.goal,
+    kind: spec.kind,
+    relatedTasks: selectRelatedSpecTasks(revision, task).map((relatedTask) => ({
+      id: relatedTask.id,
+      status: relatedTask.status,
+      title: relatedTask.title,
+    })),
+    requirements: revision.requirements.userStories
+      .filter((story) => requirementIds.has(story.id))
+      .map((story) => ({
+        description: story.description,
+        id: story.id,
+      })),
+    revisionId: revision.id,
+    specId: spec.id,
+    specStatus: spec.status,
+    taskProgress: countSpecTaskProgress(revision.tasks),
+  };
+}
+
+async function loadSpecForRun(
+  projectId: string,
+  specId: string,
+  state: AppState,
+): Promise<DevelopmentSpec | null> {
+  if (state.currentSpec?.id === specId && state.currentSpec.projectId === projectId) {
+    return state.currentSpec;
+  }
+
+  try {
+    return await specApi.readSpec(projectId, specId);
+  } catch {
+    return null;
+  }
+}
+
+function selectRelatedSpecTasks(revision: SpecRevision, task: SpecTask) {
+  const relatedIds = new Set([task.id, ...task.dependencyIds]);
+
+  for (const candidate of revision.tasks) {
+    if (candidate.dependencyIds.includes(task.id)) {
+      relatedIds.add(candidate.id);
+    }
+  }
+
+  return revision.tasks.filter((candidate) => relatedIds.has(candidate.id));
+}
+
+function countSpecTaskProgress(tasks: SpecTask[]) {
+  return {
+    blocked: tasks.filter((task) => task.status === "blocked").length,
+    failed: tasks.filter((task) => task.status === "failed").length,
+    passed: tasks.filter((task) => task.status === "passed").length,
+    pending: tasks.filter((task) => task.status === "pending").length,
+    running: tasks.filter((task) => task.status === "running").length,
+    total: tasks.length,
+  };
+}
+
+function stringifySpecContextForBackendIntent(specContext: CompactSpecContext) {
+  return JSON.stringify({
+    acceptanceCriteria: specContext.acceptanceCriteria,
+    currentTask: specContext.currentTask,
+    design: {
+      dataModel: specContext.design.dataModel,
+      integrations: specContext.design.integrations,
+      technicalDecisions: specContext.design.technicalDecisions,
+    },
+    goal: specContext.goal,
+    requirements: specContext.requirements,
+  });
+}
+
+function appendSpecContextToPrompt(
+  userRequest: string,
+  specContext: CompactSpecContext,
+) {
+  return [
+    userRequest,
+    "",
+    "Spec task context:",
+    JSON.stringify(specContext, null, 2),
+  ].join("\n");
+}
+
+function appendContextReportLog(store: StoreAccess, context: AgentStepContext) {
+  const report = context.contextReport;
+
+  if (report.rawChars <= 0) {
+    return;
+  }
+
+  appendTerminalLog(
+    store,
+    `[agent] Context envelope ${report.finalChars}/${report.rawChars} chars; observations retained ${report.retainedObservations}, summarized ${report.summarizedObservations}.`,
+  );
 }
 
 function toAgentObservation(value: string, step: number): AgentObservation {

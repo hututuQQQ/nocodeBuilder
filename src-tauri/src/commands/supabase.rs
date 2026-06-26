@@ -577,19 +577,26 @@ fn quote_ident(value: &str) -> String {
 fn sql_data_type(value: &str) -> Result<&'static str, String> {
     match value.trim().to_ascii_lowercase().as_str() {
         "bigint" => Ok("bigint"),
+        "bool" => Ok("boolean"),
         "boolean" => Ok("boolean"),
         "date" => Ok("date"),
+        "float4" | "float8" => Ok("numeric"),
+        "int" | "int2" | "int4" | "smallint" => Ok("integer"),
+        "int8" => Ok("bigint"),
         "integer" => Ok("integer"),
         "jsonb" => Ok("jsonb"),
         "numeric" => Ok("numeric"),
         "text" => Ok("text"),
+        "timestamp" | "timestamp with time zone" | "timestamp without time zone" => {
+            Ok("timestamptz")
+        }
         "timestamptz" => Ok("timestamptz"),
         "uuid" => Ok("uuid"),
         _ => Err("supabase: unsupported column type".to_string()),
     }
 }
 
-fn sql_default_value(value: Option<&str>, data_type: &str) -> Result<Option<&'static str>, String> {
+fn sql_default_value(value: Option<&str>, data_type: &str) -> Result<Option<String>, String> {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
@@ -598,16 +605,106 @@ fn sql_default_value(value: Option<&str>, data_type: &str) -> Result<Option<&'st
         return Ok(None);
     }
 
+    if value == "''" && data_type != "text" {
+        return Ok(None);
+    }
+
     match (data_type, value) {
-        ("boolean", "false") => Ok(Some("false")),
-        ("boolean", "true") => Ok(Some("true")),
-        ("date", "CURRENT_DATE") => Ok(Some("CURRENT_DATE")),
-        ("integer" | "bigint" | "numeric", "0") => Ok(Some("0")),
-        ("jsonb", "'[]'::jsonb") => Ok(Some("'[]'::jsonb")),
-        ("jsonb", "'{}'::jsonb") => Ok(Some("'{}'::jsonb")),
-        ("text", "''") => Ok(Some("''")),
-        ("timestamptz", "now()") => Ok(Some("now()")),
-        ("uuid", "gen_random_uuid()") => Ok(Some("gen_random_uuid()")),
+        ("boolean", "false") => Ok(Some("false".to_string())),
+        ("boolean", "true") => Ok(Some("true".to_string())),
+        ("date", "CURRENT_DATE") => Ok(Some("CURRENT_DATE".to_string())),
+        ("integer" | "bigint", value) if is_integer_default(value) => Ok(Some(value.to_string())),
+        ("numeric", value) if is_numeric_default(value) => Ok(Some(value.to_string())),
+        ("jsonb", "'[]'::jsonb") => Ok(Some("'[]'::jsonb".to_string())),
+        ("jsonb", "'{}'::jsonb") => Ok(Some("'{}'::jsonb".to_string())),
+        ("text", "''") => Ok(Some("''".to_string())),
+        ("timestamptz", "now()") => Ok(Some("now()".to_string())),
+        ("uuid", "gen_random_uuid()") => Ok(Some("gen_random_uuid()".to_string())),
         _ => Err("supabase: default value is not compatible with the column type".to_string()),
+    }
+}
+
+fn is_integer_default(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+
+    let digits = value.strip_prefix('-').unwrap_or(value);
+
+    is_plain_digits(digits)
+}
+
+fn is_numeric_default(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+
+    let unsigned = value.strip_prefix('-').unwrap_or(value);
+    let mut parts = unsigned.split('.');
+    let Some(integer) = parts.next() else {
+        return false;
+    };
+
+    if !is_plain_digits(integer) {
+        return false;
+    }
+
+    match (parts.next(), parts.next()) {
+        (None, None) => true,
+        (Some(decimal), None) => {
+            !decimal.is_empty() && decimal.chars().all(|item| item.is_ascii_digit())
+        }
+        _ => false,
+    }
+}
+
+fn is_plain_digits(value: &str) -> bool {
+    if value == "0" {
+        return true;
+    }
+
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    first.is_ascii_digit() && first != '0' && chars.all(|item| item.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sql_data_type, sql_default_value};
+
+    #[test]
+    fn sql_data_type_accepts_common_postgres_aliases() {
+        assert_eq!(sql_data_type("int2").unwrap(), "integer");
+        assert_eq!(sql_data_type("smallint").unwrap(), "integer");
+        assert_eq!(sql_data_type("int8").unwrap(), "bigint");
+        assert_eq!(sql_data_type("bool").unwrap(), "boolean");
+        assert_eq!(sql_data_type("timestamp").unwrap(), "timestamptz");
+    }
+
+    #[test]
+    fn sql_default_value_accepts_safe_numeric_literals() {
+        assert_eq!(
+            sql_default_value(Some("9"), "integer").unwrap(),
+            Some("9".to_string())
+        );
+        assert_eq!(
+            sql_default_value(Some("-12"), "bigint").unwrap(),
+            Some("-12".to_string())
+        );
+        assert_eq!(
+            sql_default_value(Some("0.5"), "numeric").unwrap(),
+            Some("0.5".to_string())
+        );
+    }
+
+    #[test]
+    fn sql_default_value_rejects_unsafe_numeric_expressions() {
+        assert!(sql_default_value(Some("9; drop table rooms"), "integer").is_err());
+        assert!(sql_default_value(Some("1e6"), "numeric").is_err());
+        assert!(sql_default_value(Some("01"), "integer").is_err());
+        assert!(sql_default_value(Some("1.5"), "integer").is_err());
     }
 }

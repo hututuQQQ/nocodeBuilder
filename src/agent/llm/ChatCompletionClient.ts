@@ -509,6 +509,8 @@ function createHttpError(
   const apiMessage = truncateMessage(
     responseBody.error?.message ?? responseBody.message ?? responseText.trim(),
   );
+  const apiErrorCode = String(responseBody.error?.code ?? "");
+  const apiErrorType = String(responseBody.error?.type ?? "");
   const normalizedApiMessage = apiMessage.toLowerCase();
 
   if (
@@ -520,6 +522,16 @@ function createHttpError(
     return new LlmClientError(
       "api_key",
       `API key is invalid or unauthorized. Check your ${providerLabel} API key.`,
+      { status },
+    );
+  }
+
+  if (isContextBudgetError(`${apiMessage} ${apiErrorCode} ${apiErrorType}`)) {
+    return new LlmClientError(
+      "context_budget",
+      `${providerLabel} request exceeded the model context/token budget: ${
+        apiMessage || "reduce prompt context and retry."
+      }`,
       { status },
     );
   }
@@ -600,4 +612,26 @@ function stripJsonCodeFence(content: string) {
 
 function truncateMessage(message: string) {
   return message.length > 240 ? `${message.slice(0, 240)}...` : message;
+}
+
+function isContextBudgetError(message: string) {
+  const normalized = message.toLowerCase();
+
+  return [
+    "context_length_exceeded",
+    "context length",
+    "context window",
+    "maximum context",
+    "max context",
+    "too many tokens",
+    "token limit",
+    "tokens exceed",
+    "input tokens",
+    "input too long",
+    "prompt too long",
+    "request too large",
+    "reduce the length",
+    "exceeds the model",
+    "exceeded the model",
+  ].some((pattern) => normalized.includes(pattern));
 }

@@ -471,6 +471,14 @@ describe("Spec validators", () => {
         }),
       ),
     ).toBeDefined();
+
+    expect(
+      validateDevelopmentSpec(
+        createCompletedSpec({
+          finalVerificationCommand: "pnpm install && pnpm build",
+        }),
+      ),
+    ).toBeDefined();
   });
 
   it("requires executable specs to have an approved current revision", () => {
@@ -898,6 +906,20 @@ describe("Spec validators", () => {
       finalVerification: {
         ...retryable.finalVerification,
         command: "npm install && npm run build",
+      },
+    })).toBe(true);
+    expect(canRetrySpecVerification({
+      ...retryable,
+      finalVerification: {
+        ...retryable.finalVerification,
+        command: "pnpm install",
+      },
+    })).toBe(true);
+    expect(canRetrySpecVerification({
+      ...retryable,
+      finalVerification: {
+        ...retryable.finalVerification,
+        command: "pnpm install && pnpm build",
       },
     })).toBe(true);
     expect(canRetrySpecVerification({

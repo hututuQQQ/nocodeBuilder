@@ -5,9 +5,9 @@ import type {
   AgentSupabaseSchemaTable,
 } from "./backendSchema";
 import {
-  isSupportedSupabaseColumnType,
   isSupportedSupabaseDefaultValue,
   isValidSupabaseIdentifier,
+  normalizeSupabaseColumnType,
 } from "./backendSchema";
 import type {
   AgentCommand,
@@ -594,7 +594,7 @@ function validateSupabaseSchemaColumn(value: unknown): AgentSupabaseSchemaColumn
   const name = validateSupabaseIdentifier(value.name, "column name");
   const dataType = validateSupabaseColumnType(value.dataType);
   const primaryKey = value.primaryKey === true;
-  const defaultValue = validateSupabaseDefaultValue(value.defaultValue);
+  const defaultValue = validateSupabaseDefaultValue(value.defaultValue, dataType);
 
   return {
     dataType,
@@ -626,27 +626,39 @@ function validateSupabaseColumnType(value: unknown) {
     32,
   ).toLowerCase();
 
-  if (!isSupportedSupabaseColumnType(dataType)) {
+  const normalizedType = normalizeSupabaseColumnType(dataType);
+
+  if (!normalizedType) {
     throw new Error(
       `Invalid model response: unsupported Supabase column type "${dataType}".`,
     );
   }
 
-  return dataType;
+  return normalizedType;
 }
 
-function validateSupabaseDefaultValue(value: unknown) {
+function validateSupabaseDefaultValue(
+  value: unknown,
+  dataType: AgentSupabaseSchemaColumn["dataType"],
+) {
   if (typeof value === "undefined" || value === null) {
     return undefined;
   }
 
-  const defaultValue = validateStringArg(
-    value,
-    "apply_supabase_schema column defaultValue",
-    80,
-  ).trim();
+  const defaultValue =
+    typeof value === "number" && Number.isFinite(value)
+      ? String(value)
+      : validateStringArg(
+          value,
+          "apply_supabase_schema column defaultValue",
+          80,
+        ).trim();
 
-  if (!isSupportedSupabaseDefaultValue(defaultValue)) {
+  if (defaultValue === "none" || (defaultValue === "''" && dataType !== "text")) {
+    return undefined;
+  }
+
+  if (!isSupportedSupabaseDefaultValue(defaultValue, dataType)) {
     throw new Error(
       `Invalid model response: unsupported Supabase default value "${defaultValue}".`,
     );
