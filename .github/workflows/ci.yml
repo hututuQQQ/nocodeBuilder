@@ -59,7 +59,7 @@ jobs:
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
       - name: Test Rust
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features sandbox-sidecars
 
   platform-rust:
     name: Platform Rust (${{ matrix.os }})
@@ -78,7 +78,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Test Rust on target OS
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features sandbox-sidecars
 
   windows-native-sandbox-smoke:
     name: Windows Native Sandbox Smoke
@@ -91,6 +91,11 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Verify elevated runner
         shell: pwsh
@@ -106,4 +111,6 @@ jobs:
         shell: pwsh
         env:
           NCB_RUN_WINDOWS_NATIVE_SMOKE: "1"
-        run: cargo test --manifest-path src-tauri/Cargo.toml --test windows_native_smoke -- --nocapture
+        run: |
+          node scripts/prepare-tauri-sidecars.mjs --debug
+          cargo test --manifest-path src-tauri/Cargo.toml --features sandbox-sidecars --test windows_native_smoke -- --nocapture

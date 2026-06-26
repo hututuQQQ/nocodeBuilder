@@ -761,6 +761,7 @@ fn sidecar_candidates(name: &str) -> Vec<PathBuf> {
     if let Ok(current_exe) = std::env::current_exe() {
         if let Some(dir) = current_exe.parent() {
             candidates.push(dir.join(&file_name));
+            candidates.push(dir.join("sandbox-sidecars").join(&file_name));
 
             if dir
                 .file_name()
@@ -768,11 +769,13 @@ fn sidecar_candidates(name: &str) -> Vec<PathBuf> {
             {
                 if let Some(parent) = dir.parent() {
                     candidates.push(parent.join(&file_name));
+                    candidates.push(parent.join("sandbox-sidecars").join(&file_name));
                 }
             }
 
             if let Some(parent) = dir.parent() {
                 candidates.push(parent.join(&file_name));
+                candidates.push(parent.join("sandbox-sidecars").join(&file_name));
             }
         }
     }

@@ -60,7 +60,7 @@ npm test
 npm run build
 cargo fmt --check --manifest-path src-tauri/Cargo.toml
 cargo check --manifest-path src-tauri/Cargo.toml
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml --features sandbox-sidecars
 npm run tauri dev
 ```
 
@@ -73,7 +73,7 @@ Advanced overrides:
 - `NOCODE_BUILDER_NODE_DIR`: use an existing Node.js installation directory instead of auto-downloading one.
 - `NOCODE_BUILDER_RUNTIME_DIR`: choose where nocodeBuilder stores managed runtimes.
 - `NOCODE_BUILDER_ALLOW_HOST_NODE=1`: development-only override for non-sandboxed Node tooling.
-- `npm run prepare:sidecars`: build and stage the native sandbox helper binaries for Tauri sidecar bundling.
+- `npm run prepare:sidecars`: build and stage the native sandbox helper binaries for Tauri sidecar bundling. The helper entrypoints are compiled through a temporary sidecar-only Cargo manifest so Tauri's main application build does not package duplicate normal binaries.
 
 ## Native Sandbox
 

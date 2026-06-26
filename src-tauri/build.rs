@@ -25,21 +25,26 @@ fn ensure_windows_sidecar_placeholders() {
     }
 
     for name in ["ncb-sandbox-setup", "ncb-sandbox-runner"] {
-        let path = binaries_dir.join(format!("{name}-{target}{extension}"));
+        let paths = [
+            binaries_dir.join(format!("{name}-{target}{extension}")),
+            binaries_dir.join(format!("{name}{extension}")),
+        ];
 
-        if path.exists() {
-            continue;
-        }
+        for path in paths {
+            if path.exists() {
+                continue;
+            }
 
-        let placeholder = format!(
-            "placeholder for {name}; run `npm run prepare:sidecars` before Tauri dev/build\n"
-        );
-
-        if let Err(error) = std::fs::write(&path, placeholder) {
-            println!(
-                "cargo:warning=failed to create sidecar placeholder '{}': {error}",
-                path.display()
+            let placeholder = format!(
+                "placeholder for {name}; run `npm run prepare:sidecars` before Tauri dev/build\n"
             );
+
+            if let Err(error) = std::fs::write(&path, placeholder) {
+                println!(
+                    "cargo:warning=failed to create sidecar placeholder '{}': {error}",
+                    path.display()
+                );
+            }
         }
     }
 }

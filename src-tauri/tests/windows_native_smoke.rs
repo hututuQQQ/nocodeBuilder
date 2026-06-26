@@ -432,10 +432,26 @@ if %ERRORLEVEL% EQU 0 (
             .and_then(Path::parent)
             .expect("resolve cargo target debug directory");
         let fallback = debug_dir.join(format!("{name}.exe"));
+        let example_fallback = debug_dir.join("examples").join(format!("{name}.exe"));
+        let sidecar_fallback = debug_dir
+            .parent()
+            .expect("resolve cargo target directory")
+            .join("sidecars")
+            .join("debug")
+            .join(format!("{name}.exe"));
+
+        for candidate in [&example_fallback, &sidecar_fallback, &fallback] {
+            if candidate.is_file() {
+                return candidate.to_path_buf();
+            }
+        }
+
         assert!(
             fallback.is_file(),
-            "{var} was not set by cargo and fallback binary '{}' does not exist",
-            fallback.display()
+            "{var} was not set by cargo and fallback binaries '{}', '{}', or '{}' do not exist",
+            fallback.display(),
+            example_fallback.display(),
+            sidecar_fallback.display()
         );
         fallback
     }
