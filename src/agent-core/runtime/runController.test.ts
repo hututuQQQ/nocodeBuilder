@@ -391,7 +391,7 @@ describe("Headless RunController", () => {
       .toHaveLength(0);
   });
 
-  it("keeps an unresolved approval waiting after expiresAt instead of expiring the run", async () => {
+  it("keeps an unresolved approval waiting before expiresAt", async () => {
     const deleteArgs = { paths: ["components/Old.tsx"], summary: "Remove obsolete component" };
     const ports = createFakePorts({
       modelActions: [
@@ -408,7 +408,7 @@ describe("Headless RunController", () => {
       projectId: "project-1",
       runId: "run-approval-late",
     });
-    ports.approvalRecords[0]!.expiresAt = "2000-01-01T00:00:00.000Z";
+    ports.approvalRecords[0]!.expiresAt = "2026-01-01T00:10:00.000Z";
 
     const stillWaiting = await controller.resume(waiting.id);
 
@@ -418,6 +418,104 @@ describe("Headless RunController", () => {
     expect(ports.events.map((event) => event.type)).not.toContain("approval.expired");
     expect(ports.events.filter((event) => event.type === "approval.requested"))
       .toHaveLength(1);
+  });
+
+  it("marks expired unresolved approvals as expired and replans", async () => {
+    const deleteArgs = { paths: ["components/Old.tsx"], summary: "Remove obsolete component" };
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "tool_call", tool: "delete_files", args: deleteArgs },
+        { type: "tool_call", tool: "delete_files", args: deleteArgs },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    const controller = new RunController(ports);
+
+    const waiting = await controller.start({
+      contract: compileTaskContract({ objective: "Remove obsolete component" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-approval-expired-unresolved",
+    });
+    const staleApproval = ports.approvalRecords[0]!;
+    staleApproval.expiresAt = "2000-01-01T00:00:00.000Z";
+
+    const replanned = await controller.resume(waiting.id);
+
+    expect(replanned.status).toBe("waiting_approval");
+    expect(replanned.modelTurns).toBe(2);
+    expect(replanned.toolCalls).toBe(0);
+    expect(staleApproval).toMatchObject({
+      decision: "expired",
+      resolvedAt: "2026-01-01T00:00:00.000Z",
+    });
+    expect(ports.events.map((event) => event.type)).toContain("approval.expired");
+    expect(ports.approvalRecords).toHaveLength(2);
+    expect(ports.approvalRecords[1]).toMatchObject({
+      targetResources: ["components/Old.tsx"],
+      toolName: "delete_files",
+    });
+    expect(ports.approvalRecords[1]).not.toHaveProperty("decision");
+    expect(ports.approvalRecords[1]).not.toHaveProperty("resolvedAt");
+    const expiredCheckpointEvent = ports.events.find(
+      (event) =>
+        event.type === "checkpoint.created" &&
+        event.payload &&
+        typeof event.payload === "object" &&
+        "reason" in event.payload &&
+        event.payload.reason === "approval-expired",
+    );
+    const expiredCheckpointId =
+      expiredCheckpointEvent?.payload &&
+      typeof expiredCheckpointEvent.payload === "object" &&
+      "checkpointId" in expiredCheckpointEvent.payload
+        ? expiredCheckpointEvent.payload.checkpointId
+        : undefined;
+    const expiredCheckpoint = ports.checkpointRecords.find(
+      (checkpoint) => checkpoint.id === expiredCheckpointId,
+    );
+    expect(
+      expiredCheckpoint
+        ? readRunDriveStateMetadata(expiredCheckpoint.plan).pendingApprovalAction
+        : "missing checkpoint",
+    ).toBeUndefined();
+  });
+
+  it("does not reuse an approval that was approved after expiresAt", async () => {
+    const deleteArgs = { paths: ["components/Old.tsx"], summary: "Remove obsolete component" };
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "tool_call", tool: "delete_files", args: deleteArgs },
+        { type: "tool_call", tool: "delete_files", args: deleteArgs },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    const controller = new RunController(ports);
+
+    const waiting = await controller.start({
+      contract: compileTaskContract({ objective: "Remove obsolete component" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-approval-late-approved",
+    });
+    const staleApproval = ports.approvalRecords[0]!;
+    staleApproval.decision = "approved";
+    staleApproval.expiresAt = "2026-01-01T00:00:00.000Z";
+    staleApproval.resolvedAt = "2026-01-01T00:00:01.000Z";
+
+    const freshWaiting = await controller.resume(waiting.id);
+
+    expect(freshWaiting.status).toBe("waiting_approval");
+    expect(freshWaiting.toolCalls).toBe(0);
+    expect(staleApproval.consumedAt).toBeUndefined();
+    expect(ports.events.filter((event) => event.type === "approval.consumed"))
+      .toHaveLength(0);
+    expect(ports.events.filter((event) => event.type === "tool.completed"))
+      .toHaveLength(0);
+    expect(ports.approvalRecords).toHaveLength(2);
+    expect(ports.approvalRecords[1]?.normalizedArgsHash).toBe(
+      normalizeApprovalHash("run-approval-late-approved", "delete_files", deleteArgs),
+    );
   });
 
   it("scenario E returns a policy observation after approval is denied", async () => {
@@ -1936,7 +2034,12 @@ function createFakePorts({
           .find((approval) => approval.runId === runId && !approval.decision && !approval.resolvedAt) ?? null,
       getPending: async (runId) =>
         approvals.find(
-          (approval) => approval.runId === runId && !approval.decision && !approval.resolvedAt,
+          (approval) =>
+            approval.runId === runId &&
+            !approval.decision &&
+            !approval.resolvedAt &&
+            new Date(approval.expiresAt).getTime() >
+              new Date(ports.clock.now()).getTime(),
         ) ?? null,
       listApprovedAuthorizations: async (runId) =>
         approvals.filter(

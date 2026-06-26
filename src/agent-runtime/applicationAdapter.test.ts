@@ -209,7 +209,8 @@ vi.mock("../services/agentRuntime", () => ({
         (approval) =>
           approval.runId === runId &&
           !approval.decision &&
-          !approval.resolvedAt,
+          !approval.resolvedAt &&
+          new Date(approval.expiresAt).getTime() > Date.now(),
       ) ?? null,
     ),
     getRun: vi.fn(async (_projectId, runId) => fake.runs.get(runId) ?? null),
@@ -774,7 +775,7 @@ describe("Application runtime adapter", () => {
     });
   });
 
-  it("keeps stale approvals waiting until the user decides", async () => {
+  it("marks stale unresolved approvals as expired and replans", async () => {
     fake.actions = [
       {
         type: "tool_call",
@@ -813,10 +814,18 @@ describe("Application runtime adapter", () => {
     expect(result).toBe(false);
     expect(run?.status).toBe("waiting_approval");
     expect(fake.toolNames).toEqual([]);
-    expect(fake.approvals).toHaveLength(1);
-    expect(fake.approvals[0]?.decision).toBeUndefined();
-    expect(fake.approvals[0]?.resolvedAt).toBeUndefined();
-    expect(fake.events.map((event) => event.type)).not.toContain("approval.expired");
+    expect(fake.approvals).toHaveLength(2);
+    expect(fake.approvals[0]).toMatchObject({
+      decision: "expired",
+      resolvedAt: expect.any(String),
+    });
+    expect(fake.approvals[1]).toMatchObject({
+      targetResources: ["components/Old.tsx"],
+      toolName: "delete_files",
+    });
+    expect(fake.approvals[1]).not.toHaveProperty("decision");
+    expect(fake.approvals[1]).not.toHaveProperty("resolvedAt");
+    expect(fake.events.map((event) => event.type)).toContain("approval.expired");
   });
 
   it("requires a fresh approval when the user approved after expiresAt", async () => {

@@ -1207,8 +1207,11 @@ export class RunController {
     state?: RunDriveState;
   }> {
     const unresolved = await this.ports.approvals.getLatestUnresolved(run.id);
+    const now = this.ports.clock.now();
 
-    if (unresolved ?? await this.ports.approvals.getPending(run.id)) {
+    if (unresolved && isApprovalExpired(unresolved, now)) {
+      await this.ports.approvals.resolve(run.id, unresolved.id, "expired", now);
+    } else if (unresolved ?? await this.ports.approvals.getPending(run.id)) {
       const checkpoint = await this.ports.checkpoints.getLatest(run.id);
       return {
         checkpointId: checkpoint?.id,
@@ -2693,6 +2696,15 @@ function stringifyPayload(payload: unknown): string {
 
 function addMinutesIso(now: string, minutes: number) {
   return new Date(new Date(now).getTime() + minutes * 60_000).toISOString();
+}
+
+function isApprovalExpired(approval: AgentApproval, now: string) {
+  const expiresAtMs = new Date(approval.expiresAt).getTime();
+  const nowMs = new Date(now).getTime();
+
+  return Number.isNaN(expiresAtMs) ||
+    Number.isNaN(nowMs) ||
+    expiresAtMs <= nowMs;
 }
 
 function createId(prefix: string) {
