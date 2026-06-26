@@ -108,33 +108,133 @@ mod tests {
 
     #[test]
     fn environment_uses_minimal_keys_without_host_secrets() {
-        let root = std::env::temp_dir().join("ncb-sandbox-env-test");
-        let workspace = SandboxWorkspace {
+        crate::test_support::with_env_lock(|| {
+            let root = std::env::temp_dir().join("ncb-sandbox-env-test");
+            let workspace = test_workspace(&root, SandboxWorkspaceKind::Run);
+            let resolved = test_resolved_command(&root);
+            let _openai = EnvVarGuard::set("OPENAI_API_KEY", "secret");
+
+            let env =
+                build_sandbox_environment(&resolved, &workspace, &SandboxNetworkPolicy::Denied)
+                    .expect("environment");
+
+            assert!(env.contains_key(&OsString::from("PATH")));
+            assert!(env.contains_key(&OsString::from("HOME")));
+            assert!(!env.contains_key(&OsString::from("OPENAI_API_KEY")));
+            assert!(!env.contains_key(&OsString::from("GITHUB_TOKEN")));
+
+            let _ = fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn local_server_environment_forces_loopback_host_and_port() {
+        let root = std::env::temp_dir().join("ncb-sandbox-dev-env-test");
+        let workspace = test_workspace(&root, SandboxWorkspaceKind::DevServer);
+        let resolved = test_resolved_command(&root);
+
+        let env = build_sandbox_environment(
+            &resolved,
+            &workspace,
+            &SandboxNetworkPolicy::LocalServer { port: 5173 },
+        )
+        .expect("environment");
+
+        assert_eq!(
+            env.get(&OsString::from("HOST")),
+            Some(&OsString::from("127.0.0.1"))
+        );
+        assert_eq!(
+            env.get(&OsString::from("HOSTNAME")),
+            Some(&OsString::from("127.0.0.1"))
+        );
+        assert_eq!(
+            env.get(&OsString::from("PORT")),
+            Some(&OsString::from("5173"))
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn proxy_environment_is_only_added_for_managed_proxy_policy() {
+        crate::test_support::with_env_lock(|| {
+            let root = std::env::temp_dir().join("ncb-sandbox-proxy-env-test");
+            let workspace = test_workspace(&root, SandboxWorkspaceKind::Run);
+            let resolved = test_resolved_command(&root);
+            let _http_proxy = EnvVarGuard::set("HTTP_PROXY", "http://proxy.example.invalid:8080");
+            let _https_proxy = EnvVarGuard::set("HTTPS_PROXY", "http://proxy.example.invalid:8080");
+
+            let denied =
+                build_sandbox_environment(&resolved, &workspace, &SandboxNetworkPolicy::Denied)
+                    .expect("denied environment");
+            assert!(!denied.contains_key(&OsString::from("HTTP_PROXY")));
+            assert!(!denied.contains_key(&OsString::from("HTTPS_PROXY")));
+
+            let proxied = build_sandbox_environment(
+                &resolved,
+                &workspace,
+                &SandboxNetworkPolicy::ManagedProxy {
+                    proxy_port: 4873,
+                    allowed_hosts: vec!["registry.npmjs.org".to_string()],
+                },
+            )
+            .expect("managed proxy environment");
+            assert_eq!(
+                proxied.get(&OsString::from("HTTP_PROXY")),
+                Some(&OsString::from("http://127.0.0.1:4873"))
+            );
+            assert_eq!(
+                proxied.get(&OsString::from("HTTPS_PROXY")),
+                Some(&OsString::from("http://127.0.0.1:4873"))
+            );
+
+            let _ = fs::remove_dir_all(root);
+        });
+    }
+
+    fn test_workspace(root: &Path, kind: SandboxWorkspaceKind) -> SandboxWorkspace {
+        SandboxWorkspace {
             project_id: "p".to_string(),
-            kind: SandboxWorkspaceKind::Run,
+            kind,
             workspace_root: root.join("workspace"),
             cache_root: root.join("cache"),
             tmp_root: root.join("tmp"),
             source_manifest_path: root.join("state").join("source-manifest.json"),
-        };
-        let resolved = ResolvedCommand {
+        }
+    }
+
+    fn test_resolved_command(root: &Path) -> ResolvedCommand {
+        ResolvedCommand {
             args: vec!["run".to_string(), "build".to_string()],
             executable: root.join("node").join("npm"),
             path_prepend: vec![root.join("node").join("bin")],
             runtime_root: root.join("node"),
             runtime_bin: root.join("node").join("bin"),
             runtime_version: "v24.18.0".to_string(),
-        };
-        std::env::set_var("OPENAI_API_KEY", "secret");
+        }
+    }
 
-        let env = build_sandbox_environment(&resolved, &workspace, &SandboxNetworkPolicy::Denied)
-            .expect("environment");
+    struct EnvVarGuard {
+        key: &'static str,
+        old_value: Option<OsString>,
+    }
 
-        assert!(env.contains_key(&OsString::from("PATH")));
-        assert!(env.contains_key(&OsString::from("HOME")));
-        assert!(!env.contains_key(&OsString::from("OPENAI_API_KEY")));
-        assert!(!env.contains_key(&OsString::from("GITHUB_TOKEN")));
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let old_value = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, old_value }
+        }
+    }
 
-        let _ = fs::remove_dir_all(root);
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.old_value {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
     }
 }
