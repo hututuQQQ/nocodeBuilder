@@ -1667,75 +1667,41 @@ mod tests {
 
     #[test]
     fn accepts_workspace_under_user_profile_when_only_sensitive_home_paths_are_denied() {
-        let root = fixture_root();
-        let home = root.join("home");
-        let workspace_root = home
-            .join("AppData")
-            .join("Local")
-            .join("nocodeBuilder")
-            .join("sandbox")
-            .join("workspaces")
-            .join("project")
-            .join("runs")
-            .join("run-1");
-        let cache_root = home
-            .join("AppData")
-            .join("Local")
-            .join("nocodeBuilder")
-            .join("sandbox")
-            .join("cache")
-            .join("project");
-        let tmp_root = home
-            .join("AppData")
-            .join("Local")
-            .join("nocodeBuilder")
-            .join("sandbox")
-            .join("tmp")
-            .join("project")
-            .join("run-1");
-        let node_root = root.join("node");
-        let node_bin = node_root.join("bin");
-        let path = std::env::join_paths([
-            node_bin.clone(),
-            workspace_root.join("node_modules").join(".bin"),
-        ])
-        .unwrap();
-        let mut request = valid_request();
-        request.executable = node_bin.join(if cfg!(target_os = "windows") {
-            "npm.cmd"
-        } else {
-            "npm"
-        });
-        request.working_dir = workspace_root.clone();
-        request.readable_roots = vec![node_root.clone(), node_bin, workspace_root.clone()];
-        request.writable_roots = vec![workspace_root, cache_root.clone(), tmp_root.clone()];
-        request.denied_roots = vec![home.join(".ssh"), root.join("real-project")];
-        request
-            .environment
-            .insert("PATH".to_string(), os_to_string(path));
-        request
-            .environment
-            .insert("HOME".to_string(), path_to_string(tmp_root.join("home")));
-        request.environment.insert(
-            "USERPROFILE".to_string(),
-            path_to_string(tmp_root.join("home")),
-        );
-        request
-            .environment
-            .insert("TEMP".to_string(), path_to_string(tmp_root.join("tmp")));
-        request
-            .environment
-            .insert("TMP".to_string(), path_to_string(tmp_root.join("tmp")));
-        request.environment.insert(
-            "NPM_CONFIG_CACHE".to_string(),
-            path_to_string(cache_root.join("npm")),
-        );
-        request.environment.insert(
-            "COREPACK_HOME".to_string(),
-            path_to_string(cache_root.join("corepack")),
-        );
+        let request = appdata_workspace_request(vec![]);
 
         assert!(validate_request(&request).is_ok());
+    }
+
+    #[test]
+    fn rejects_appdata_credential_path_entries_without_blocking_app_sandbox_workspace() {
+        let root = fixture_root();
+        let home = root.join("home");
+        let local_app_data = home.join("AppData").join("Local");
+        let app_data = home.join("AppData").join("Roaming");
+
+        for credential_root in [
+            local_app_data.join("gcloud"),
+            app_data.join("Microsoft").join("Azure"),
+        ] {
+            let credential_tool_dir = credential_root.join("bin");
+            let mut request = appdata_workspace_request(vec![credential_root]);
+            request.readable_roots.push(credential_tool_dir.clone());
+            let bad_path = std::env::join_paths([
+                fixture_root().join("node").join("bin"),
+                credential_tool_dir,
+            ])
+            .unwrap();
+            request
+                .environment
+                .insert("PATH".to_string(), os_to_string(bad_path));
+
+            let error = validate_request(&request)
+                .expect_err("AppData credential roots must override readable roots");
+            assert!(
+                error.contains("PATH entry is inside a denied root"),
+                "unexpected validation error: {error}"
+            );
+        }
     }
 
     #[test]
@@ -1875,6 +1841,74 @@ mod tests {
                 timeout_seconds: Some(60),
             },
         }
+    }
+
+    fn appdata_workspace_request(extra_denied_roots: Vec<PathBuf>) -> RunnerRequest {
+        let root = fixture_root();
+        let home = root.join("home");
+        let local_app_data = home.join("AppData").join("Local");
+        let workspace_root = local_app_data
+            .join("nocodeBuilder")
+            .join("sandbox")
+            .join("workspaces")
+            .join("project")
+            .join("runs")
+            .join("run-1");
+        let cache_root = local_app_data
+            .join("nocodeBuilder")
+            .join("sandbox")
+            .join("cache")
+            .join("project");
+        let tmp_root = local_app_data
+            .join("nocodeBuilder")
+            .join("sandbox")
+            .join("tmp")
+            .join("project")
+            .join("run-1");
+        let node_root = root.join("node");
+        let node_bin = node_root.join("bin");
+        let path = std::env::join_paths([
+            node_bin.clone(),
+            workspace_root.join("node_modules").join(".bin"),
+        ])
+        .unwrap();
+        let mut request = valid_request();
+        request.executable = node_bin.join(if cfg!(target_os = "windows") {
+            "npm.cmd"
+        } else {
+            "npm"
+        });
+        request.working_dir = workspace_root.clone();
+        request.readable_roots = vec![node_root.clone(), node_bin, workspace_root.clone()];
+        request.writable_roots = vec![workspace_root, cache_root.clone(), tmp_root.clone()];
+        request.denied_roots = vec![home.join(".ssh"), root.join("real-project")];
+        request.denied_roots.extend(extra_denied_roots);
+        request
+            .environment
+            .insert("PATH".to_string(), os_to_string(path));
+        request
+            .environment
+            .insert("HOME".to_string(), path_to_string(tmp_root.join("home")));
+        request.environment.insert(
+            "USERPROFILE".to_string(),
+            path_to_string(tmp_root.join("home")),
+        );
+        request
+            .environment
+            .insert("TEMP".to_string(), path_to_string(tmp_root.join("tmp")));
+        request
+            .environment
+            .insert("TMP".to_string(), path_to_string(tmp_root.join("tmp")));
+        request.environment.insert(
+            "NPM_CONFIG_CACHE".to_string(),
+            path_to_string(cache_root.join("npm")),
+        );
+        request.environment.insert(
+            "COREPACK_HOME".to_string(),
+            path_to_string(cache_root.join("corepack")),
+        );
+
+        request
     }
 
     fn fixture_root() -> PathBuf {
