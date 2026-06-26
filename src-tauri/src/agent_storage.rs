@@ -1652,7 +1652,7 @@ async fn migrate_agent_run_columns(pool: &SqlitePool) -> Result<(), String> {
         let contract = serde_json::from_str::<Value>(&contract_json).unwrap_or(Value::Null);
         sqlx::query("UPDATE agent_runs SET is_write_run = ?1 WHERE id = ?2")
             .bind(bool_to_i64(is_write_task_contract(&contract)))
-            .bind(id)
+            .bind(&id)
             .execute(pool)
             .await
             .map_err(|error| {
