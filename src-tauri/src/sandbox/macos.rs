@@ -424,16 +424,30 @@ mod tests {
 
         let root = std::env::temp_dir().join(format!("ncb-seatbelt-smoke-{}", std::process::id()));
         let workspace_root = root.join("workspace");
-        let denied_root_path = root.join("denied");
+        let real_project_path = root.join("real-project");
         fs::create_dir_all(&workspace_root).unwrap();
-        fs::create_dir_all(&denied_root_path).unwrap();
+        fs::create_dir_all(&real_project_path).unwrap();
         fs::write(workspace_root.join("allowed.txt"), "allowed").unwrap();
-        fs::write(denied_root_path.join("secret.txt"), "secret").unwrap();
+        fs::write(real_project_path.join(".env"), "SECRET_ENV=blocked").unwrap();
+        fs::write(
+            real_project_path.join(".env.local"),
+            "SECRET_ENV_LOCAL=blocked",
+        )
+        .unwrap();
+        fs::write(
+            real_project_path.join(".aibuilder"),
+            "SECRET_AIBUILDER=blocked",
+        )
+        .unwrap();
 
         let workspace = workspace_root.canonicalize().unwrap();
-        let denied_root = denied_root_path.canonicalize().unwrap();
+        let real_project = real_project_path.canonicalize().unwrap();
         let allowed_file = workspace.join("allowed.txt").canonicalize().unwrap();
-        let denied_file = denied_root.join("secret.txt").canonicalize().unwrap();
+        let denied_files = [
+            real_project.join(".env").canonicalize().unwrap(),
+            real_project.join(".env.local").canonicalize().unwrap(),
+            real_project.join(".aibuilder").canonicalize().unwrap(),
+        ];
 
         let request = SandboxRequest {
             command_label: "npm run build".to_string(),
@@ -443,7 +457,7 @@ mod tests {
             working_dir: workspace.clone(),
             readable_roots: vec![workspace.clone()],
             writable_roots: vec![workspace.clone()],
-            denied_roots: vec![denied_root.clone()],
+            denied_roots: vec![real_project.clone()],
             environment: BTreeMap::new(),
             network: SandboxNetworkPolicy::Denied,
             limits: SandboxResourceLimits {
@@ -473,21 +487,24 @@ mod tests {
             profile
         );
 
-        let denied = std::process::Command::new(SANDBOX_EXEC)
-            .arg("-p")
-            .arg(&profile)
-            .arg("--")
-            .arg("/bin/cat")
-            .arg(&denied_file)
-            .output()
-            .unwrap();
-        assert!(
-            !denied.status.success(),
-            "denied read unexpectedly succeeded: stdout={}, stderr={}, profile=\n{}",
-            String::from_utf8_lossy(&denied.stdout),
-            String::from_utf8_lossy(&denied.stderr),
-            profile
-        );
+        for denied_file in denied_files {
+            let denied = std::process::Command::new(SANDBOX_EXEC)
+                .arg("-p")
+                .arg(&profile)
+                .arg("--")
+                .arg("/bin/cat")
+                .arg(&denied_file)
+                .output()
+                .unwrap();
+            assert!(
+                !denied.status.success(),
+                "denied read unexpectedly succeeded for {}: stdout={}, stderr={}, profile=\n{}",
+                denied_file.display(),
+                String::from_utf8_lossy(&denied.stdout),
+                String::from_utf8_lossy(&denied.stderr),
+                profile
+            );
+        }
 
         let _ = fs::remove_dir_all(root);
     }
