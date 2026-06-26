@@ -82,6 +82,28 @@ describe("TaskContract", () => {
     expect(contract.taskType).toBe("backend_feature");
   });
 
+  it("keeps Chinese login location questions as read-only answers", () => {
+    expect(compileTaskContract({
+      objective: "\u767b\u5f55\u5165\u53e3\u5728\u54ea\uff1f",
+    }).taskType).toBe("answer");
+    expect(compileTaskContract({
+      objective: "\u76ee\u524d\u6709\u767b\u5f55\u5165\u53e3\u5417\uff1f",
+    }).taskType).toBe("answer");
+  });
+
+  it("treats Chinese implementation-shaped backend questions as backend features", () => {
+    const objectives = [
+      "\u73b0\u5728\u80fd\u4e0d\u80fd\u52a0\u767b\u5f55\uff1f",
+      "\u662f\u5426\u53ef\u4ee5\u5b9e\u73b0 Supabase \u767b\u5f55\uff1f",
+      "\u80fd\u4e0d\u80fd\u505a\u4e00\u4e2a\u591a\u4eba\u623f\u95f4\u5b9e\u65f6\u540c\u6b65\uff1f",
+      "\u76ee\u524d\u5e2e\u6211\u52a0\u4e00\u4e2a\u767b\u5f55\u5165\u53e3\u5427",
+    ];
+
+    for (const objective of objectives) {
+      expect(compileTaskContract({ objective }).taskType).toBe("backend_feature");
+    }
+  });
+
   it("keeps implementation requests with login keywords as backend features", () => {
     const contract = compileTaskContract({
       objective: "Implement login with Supabase auth",

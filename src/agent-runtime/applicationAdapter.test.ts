@@ -819,7 +819,7 @@ describe("Application runtime adapter", () => {
     expect(fake.events.map((event) => event.type)).not.toContain("approval.expired");
   });
 
-  it("resumes an approved action even when the user clicked after expiresAt", async () => {
+  it("requires a fresh approval when the user approved after expiresAt", async () => {
     const deleteAction = {
       type: "tool_call",
       tool: "delete_files",
@@ -839,16 +839,23 @@ describe("Application runtime adapter", () => {
       expiresAt: "2000-01-01T00:10:00.000Z",
       resolvedAt: "2000-01-01T00:11:00.000Z",
     };
-    fake.actions = [{ type: "finish_candidate", summary: "Deleted old component" }];
+    fake.actions = [deleteAction];
     fake.verificationStatuses = ["passed", "passed"];
 
     const result = await modifyCurrentProjectRuntime(store, "Remove obsolete component", {
       existingRun: waitingRun,
     });
 
-    expect(result).toBe(true);
-    expect(fake.toolNames).toEqual(["delete_files"]);
-    expect(fake.runs.get(waitingRun.id)?.status).toBe("completed");
+    expect(result).toBe(false);
+    expect(fake.toolNames).toEqual([]);
+    expect(fake.runs.get(waitingRun.id)?.status).toBe("waiting_approval");
+    expect(fake.approvals).toHaveLength(2);
+    expect(fake.approvals[1]).toMatchObject({
+      targetResources: ["components/Old.tsx"],
+      toolName: "delete_files",
+    });
+    expect(fake.approvals[1]).not.toHaveProperty("decision");
+    expect(fake.approvals[1]).not.toHaveProperty("resolvedAt");
   });
 
   it("keeps an in-window denied decision valid after expiresAt", async () => {

@@ -1104,7 +1104,7 @@ async fn list_agent_approvals_with_pool(
 async fn get_pending_agent_approval_with_pool(
     pool: &SqlitePool,
     run_id: &str,
-    _now: &str,
+    now: &str,
 ) -> Result<Option<AgentApprovalRecord>, String> {
     let row = sqlx::query(
         r#"
@@ -1112,11 +1112,13 @@ async fn get_pending_agent_approval_with_pool(
         WHERE run_id = ?1
           AND resolved_at IS NULL
           AND decision IS NULL
+          AND expires_at > ?2
         ORDER BY created_at ASC, id ASC
         LIMIT 1
         "#,
     )
     .bind(run_id)
+    .bind(now)
     .fetch_optional(pool)
     .await
     .map_err(|error| format!("agent-storage: failed to read pending approval: {error}"))?;
@@ -1143,10 +1145,14 @@ async fn resolve_agent_approval_with_pool(
     .fetch_optional(pool)
     .await
     .map_err(|error| format!("agent-storage: failed to read approval before resolve: {error}"))?;
-    let _approval = existing
+    let approval = existing
         .map(row_to_approval)
         .transpose()?
         .ok_or_else(|| "agent-storage: pending approval not found".to_string())?;
+
+    if resolution.decision != "expired" && approval.expires_at <= resolution.resolved_at {
+        return Err("agent-storage: approval expired before resolution".to_string());
+    }
 
     let result = sqlx::query(
         r#"
@@ -2212,7 +2218,7 @@ mod tests {
     }
 
     #[test]
-    fn allows_approval_resolution_after_expiry_until_user_decides() {
+    fn rejects_late_approval_resolution_after_expiry() {
         tauri::async_runtime::block_on(async {
             let root =
                 std::env::temp_dir().join(format!("agent-storage-expired-{}", rand_suffix()));
@@ -2238,6 +2244,18 @@ mod tests {
             .await
             .expect("create approval");
 
+            let pending_after_expiry = get_pending_agent_approval_with_pool(
+                &pool,
+                "run-expired-approval",
+                "2026-01-01T00:02:00Z",
+            )
+            .await
+            .expect("pending after expiry");
+            assert!(
+                pending_after_expiry.is_none(),
+                "expired approvals must no longer be pending"
+            );
+
             let approved = resolve_agent_approval_with_pool(
                 &pool,
                 AgentApprovalResolveInput {
@@ -2249,8 +2267,8 @@ mod tests {
             )
             .await;
             assert!(
-                approved.is_ok(),
-                "expired approvals should remain actionable until the user decides"
+                approved.is_err(),
+                "expired approvals must not be approved after expiry"
             );
 
             create_agent_approval_with_pool(
@@ -2281,21 +2299,50 @@ mod tests {
             )
             .await;
             assert!(
-                denied.is_ok(),
-                "expired approvals should remain deniable until the user decides"
+                denied.is_err(),
+                "expired approvals must not be denied after expiry"
             );
+
+            create_agent_approval_with_pool(
+                &pool,
+                AgentApprovalCreateInput {
+                    id: "approval-expired-marker".to_string(),
+                    run_id: "run-expired-approval".to_string(),
+                    tool_call_id: "tool-call-expired-marker".to_string(),
+                    tool_name: "delete_files".to_string(),
+                    normalized_args_hash: "12:expired-marker".to_string(),
+                    target_resources: vec!["components/Marker.tsx".to_string()],
+                    exact_side_effect: "delete components/Marker.tsx".to_string(),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    expires_at: "2026-01-01T00:01:00Z".to_string(),
+                },
+            )
+            .await
+            .expect("create expiry marker approval");
+
+            let expired = resolve_agent_approval_with_pool(
+                &pool,
+                AgentApprovalResolveInput {
+                    run_id: "run-expired-approval".to_string(),
+                    approval_id: "approval-expired-marker".to_string(),
+                    decision: "expired".to_string(),
+                    resolved_at: "2026-01-01T00:02:00Z".to_string(),
+                },
+            )
+            .await
+            .expect("mark approval expired");
+            assert_eq!(expired.decision.as_deref(), Some("expired"));
 
             let second_resolution = resolve_agent_approval_with_pool(
                 &pool,
                 AgentApprovalResolveInput {
                     run_id: "run-expired-approval".to_string(),
-                    approval_id: "approval-expired".to_string(),
-                    decision: "expired".to_string(),
-                    resolved_at: "2026-01-01T00:02:00Z".to_string(),
+                    approval_id: "approval-expired-marker".to_string(),
+                    decision: "approved".to_string(),
+                    resolved_at: "2026-01-01T00:02:30Z".to_string(),
                 },
             )
             .await;
-
             assert!(
                 second_resolution.is_err(),
                 "resolved approvals must not accept a second decision"

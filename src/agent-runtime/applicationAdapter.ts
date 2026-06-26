@@ -35,6 +35,7 @@ import {
 } from "../agent-core/runtime/runController";
 import { isTerminalAgentRunStatus, RunStateMachine } from "../agent-core/runtime/runStateMachine";
 import type {
+  AgentApproval,
   AgentEvent,
   AgentRunFailureKind,
   AgentRun,
@@ -995,7 +996,8 @@ function createApprovalPort(
         (approval) =>
           approval.decision === "approved" &&
           approval.resolvedAt &&
-          !approval.consumedAt,
+          !approval.consumedAt &&
+          wasResolvedBeforeExpiry(approval),
       );
     },
     claimApprovedAuthorization: (input) =>
@@ -1017,6 +1019,14 @@ function createApprovalPort(
       return resolved;
     },
   };
+}
+
+function wasResolvedBeforeExpiry(approval: AgentApproval) {
+  if (!approval.resolvedAt) {
+    return false;
+  }
+
+  return new Date(approval.resolvedAt).getTime() <= new Date(approval.expiresAt).getTime();
 }
 
 function createEmptyBaseline(): {

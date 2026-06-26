@@ -110,6 +110,112 @@ describe("agent context compression", () => {
       ]),
     );
   });
+
+  it("applies a final hard cap while retaining critical task fields", () => {
+    const large = (label: string) => `${label} ${"x".repeat(12_000)}`;
+    const context = createAgentStepContext({
+      backend: {
+        recommendedPatterns: Array.from({ length: 20 }, (_, index) =>
+          large(`pattern-${index}`),
+        ),
+        supabase: {
+          ...createAgentStepContext().backend!.supabase,
+          notes: Array.from({ length: 20 }, (_, index) => large(`note-${index}`)),
+          tables: Array.from({ length: 30 }, (_, tableIndex) => ({
+            columns: Array.from({ length: 30 }, (_, columnIndex) => ({
+              name: `column_${tableIndex}_${columnIndex}_${"x".repeat(200)}`,
+              nullable: false,
+              required: true,
+              type: `text_${"x".repeat(200)}`,
+            })),
+            name: `table_${tableIndex}_${"x".repeat(200)}`,
+            primaryKeys: ["id"],
+          })),
+        },
+      },
+      diagnostics: large("diagnostics"),
+      fileTree: large("file-tree"),
+      memory: {
+        designConventions: Array.from({ length: 20 }, (_, index) =>
+          large(`convention-${index}`),
+        ),
+        fileSummaries: Array.from({ length: 40 }, (_, index) => ({
+          contentHash: `hash-${index}`,
+          path: `app/file-${index}.tsx`,
+          summary: large(`summary-${index}`),
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        })),
+        objective: large("memory objective"),
+        projectIndex: {
+          components: Array.from({ length: 50 }, (_, index) => `component-${index}`),
+          dataFiles: Array.from({ length: 50 }, (_, index) => `data-${index}`),
+          dependencies: Array.from({ length: 50 }, (_, index) => `dep-${index}`),
+          fileTreeHash: "hash",
+          libFiles: Array.from({ length: 50 }, (_, index) => `lib-${index}`),
+          packageManager: "pnpm",
+          routes: Array.from({ length: 50 }, (_, index) => `route-${index}`),
+          totalEditableFiles: 200,
+        },
+        recentChanges: Array.from({ length: 20 }, (_, index) => large(`change-${index}`)),
+        structureSummary: large("structure"),
+        techStack: Array.from({ length: 30 }, (_, index) => `tech-${index}`),
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      observations: Array.from({ length: 60 }, (_, index) => ({
+        content: large(`observation-${index}`),
+        ok: index % 11 !== 0,
+        step: index + 1,
+        summary: index % 11 === 0 ? `Failure ${index}` : `Observation ${index}`,
+        tool: index % 17 === 0 ? "model_validation" : "read_files",
+      })),
+      specContext: {
+        ...createAgentStepContext().specContext!,
+        acceptanceCriteria: [
+          {
+            description: large("critical acceptance criteria"),
+            id: "criterion-critical",
+            required: true,
+          },
+        ],
+        currentTask: {
+          ...createAgentStepContext().specContext!.currentTask,
+          objective: "Keep this current task objective.",
+        },
+        design: {
+          dataModel: Array.from({ length: 30 }, (_, index) => large(`model-${index}`)),
+          integrations: Array.from({ length: 30 }, (_, index) => large(`integration-${index}`)),
+          summary: large("design summary"),
+          technicalDecisions: Array.from({ length: 30 }, (_, index) =>
+            large(`decision-${index}`),
+          ),
+          verificationStrategy: Array.from({ length: 30 }, (_, index) =>
+            large(`verify-${index}`),
+          ),
+        },
+        relatedTasks: Array.from({ length: 30 }, (_, index) => ({
+          id: `task-${index}`,
+          status: "pending",
+          title: large(`related-${index}`),
+        })),
+      },
+    });
+
+    const compressed = compressAgentStepContext(context);
+
+    expect(compressed.contextReport.finalChars).toBeLessThanOrEqual(
+      CONTEXT_ENVELOPE_CHAR_BUDGET,
+    );
+    expect(compressed.contextReport.rawChars).toBeGreaterThan(
+      compressed.contextReport.finalChars,
+    );
+    expect(compressed.contextReport.finalChars).toBe(JSON.stringify(compressed).length);
+    expect(compressed.specContext?.currentTask.objective).toContain(
+      "Keep this current task objective",
+    );
+    expect(compressed.specContext?.acceptanceCriteria).toHaveLength(1);
+    expect(compressed.budgetState.pressure).toBe("normal");
+    expect(compressed.runContextSummary.nextStep).toContain("Repair the latest build failure");
+  });
 });
 
 function createAgentStepContext(

@@ -81,6 +81,21 @@ type ContinueSpecExecutionOptions = {
 };
 
 const SPEC_TASK_AUTO_RETRY_LIMIT = 2;
+const SPEC_EXECUTION_LEASE_TIMEOUT_MS = 3 * 60 * 1000;
+const SPEC_EXECUTION_HEARTBEAT_MS = 30 * 1000;
+
+type SpecExecutionLease = {
+  conversationId: string;
+  revisionId: string;
+  sessionId: string;
+  specId: string;
+  startedAt: string;
+  updatedAt: string;
+};
+
+type SpecExecutionRecoveryReason = "orphan_terminal_run" | "stale_lease";
+
+let activeSpecExecutionLease: SpecExecutionLease | null = null;
 
 export function createSpecActions({ get, set }: StoreAccess): SpecActions {
   const store = { get, set };
@@ -422,18 +437,18 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
       }
 
       if (get().isExecutingSpec) {
-        const canRecoverStaleRun = options?.recoverStaleRun
-          ? await canRecoverStaleSpecExecutionLock(store, spec)
-          : false;
+        const recoveryReason = options?.recoverStaleRun
+          ? await getSpecExecutionRecoveryReason(store, spec)
+          : null;
 
-        if (!canRecoverStaleRun) {
+        if (!recoveryReason) {
           set((state) => ({
             projectError: options?.recoverStaleRun
-              ? "Spec executor is already busy; no stale terminal task run was found to recover."
+              ? "Spec executor is already busy; active execution lease has not expired."
               : state.projectError,
             terminalLogs: appendLogs(state.terminalLogs, [
               options?.recoverStaleRun
-                ? "[spec] Reconcile request skipped because Spec execution is already busy."
+                ? "[spec] Reconcile request skipped because the active Spec execution lease is still current."
                 : "[spec] Continue request skipped because Spec execution is already busy.",
             ]),
           }));
@@ -442,19 +457,26 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
 
         set((state) => ({
           terminalLogs: appendLogs(state.terminalLogs, [
-            "[spec] Recovering stale Spec execution lock for a terminal task run.",
+            recoveryReason === "stale_lease"
+              ? "[spec] Recovering stale Spec execution lease after heartbeat timeout."
+              : "[spec] Recovering orphaned Spec execution lock for a terminal task run.",
           ]),
         }));
       }
 
+      const session = startSpecExecutionSession(spec);
       set({ isExecutingSpec: true, projectError: null });
 
       try {
-        await reconcileAndContinueSpecExecution(store, spec.id);
+        await reconcileAndContinueSpecExecution(store, spec.id, session);
       } catch (error) {
-        recordSpecError(set, error);
+        if (isSpecExecutionSessionActive(session)) {
+          recordSpecError(set, error);
+        }
       } finally {
-        set({ isExecutingSpec: false });
+        if (finishSpecExecutionSession(session)) {
+          set({ isExecutingSpec: false });
+        }
       }
     },
 
@@ -468,8 +490,15 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         !spec ||
         !conversation ||
         !["approved", "building"].includes(spec.status) ||
-        isNonExecutingSpecWorkflowBusy(get())
+        isSpecWorkflowBusy(get())
       ) {
+        if (get().isExecutingSpec) {
+          set((state) => ({
+            terminalLogs: appendLogs(state.terminalLogs, [
+              "[spec] Retry request skipped because Spec execution is already busy.",
+            ]),
+          }));
+        }
         return;
       }
 
@@ -502,14 +531,19 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         return;
       }
 
+      const session = startSpecExecutionSession(spec);
       set({ isExecutingSpec: true, projectError: null });
 
       try {
-        await resetSpecTaskAndExecute(store, spec, runningTask.id);
+        await resetSpecTaskAndExecute(store, spec, runningTask.id, session);
       } catch (error) {
-        recordSpecError(set, error);
+        if (isSpecExecutionSessionActive(session)) {
+          recordSpecError(set, error);
+        }
       } finally {
-        set({ isExecutingSpec: false });
+        if (finishSpecExecutionSession(session)) {
+          set({ isExecutingSpec: false });
+        }
       }
     },
 
@@ -627,6 +661,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         return;
       }
 
+      const session = startSpecExecutionSession(spec);
       set({ isExecutingSpec: true, projectError: null });
 
       try {
@@ -648,11 +683,18 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         );
 
         await saveSpecToStore(store, approvedSpec);
-        await executeSpecTasks(store, approvedSpec.id);
+        if (!refreshSpecExecutionSession(session)) {
+          return;
+        }
+        await executeSpecTasks(store, approvedSpec.id, session);
       } catch (error) {
-        recordSpecError(set, error);
+        if (isSpecExecutionSessionActive(session)) {
+          recordSpecError(set, error);
+        }
       } finally {
-        set({ isExecutingSpec: false });
+        if (finishSpecExecutionSession(session)) {
+          set({ isExecutingSpec: false });
+        }
       }
     },
 
@@ -686,14 +728,19 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         return;
       }
 
+      const session = startSpecExecutionSession(spec);
       set({ isExecutingSpec: true, projectError: null });
 
       try {
-        await resetSpecTaskAndExecute(store, spec, taskId);
+        await resetSpecTaskAndExecute(store, spec, taskId, session);
       } catch (error) {
-        recordSpecError(set, error);
+        if (isSpecExecutionSessionActive(session)) {
+          recordSpecError(set, error);
+        }
       } finally {
-        set({ isExecutingSpec: false });
+        if (finishSpecExecutionSession(session)) {
+          set({ isExecutingSpec: false });
+        }
       }
     },
 
@@ -717,7 +764,8 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         return;
       }
 
-      set({ isVerifyingSpec: true, projectError: null });
+      const session = startSpecExecutionSession(spec);
+      set({ isExecutingSpec: true, isVerifyingSpec: true, projectError: null });
 
       try {
         const retryBase = {
@@ -729,11 +777,16 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         await verifyCompletedTasks(
           store,
           transitionSpecStatus(retryBase, "verifying"),
+          session,
         );
       } catch (error) {
-        recordSpecError(set, error);
+        if (isSpecExecutionSessionActive(session)) {
+          recordSpecError(set, error);
+        }
       } finally {
-        set({ isVerifyingSpec: false });
+        if (finishSpecExecutionSession(session)) {
+          set({ isExecutingSpec: false, isVerifyingSpec: false });
+        }
       }
     },
 
@@ -894,11 +947,14 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         }));
 
         if (!get().isExecutingSpec) {
+          const session = startSpecExecutionSession(spec);
           set({ isExecutingSpec: true });
           try {
-            await reconcileAndContinueSpecExecution(store, spec.id);
+            await reconcileAndContinueSpecExecution(store, spec.id, session);
           } finally {
-            set({ isExecutingSpec: false });
+            if (finishSpecExecutionSession(session)) {
+              set({ isExecutingSpec: false });
+            }
           }
         }
 
@@ -1004,7 +1060,11 @@ async function loadRunningSpecRun(
   return run;
 }
 
-async function executeSpecTasks(store: StoreAccess, specId: string) {
+async function executeSpecTasks(
+  store: StoreAccess,
+  specId: string,
+  session: SpecExecutionLease,
+) {
   const project = store.get().currentProject;
 
   if (!project) {
@@ -1020,9 +1080,16 @@ async function executeSpecTasks(store: StoreAccess, specId: string) {
   if (spec.status === "approved") {
     spec = transitionSpecStatus(spec, "building");
     await saveSpecToStore(store, spec);
+    if (!refreshSpecExecutionSession(session)) {
+      return;
+    }
   }
 
   while (true) {
+    if (!refreshSpecExecutionSession(session)) {
+      return;
+    }
+
     spec = store.get().currentSpec;
 
     if (!spec || spec.id !== specId || spec.status !== "building") {
@@ -1046,7 +1113,10 @@ async function executeSpecTasks(store: StoreAccess, specId: string) {
 
       const verifyingSpec = transitionSpecStatus(spec, "verifying");
       await saveSpecToStore(store, verifyingSpec);
-      await verifyCompletedTasks(store, verifyingSpec);
+      if (!refreshSpecExecutionSession(session)) {
+        return;
+      }
+      await verifyCompletedTasks(store, verifyingSpec, session);
       return;
     }
 
@@ -1059,6 +1129,9 @@ async function executeSpecTasks(store: StoreAccess, specId: string) {
       status: "running",
     });
     await saveSpecToStore(store, runningSpec);
+    if (!refreshSpecExecutionSession(session)) {
+      return;
+    }
 
     const runningRevision = getCurrentSpecRevision(runningSpec);
     const runningTask = runningRevision.tasks.find((item) => item.id === task.id);
@@ -1085,48 +1158,62 @@ async function executeSpecTasks(store: StoreAccess, specId: string) {
       specId: runningSpec.id,
       taskId: runningTask.id,
     };
-    const result = await runSpecTaskRuntime({
-      contract,
-      conversationId: runningSpec.conversationId,
-      executionMode,
-      project,
-      resumeObservation: retryContext
-        ? createSpecRetryObservation(runningTask, retryContext)
-        : undefined,
-      runId,
-      store,
-      taskObjective: runningTask.objective,
-    }).catch(async (error: unknown) => {
-      const message = getProjectErrorMessage(error);
-      const latestExecutionSpec = await loadExecutionSpecById(executionIdentity);
-      const latestTask = findSpecTask(latestExecutionSpec, task.id);
-
-      if (
-        latestTask &&
-        await saveAutoRetrySpecTask(
-          store,
-          latestExecutionSpec,
-          latestTask,
-          message,
-        )
-      ) {
-        return "auto_retry" as const;
-      }
-
-      const failedTaskSpec = updateTask(latestExecutionSpec, task.id, {
-        error: message,
+    const result = await withSpecExecutionHeartbeat(
+      session,
+      runSpecTaskRuntime({
+        contract,
+        conversationId: runningSpec.conversationId,
+        executionMode,
+        project,
+        resumeObservation: retryContext
+          ? createSpecRetryObservation(runningTask, retryContext)
+          : undefined,
         runId,
-        status: "failed",
-      });
-      await saveSpecToStore(
         store,
-        markSpecBlocked(
-          markBlockedDownstreamTasks(failedTaskSpec, task.id),
-          `Task ${task.title} failed.`,
-        ),
-      );
-      return null;
-    });
+        taskObjective: runningTask.objective,
+      }).catch(async (error: unknown) => {
+        if (!isSpecExecutionSessionActive(session)) {
+          return "stale_session" as const;
+        }
+
+        const message = getProjectErrorMessage(error);
+        const latestExecutionSpec = await loadExecutionSpecById(executionIdentity);
+        if (!refreshSpecExecutionSession(session)) {
+          return "stale_session" as const;
+        }
+        const latestTask = findSpecTask(latestExecutionSpec, task.id);
+
+        if (
+          latestTask &&
+          await saveAutoRetrySpecTask(
+            store,
+            latestExecutionSpec,
+            latestTask,
+            message,
+          )
+        ) {
+          return "auto_retry" as const;
+        }
+
+        const failedTaskSpec = updateTask(latestExecutionSpec, task.id, {
+          error: message,
+          runId,
+          status: "failed",
+        });
+        await saveSpecToStore(
+          store,
+          markSpecBlocked(
+            markBlockedDownstreamTasks(failedTaskSpec, task.id),
+            `Task ${task.title} failed.`,
+          ),
+        );
+        return null;
+      }),
+    );
+
+    if (result === "stale_session" || !refreshSpecExecutionSession(session)) {
+      return;
+    }
 
     if (result === "auto_retry") {
       continue;
@@ -1148,6 +1235,9 @@ async function executeSpecTasks(store: StoreAccess, specId: string) {
         ...executionIdentity,
         runId: run.id,
       });
+      if (!refreshSpecExecutionSession(session)) {
+        return;
+      }
       await saveSpecToStore(
         store,
         updateTask(latestExecutionSpec, task.id, {
@@ -1163,6 +1253,9 @@ async function executeSpecTasks(store: StoreAccess, specId: string) {
       ...executionIdentity,
       runId: run?.id ?? runId,
     });
+    if (!refreshSpecExecutionSession(session)) {
+      return;
+    }
     const latestTask = findSpecTask(latestExecutionSpec, task.id);
     const failureDetails = await getSpecRunFailureDetails({
       failureKind: result.failureKind,
@@ -1213,6 +1306,7 @@ async function executeSpecTasks(store: StoreAccess, specId: string) {
 async function reconcileAndContinueSpecExecution(
   store: StoreAccess,
   specId: string,
+  session: SpecExecutionLease,
 ) {
   const project = store.get().currentProject;
   let spec = store.get().currentSpec;
@@ -1222,12 +1316,12 @@ async function reconcileAndContinueSpecExecution(
   }
 
   if (spec.status === "verifying") {
-    await verifyCompletedTasks(store, spec);
+    await verifyCompletedTasks(store, spec, session);
     return;
   }
 
   if (spec.status === "approved") {
-    await executeSpecTasks(store, spec.id);
+    await executeSpecTasks(store, spec.id, session);
     return;
   }
 
@@ -1239,7 +1333,7 @@ async function reconcileAndContinueSpecExecution(
   const runningTask = revision.tasks.find((task) => task.status === "running");
 
   if (!runningTask) {
-    await executeSpecTasks(store, spec.id);
+    await executeSpecTasks(store, spec.id, session);
     return;
   }
 
@@ -1261,6 +1355,9 @@ async function reconcileAndContinueSpecExecution(
   }
 
   const run = await agentRuntimeApi.getRun(project.id, runningTask.runId);
+  if (!refreshSpecExecutionSession(session)) {
+    return;
+  }
 
   if (!run) {
     await saveSpecToStore(
@@ -1287,6 +1384,9 @@ async function reconcileAndContinueSpecExecution(
   const report = await agentRuntimeApi
     .getLatestVerificationReport(project.id, run.id)
     .catch(() => null);
+  if (!refreshSpecExecutionSession(session)) {
+    return;
+  }
 
   if (run.status === "completed" && report?.status === "passed") {
     await saveSpecToStore(
@@ -1297,7 +1397,10 @@ async function reconcileAndContinueSpecExecution(
         status: "passed",
       }),
     );
-    await executeSpecTasks(store, spec.id);
+    if (!refreshSpecExecutionSession(session)) {
+      return;
+    }
+    await executeSpecTasks(store, spec.id, session);
     return;
   }
 
@@ -1319,7 +1422,10 @@ async function reconcileAndContinueSpecExecution(
       failureDetails.failureKind,
     )
   ) {
-    await executeSpecTasks(store, spec.id);
+    if (!refreshSpecExecutionSession(session)) {
+      return;
+    }
+    await executeSpecTasks(store, spec.id, session);
     return;
   }
 
@@ -1348,35 +1454,48 @@ async function reconcileAndContinueSpecExecution(
   );
 }
 
-async function canRecoverStaleSpecExecutionLock(
+async function getSpecExecutionRecoveryReason(
   store: StoreAccess,
   spec: DevelopmentSpec,
-) {
+): Promise<SpecExecutionRecoveryReason | null> {
   const project = store.get().currentProject;
+  const lease = getActiveSpecExecutionLease(spec);
+
+  if (lease) {
+    return isSpecExecutionLeaseExpired(lease) ? "stale_lease" : null;
+  }
+
+  if (activeSpecExecutionLease) {
+    return null;
+  }
 
   if (!project || spec.status !== "building") {
-    return false;
+    return null;
   }
 
   const revision = getCurrentSpecRevision(spec);
   const runningTask = revision.tasks.find((task) => task.status === "running");
 
   if (!runningTask) {
-    return false;
+    return null;
   }
 
   if (!runningTask.runId) {
-    return true;
+    return "orphan_terminal_run";
   }
 
   const run = await agentRuntimeApi
     .getRun(project.id, runningTask.runId)
     .catch(() => null);
 
-  return !run || isTerminalRunStatus(run.status);
+  return !run || isTerminalRunStatus(run.status) ? "orphan_terminal_run" : null;
 }
 
-async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
+async function verifyCompletedTasks(
+  store: StoreAccess,
+  spec: DevelopmentSpec,
+  session: SpecExecutionLease,
+) {
   const project = store.get().currentProject;
 
   if (!project) {
@@ -1384,6 +1503,9 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
   }
 
   if (await cancelVerificationIfRequested(store, spec)) {
+    return;
+  }
+  if (!refreshSpecExecutionSession(session)) {
     return;
   }
 
@@ -1407,6 +1529,9 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
     const run = await agentRuntimeApi
       .getRun(project.id, task.runId)
       .catch(() => null);
+    if (!refreshSpecExecutionSession(session)) {
+      return;
+    }
 
     if (run?.status !== "completed") {
       verificationReports.set(task.runId, "pending");
@@ -1416,6 +1541,9 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
     const report = await agentRuntimeApi
       .getLatestVerificationReport(project.id, task.runId)
       .catch(() => null);
+    if (!refreshSpecExecutionSession(session)) {
+      return;
+    }
     verificationReports.set(
       task.runId,
       report?.status === "passed" || report?.status === "failed"
@@ -1456,7 +1584,10 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
           .join(", ")}.`,
       )
     ) {
-      await executeSpecTasks(store, spec.id);
+      if (!refreshSpecExecutionSession(session)) {
+        return;
+      }
+      await executeSpecTasks(store, spec.id, session);
       return;
     }
 
@@ -1497,7 +1628,10 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
         retryTask,
         `Task verification report did not pass for ${retryTask.id}.`,
       );
-      await executeSpecTasks(store, spec.id);
+      if (!refreshSpecExecutionSession(session)) {
+        return;
+      }
+      await executeSpecTasks(store, spec.id, session);
       return;
     }
 
@@ -1521,16 +1655,30 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
   const installRequired =
     spec.kind === "initial_build" ||
     (await didSpecChangePackageJson(project.id, revision.tasks));
+  const packageManager = await detectFinalVerificationPackageManager(
+    store,
+    project.id,
+  );
+  const finalCommands = getFinalVerificationCommands(packageManager, installRequired);
 
   if (await cancelVerificationIfRequested(store, spec)) {
     return;
   }
+  if (!refreshSpecExecutionSession(session)) {
+    return;
+  }
 
   const installResult = installRequired
-    ? await runFinalProjectCommand(store, project.id, "npm install")
+    ? await withSpecExecutionHeartbeat(
+        session,
+        runFinalProjectCommand(store, project.id, finalCommands.install),
+      )
     : null;
 
   if (await cancelVerificationIfRequested(store, spec)) {
+    return;
+  }
+  if (!refreshSpecExecutionSession(session)) {
     return;
   }
 
@@ -1539,20 +1687,26 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
     await saveSpecToStore(
       store,
       markSpecBlocked(
-        markFinalVerificationFailed(spec, "npm install", output),
-        `Final npm install failed:\n${output}`,
+        markFinalVerificationFailed(spec, finalCommands.install, output),
+        `Final ${finalCommands.install} failed:\n${output}`,
       ),
     );
     return;
   }
 
-  const buildResult = await runFinalProjectCommand(
-    store,
-    project.id,
-    "npm run build",
+  const buildResult = await withSpecExecutionHeartbeat(
+    session,
+    runFinalProjectCommand(
+      store,
+      project.id,
+      finalCommands.build,
+    ),
   );
 
   if (await cancelVerificationIfRequested(store, spec)) {
+    return;
+  }
+  if (!refreshSpecExecutionSession(session)) {
     return;
   }
 
@@ -1563,16 +1717,19 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
       markSpecBlocked(
         markFinalVerificationFailed(
           spec,
-          installRequired ? "npm install && npm run build" : "npm run build",
+          finalCommands.recorded,
           output,
         ),
-        `Final npm run build failed:\n${output}`,
+        `Final ${finalCommands.build} failed:\n${output}`,
       ),
     );
     return;
   }
 
   if (await cancelVerificationIfRequested(store, spec)) {
+    return;
+  }
+  if (!refreshSpecExecutionSession(session)) {
     return;
   }
 
@@ -1583,9 +1740,9 @@ async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
         ...spec,
         finalVerification: {
           checkedAt: new Date().toISOString(),
-          command: installRequired ? "npm install && npm run build" : "npm run build",
+          command: finalCommands.recorded,
           output: formatSuccessfulFinalVerificationOutput(
-            installRequired,
+            finalCommands,
             installResult?.output,
             buildResult.output,
           ),
@@ -1617,6 +1774,45 @@ async function runFinalProjectCommand(
       success: false,
     };
   }
+}
+
+type FinalVerificationPackageManager = "npm" | "pnpm";
+
+function getFinalVerificationCommands(
+  packageManager: FinalVerificationPackageManager,
+  installRequired: boolean,
+) {
+  const install = packageManager === "pnpm" ? "pnpm install" : "npm install";
+  const build = packageManager === "pnpm" ? "pnpm build" : "npm run build";
+
+  return {
+    build,
+    install,
+    recorded: installRequired ? `${install} && ${build}` : build,
+  };
+}
+
+async function detectFinalVerificationPackageManager(
+  store: StoreAccess,
+  projectId: string,
+): Promise<FinalVerificationPackageManager> {
+  const fileTree = store.get().fileTree;
+
+  if (fileTree && hasFilePath(fileTree, "pnpm-lock.yaml")) {
+    return "pnpm";
+  }
+
+  try {
+    await projectApi.readFile(projectId, "pnpm-lock.yaml");
+    return "pnpm";
+  } catch {
+    return "npm";
+  }
+}
+
+function hasFilePath(fileTree: FileTree, path: string): boolean {
+  return fileTree.path === path ||
+    (fileTree.children ?? []).some((child) => hasFilePath(child, path));
 }
 
 async function cancelVerificationIfRequested(
@@ -1680,6 +1876,97 @@ type ExecutionIdentity = {
   specId: string;
   taskId: string;
 };
+
+function startSpecExecutionSession(spec: DevelopmentSpec): SpecExecutionLease {
+  const now = new Date().toISOString();
+  const lease: SpecExecutionLease = {
+    conversationId: spec.conversationId,
+    revisionId: spec.currentRevisionId,
+    sessionId: createId("spec-session"),
+    specId: spec.id,
+    startedAt: now,
+    updatedAt: now,
+  };
+  activeSpecExecutionLease = lease;
+  return lease;
+}
+
+function finishSpecExecutionSession(session: SpecExecutionLease) {
+  if (!isSpecExecutionSessionActive(session)) {
+    return false;
+  }
+
+  activeSpecExecutionLease = null;
+  return true;
+}
+
+function refreshSpecExecutionSession(session: SpecExecutionLease) {
+  const lease = activeSpecExecutionLease;
+
+  if (!lease || !isSpecExecutionSessionActive(session)) {
+    return false;
+  }
+
+  activeSpecExecutionLease = {
+    ...lease,
+    updatedAt: new Date().toISOString(),
+  };
+  return true;
+}
+
+function isSpecExecutionSessionActive(session: SpecExecutionLease) {
+  const lease = activeSpecExecutionLease;
+
+  return Boolean(
+    lease &&
+      lease.sessionId === session.sessionId &&
+      lease.specId === session.specId &&
+      lease.revisionId === session.revisionId &&
+      lease.conversationId === session.conversationId,
+  );
+}
+
+function getActiveSpecExecutionLease(spec: DevelopmentSpec) {
+  const lease = activeSpecExecutionLease;
+
+  if (
+    !lease ||
+    lease.specId !== spec.id ||
+    lease.revisionId !== spec.currentRevisionId ||
+    lease.conversationId !== spec.conversationId
+  ) {
+    return null;
+  }
+
+  return lease;
+}
+
+function isSpecExecutionLeaseExpired(lease: SpecExecutionLease) {
+  const updatedAt = Date.parse(lease.updatedAt);
+
+  if (Number.isNaN(updatedAt)) {
+    return true;
+  }
+
+  return Date.now() - updatedAt > SPEC_EXECUTION_LEASE_TIMEOUT_MS;
+}
+
+async function withSpecExecutionHeartbeat<T>(
+  session: SpecExecutionLease,
+  operation: Promise<T>,
+) {
+  refreshSpecExecutionSession(session);
+  const timer = setInterval(() => {
+    refreshSpecExecutionSession(session);
+  }, SPEC_EXECUTION_HEARTBEAT_MS);
+
+  try {
+    return await operation;
+  } finally {
+    clearInterval(timer);
+    refreshSpecExecutionSession(session);
+  }
+}
 
 async function loadExecutionSpecById(
   identity: ExecutionIdentity,
@@ -1774,7 +2061,7 @@ function normalizeFinalVerificationOutput(output: string | null | undefined) {
 }
 
 function formatSuccessfulFinalVerificationOutput(
-  installRequired: boolean,
+  commands: ReturnType<typeof getFinalVerificationCommands>,
   installOutput: string | null | undefined,
   buildOutput: string | null | undefined,
 ) {
@@ -1787,9 +2074,9 @@ function formatSuccessfulFinalVerificationOutput(
     return output;
   }
 
-  return installRequired
-    ? "npm install and npm run build completed successfully without command output."
-    : "npm run build completed successfully without command output.";
+  return commands.recorded.includes("&&")
+    ? `${commands.install} and ${commands.build} completed successfully without command output.`
+    : `${commands.build} completed successfully without command output.`;
 }
 
 async function syncCurrentAgentRunState(
@@ -1996,6 +2283,7 @@ async function resetSpecTaskAndExecute(
   store: StoreAccess,
   spec: DevelopmentSpec,
   taskId: string,
+  session: SpecExecutionLease,
 ) {
   const revision = getCurrentSpecRevision(spec);
   const resetRevision = restoreRetryableTaskGraph(revision, taskId);
@@ -2015,7 +2303,10 @@ async function resetSpecTaskAndExecute(
       : resetBase;
 
   await saveSpecToStore(store, resetSpec);
-  await executeSpecTasks(store, resetSpec.id);
+  if (!refreshSpecExecutionSession(session)) {
+    return;
+  }
+  await executeSpecTasks(store, resetSpec.id, session);
 }
 
 function canAutoRetrySpecTask(
@@ -2734,15 +3025,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isNonExecutingSpecWorkflowBusy(state: AppState) {
-  return Boolean(
-    state.isGeneratingSpec ||
-      state.isRevisingSpec ||
-      state.isVerifyingSpec ||
-      state.isSwitchingIterationMode,
-  );
-}
-
 function isNonCancellableSpecModeSwitchBusy(state: AppState) {
   return Boolean(
     state.isGeneratingSpec ||
@@ -2878,5 +3160,11 @@ export function canSwitchSpecStatusToChat(spec: DevelopmentSpec | null) {
 
 export const __specStoreActionsTestUtils = {
   markBlockedDownstreamTasks,
+  resetSpecExecutionLease: () => {
+    activeSpecExecutionLease = null;
+  },
   restoreRetryableTaskGraph,
+  setSpecExecutionLease: (lease: SpecExecutionLease | null) => {
+    activeSpecExecutionLease = lease;
+  },
 };

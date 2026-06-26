@@ -1943,7 +1943,10 @@ function createFakePorts({
           (approval) =>
             approval.runId === runId &&
             approval.decision === "approved" &&
-            !approval.consumedAt,
+            approval.resolvedAt &&
+            !approval.consumedAt &&
+            new Date(approval.resolvedAt).getTime() <=
+              new Date(approval.expiresAt).getTime(),
         ),
       claimApprovedAuthorization: async ({
         approvalId,

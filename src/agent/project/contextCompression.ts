@@ -17,6 +17,7 @@ const DIAGNOSTICS_CHAR_BUDGET = 6_000;
 const OBSERVATION_CONTENT_CHAR_BUDGET = 4_000;
 const FAILURE_OBSERVATION_CONTENT_CHAR_BUDGET = 6_000;
 const COMPACT_OBSERVATION_CONTENT_CHAR_BUDGET = 1_200;
+const CONTEXT_REPORT_CHAR_BUFFER = 800;
 
 export function buildAgentBudgetState(run: AgentRun): AgentBudgetState {
   const modelTurns = buildBudgetMetric(run.modelTurns, run.contract.budget.maxModelTurns);
@@ -103,12 +104,20 @@ export function compressAgentStepContext(context: AgentStepContext): AgentStepCo
       : null,
   };
 
-  next = fitContextWithinBudget(next, getContextEnvelopeBudget(next));
-  next.contextReport = createContextReport(rawChars, estimateContextChars(next), next);
-  next.contextReport = {
-    ...next.contextReport,
-    finalChars: estimateContextChars(next),
-  };
+  const envelopeBudget = getContextEnvelopeBudget(context);
+  next = fitContextWithinBudget(
+    next,
+    Math.max(1_000, envelopeBudget - CONTEXT_REPORT_CHAR_BUFFER),
+  );
+  next = finalizeContextReport(next, rawChars);
+
+  if (estimateContextChars(next) > envelopeBudget) {
+    next = fitContextWithinBudget(
+      next,
+      Math.max(1_000, envelopeBudget - CONTEXT_REPORT_CHAR_BUFFER * 2),
+    );
+    next = finalizeContextReport(next, rawChars);
+  }
 
   return next;
 }
@@ -160,14 +169,219 @@ function fitContextWithinBudget(context: AgentStepContext, maxChars: number) {
     };
   }
 
-  if (estimateContextChars(next) <= maxChars) {
-    return next;
+  const reducers: Array<(value: AgentStepContext) => AgentStepContext> = [
+    (value) => ({ ...value, diagnostics: null }),
+    (value) => ({ ...value, fileTree: null }),
+    compactMemoryForHardCap,
+    compactBackendForHardCap,
+    compactRelatedTasksForHardCap,
+    compactSpecDesignForHardCap,
+    compactObservationsForHardCap,
+    createMinimalContextForHardCap,
+  ];
+
+  for (const reducer of reducers) {
+    if (estimateContextChars(next) <= maxChars) {
+      return next;
+    }
+
+    next = reducer(next);
+  }
+
+  return next;
+}
+
+function compactMemoryForHardCap(context: AgentStepContext): AgentStepContext {
+  if (!context.memory) {
+    return context;
   }
 
   return {
-    ...next,
-    diagnostics: compactNullableText(next.diagnostics, 2_000),
-    fileTree: compactNullableText(next.fileTree, 3_000),
+    ...context,
+    memory: {
+      ...context.memory,
+      designConventions: compactTextArray(context.memory.designConventions, 4, 160),
+      fileSummaries: context.memory.fileSummaries.slice(-8).map((summary) => ({
+        ...summary,
+        summary: compactText(summary.summary, 180),
+      })),
+      projectIndex: {
+        ...context.memory.projectIndex,
+        components: context.memory.projectIndex.components.slice(-12),
+        dataFiles: context.memory.projectIndex.dataFiles.slice(-12),
+        dependencies: context.memory.projectIndex.dependencies.slice(-12),
+        libFiles: context.memory.projectIndex.libFiles.slice(-12),
+        routes: context.memory.projectIndex.routes.slice(-12),
+      },
+      recentChanges: compactTextArray(context.memory.recentChanges, 4, 160),
+      structureSummary: compactText(context.memory.structureSummary, 260),
+      techStack: context.memory.techStack.slice(0, 12),
+    },
+  };
+}
+
+function compactBackendForHardCap(context: AgentStepContext): AgentStepContext {
+  if (!context.backend) {
+    return context;
+  }
+
+  return {
+    ...context,
+    backend: {
+      ...context.backend,
+      recommendedPatterns: compactTextArray(context.backend.recommendedPatterns, 4, 160),
+      supabase: {
+        ...context.backend.supabase,
+        notes: compactTextArray(context.backend.supabase.notes, 4, 160),
+        schemaLoadError: context.backend.supabase.schemaLoadError
+          ? compactText(context.backend.supabase.schemaLoadError, 220)
+          : undefined,
+        tables: context.backend.supabase.tables.slice(0, 6).map((table) => ({
+          ...table,
+          columns: table.columns.slice(0, 8),
+        })),
+      },
+    },
+  };
+}
+
+function compactRelatedTasksForHardCap(context: AgentStepContext): AgentStepContext {
+  if (!context.specContext) {
+    return context;
+  }
+
+  return {
+    ...context,
+    specContext: {
+      ...context.specContext,
+      relatedTasks: context.specContext.relatedTasks.slice(-4).map((task) => ({
+        ...task,
+        title: compactText(task.title, 120),
+      })),
+    },
+  };
+}
+
+function compactSpecDesignForHardCap(context: AgentStepContext): AgentStepContext {
+  if (!context.specContext) {
+    return context;
+  }
+
+  return {
+    ...context,
+    specContext: {
+      ...context.specContext,
+      design: {
+        dataModel: compactTextArray(context.specContext.design.dataModel, 4, 160),
+        integrations: compactTextArray(context.specContext.design.integrations, 4, 160),
+        summary: compactText(context.specContext.design.summary, 260),
+        technicalDecisions: compactTextArray(
+          context.specContext.design.technicalDecisions,
+          4,
+          160,
+        ),
+        verificationStrategy: compactTextArray(
+          context.specContext.design.verificationStrategy,
+          4,
+          160,
+        ),
+      },
+    },
+  };
+}
+
+function compactObservationsForHardCap(context: AgentStepContext): AgentStepContext {
+  const selected = new Map<number, AgentObservation>();
+  const important = context.observations.filter(
+    (observation) =>
+      !observation.ok ||
+      observation.tool === "loop_rescue" ||
+      observation.tool === "model_validation",
+  );
+
+  for (const observation of [...important.slice(-4), ...context.observations.slice(-3)]) {
+    selected.set(observation.step, {
+      ...observation,
+      content: observation.content ? compactText(observation.content, 500) : undefined,
+      summary: compactText(observation.summary, 180),
+    });
+  }
+
+  return {
+    ...context,
+    observations: Array.from(selected.values()).sort((left, right) => left.step - right.step),
+  };
+}
+
+function createMinimalContextForHardCap(context: AgentStepContext): AgentStepContext {
+  return {
+    ...context,
+    backend: context.backend
+      ? {
+          ...context.backend,
+          recommendedPatterns: [],
+          supabase: {
+            ...context.backend.supabase,
+            notes: [],
+            schemaLoadError: context.backend.supabase.schemaLoadError
+              ? compactText(context.backend.supabase.schemaLoadError, 120)
+              : undefined,
+            tables: [],
+          },
+        }
+      : null,
+    diagnostics: null,
+    fileTree: null,
+    memory: null,
+    observations: compactObservationsForHardCap(context).observations.slice(-2),
+    recentMessages: context.recentMessages.slice(-2).map((message) => ({
+      ...message,
+      content: compactText(message.content, 500),
+    })),
+    runContextSummary: {
+      ...context.runContextSummary,
+      changedFiles: context.runContextSummary.changedFiles.slice(-12),
+      completed: compactTextArray(context.runContextSummary.completed, 3, 140),
+      decisions: compactTextArray(context.runContextSummary.decisions, 3, 140),
+      deletedFiles: context.runContextSummary.deletedFiles.slice(-12),
+      importantFiles: context.runContextSummary.importantFiles.slice(-12),
+      latestFailures: compactTextArray(context.runContextSummary.latestFailures, 3, 180),
+      nextStep: compactText(context.runContextSummary.nextStep, 260),
+      objective: compactText(context.runContextSummary.objective, 260),
+    },
+    specContext: context.specContext
+      ? {
+          ...context.specContext,
+          acceptanceCriteria: context.specContext.acceptanceCriteria.slice(0, 6).map((criterion) => ({
+            ...criterion,
+            description: compactText(criterion.description, 180),
+          })),
+          brief: compactText(context.specContext.brief, 220),
+          currentTask: {
+            ...context.specContext.currentTask,
+            allowedPaths: context.specContext.currentTask.allowedPaths.slice(0, 8),
+            expectedFiles: context.specContext.currentTask.expectedFiles.slice(0, 8),
+            objective: compactText(context.specContext.currentTask.objective, 260),
+            title: compactText(context.specContext.currentTask.title, 120),
+          },
+          design: {
+            dataModel: [],
+            integrations: [],
+            summary: compactText(context.specContext.design.summary, 160),
+            technicalDecisions: [],
+            verificationStrategy: [],
+          },
+          goal: compactText(context.specContext.goal, 220),
+          relatedTasks: [],
+          requirements: context.specContext.requirements.slice(0, 6).map((requirement) => ({
+            ...requirement,
+            description: compactText(requirement.description, 160),
+          })),
+        }
+      : undefined,
+    steering: context.steering.slice(-3).map((item) => compactText(item, 220)),
+    taskLedger: null,
+    workingSummary: null,
   };
 }
 
@@ -274,6 +488,37 @@ function createContextReport(
       0,
       context.runContextSummary.summarizedObservationCount - context.observations.length,
     ),
+  };
+}
+
+function finalizeContextReport(
+  context: AgentStepContext,
+  rawChars: number,
+): AgentStepContext {
+  let next = {
+    ...context,
+    contextReport: createContextReport(rawChars, 0, context),
+  };
+
+  for (let index = 0; index < 5; index += 1) {
+    const measured = estimateContextChars(next);
+
+    if (next.contextReport.finalChars === measured) {
+      return next;
+    }
+
+    next = {
+      ...next,
+      contextReport: createContextReport(rawChars, measured, next),
+    };
+  }
+
+  return {
+    ...next,
+    contextReport: {
+      ...next.contextReport,
+      finalChars: estimateContextChars(next),
+    },
   };
 }
 
