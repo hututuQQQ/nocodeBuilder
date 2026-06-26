@@ -126,6 +126,7 @@ mod windows_native_smoke {
         let node_bin = node_runtime_root.join("bin");
         let real_project = root.join("real-project");
         let real_project_env = real_project.join(".env");
+        let real_project_env_local = real_project.join(".env.local");
         let real_project_aibuilder = real_project.join(".aibuilder");
         let password = valid_sandbox_password();
         let mut setup_request = SetupRequest {
@@ -152,6 +153,11 @@ mod windows_native_smoke {
         fs::write(&real_project_env, "NCB_SMOKE_SECRET_ENV=blocked\n")
             .expect("write denied real project .env");
         fs::write(
+            &real_project_env_local,
+            "NCB_SMOKE_SECRET_ENV_LOCAL=blocked\n",
+        )
+        .expect("write denied real project .env.local");
+        fs::write(
             &real_project_aibuilder,
             "NCB_SMOKE_SECRET_AIBUILDER=blocked\n",
         )
@@ -159,6 +165,7 @@ mod windows_native_smoke {
         write_fake_npm(
             &node_bin.join("npm.cmd"),
             &real_project_env,
+            &real_project_env_local,
             &real_project_aibuilder,
         );
 
@@ -235,7 +242,7 @@ mod windows_native_smoke {
         assert!(
             !sensitive_read.contains("NCB_SMOKE_SECRET")
                 && sensitive_read.contains("sensitive_read_blocked"),
-            "sandbox command read a denied real-project secret: {sensitive_read}"
+            "sandbox command read a denied real-project .env/.env.local/.aibuilder secret: {sensitive_read}"
         );
 
         let network = fs::read_to_string(workspace.join("network.txt")).unwrap_or_default();
@@ -365,12 +372,18 @@ mod windows_native_smoke {
         ])
     }
 
-    fn write_fake_npm(path: &Path, real_project_env: &Path, real_project_aibuilder: &Path) {
+    fn write_fake_npm(
+        path: &Path,
+        real_project_env: &Path,
+        real_project_env_local: &Path,
+        real_project_aibuilder: &Path,
+    ) {
         let script = format!(
             r#"@echo off
 echo command_started>command.txt
 start "" /b "%ComSpec%" /c "echo job_child_started>job-child.txt & %SystemRoot%\System32\ping.exe -n 21 127.0.0.1 >NUL & echo job_object_escape>job-survivor.txt"
 (
+  type "{}"
   type "{}"
   type "{}"
 ) > sensitive-read.txt 2>NUL
@@ -391,6 +404,7 @@ if %ERRORLEVEL% EQU 0 (
 )
 "#,
             batch_path(real_project_env),
+            batch_path(real_project_env_local),
             batch_path(real_project_aibuilder)
         );
         fs::write(path, script).expect("write fake npm.cmd");
