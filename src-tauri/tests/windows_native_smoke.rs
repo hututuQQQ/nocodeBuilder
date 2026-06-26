@@ -124,6 +124,9 @@ mod windows_native_smoke {
         let tmp_root = sandbox_root.join("tmp").join("run-1");
         let node_runtime_root = sandbox_root.join("runtime").join("node");
         let node_bin = node_runtime_root.join("bin");
+        let real_project = root.join("real-project");
+        let real_project_env = real_project.join(".env");
+        let real_project_aibuilder = real_project.join(".aibuilder");
         let password = valid_sandbox_password();
         let mut setup_request = SetupRequest {
             schema_version: SETUP_SCHEMA_VERSION,
@@ -145,7 +148,19 @@ mod windows_native_smoke {
         fs::create_dir_all(&workspace).expect("create smoke workspace");
         fs::create_dir_all(&cache_root).expect("create smoke cache root");
         fs::create_dir_all(&tmp_root).expect("create smoke tmp root");
-        write_fake_npm(&node_bin.join("npm.cmd"));
+        fs::create_dir_all(&real_project).expect("create denied real project");
+        fs::write(&real_project_env, "NCB_SMOKE_SECRET_ENV=blocked\n")
+            .expect("write denied real project .env");
+        fs::write(
+            &real_project_aibuilder,
+            "NCB_SMOKE_SECRET_AIBUILDER=blocked\n",
+        )
+        .expect("write denied real project .aibuilder");
+        write_fake_npm(
+            &node_bin.join("npm.cmd"),
+            &real_project_env,
+            &real_project_aibuilder,
+        );
 
         keyring::Entry::new(CREDENTIAL_SERVICE_NAME, SANDBOX_ACCOUNT_PASSWORD_KEY)
             .expect("open sandbox password credential")
@@ -214,6 +229,13 @@ mod windows_native_smoke {
         assert!(
             workspace.join("job-child.txt").exists(),
             "sandbox command did not start the process-tree cleanup probe"
+        );
+        let sensitive_read = fs::read_to_string(workspace.join("sensitive-read.txt"))
+            .expect("read sandbox sensitive path probe output");
+        assert!(
+            !sensitive_read.contains("NCB_SMOKE_SECRET")
+                && sensitive_read.contains("sensitive_read_blocked"),
+            "sandbox command read a denied real-project secret: {sensitive_read}"
         );
 
         let network = fs::read_to_string(workspace.join("network.txt")).unwrap_or_default();
@@ -343,10 +365,22 @@ mod windows_native_smoke {
         ])
     }
 
-    fn write_fake_npm(path: &Path) {
-        let script = r#"@echo off
+    fn write_fake_npm(path: &Path, real_project_env: &Path, real_project_aibuilder: &Path) {
+        let script = format!(
+            r#"@echo off
 echo command_started>command.txt
 start "" /b "%ComSpec%" /c "echo job_child_started>job-child.txt & %SystemRoot%\System32\ping.exe -n 21 127.0.0.1 >NUL & echo job_object_escape>job-survivor.txt"
+(
+  type "{}"
+  type "{}"
+) > sensitive-read.txt 2>NUL
+"%SystemRoot%\System32\findstr.exe" /C:"NCB_SMOKE_SECRET" sensitive-read.txt >NUL 2>NUL
+if %ERRORLEVEL% EQU 0 (
+  echo sensitive_read_allowed>>sensitive-read.txt
+  exit /b 23
+) else (
+  echo sensitive_read_blocked>>sensitive-read.txt
+)
 "%SystemRoot%\System32\curl.exe" --connect-timeout 2 --max-time 5 --silent http://1.1.1.1/ -o NUL
 if %ERRORLEVEL% EQU 0 (
   echo public_network_allowed>network.txt
@@ -355,8 +389,15 @@ if %ERRORLEVEL% EQU 0 (
   echo public_network_blocked>network.txt
   exit /b 0
 )
-"#;
+"#,
+            batch_path(real_project_env),
+            batch_path(real_project_aibuilder)
+        );
         fs::write(path, script).expect("write fake npm.cmd");
+    }
+
+    fn batch_path(path: &Path) -> String {
+        path.to_string_lossy().replace('"', "")
     }
 
     fn wait_until(deadline: Instant) {
