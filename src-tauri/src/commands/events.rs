@@ -238,4 +238,35 @@ mod tests {
 
         assert!(output.len() <= 10);
     }
+
+    #[test]
+    fn appends_truncation_marker_when_output_is_capped() {
+        let mut output = String::from("prefix");
+        append_limited_output(
+            &mut output,
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            Some(40),
+        );
+
+        assert!(output.len() <= 40);
+        assert!(output.contains("[command output truncated]"));
+    }
+
+    #[test]
+    fn ignores_more_output_after_limit_is_reached() {
+        let mut output = String::from("abcdefghij");
+        append_limited_output(&mut output, "klmnopqrstuvwxyz", Some(10));
+
+        assert_eq!(output, "abcdefghij");
+    }
+
+    #[test]
+    fn truncates_on_utf8_character_boundary() {
+        let mut output = String::from("prefix");
+        append_limited_output(&mut output, "éééééééééééééééééééé", Some(37));
+
+        assert!(output.len() <= 37);
+        assert!(output.contains("[command output truncated]"));
+        assert!(output.is_char_boundary(output.len()));
+    }
 }
