@@ -1659,14 +1659,14 @@ async fn migrate_agent_run_columns(pool: &SqlitePool) -> Result<(), String> {
                 format!("agent-storage: failed to backfill run write-kind: {error}")
             })?;
 
-        sqlx::query("UPDATE agent_runs SET manifest_json = ?1 WHERE id = ?2 AND manifest_json = '{}'")
-            .bind(fallback_manifest_json(&contract))
-            .bind(&id)
-            .execute(pool)
-            .await
-            .map_err(|error| {
-                format!("agent-storage: failed to backfill run manifest: {error}")
-            })?;
+        sqlx::query(
+            "UPDATE agent_runs SET manifest_json = ?1 WHERE id = ?2 AND manifest_json = '{}'",
+        )
+        .bind(fallback_manifest_json(&contract))
+        .bind(&id)
+        .execute(pool)
+        .await
+        .map_err(|error| format!("agent-storage: failed to backfill run manifest: {error}"))?;
     }
 
     Ok(())

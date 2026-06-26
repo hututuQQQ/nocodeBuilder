@@ -25,6 +25,21 @@ describe("routeSpecUserMessage", () => {
     await expect(expectIntent("看看为什么失败", "blocked"))
       .resolves.toBe("diagnose_block");
   });
+
+  it("routes building plan changes to request_revision before retry", async () => {
+    await expect(expectIntent("改方案，换做法", "building"))
+      .resolves.toBe("request_revision");
+  });
+
+  it("routes building retry requests to retry_with_note", async () => {
+    await expect(expectIntent("同步状态并重试当前任务", "building"))
+      .resolves.toBe("retry_with_note");
+  });
+
+  it("routes approved diagnostics to diagnose_block", async () => {
+    await expect(expectIntent("看看为什么没有继续执行", "approved"))
+      .resolves.toBe("diagnose_block");
+  });
 });
 
 async function expectIntent(

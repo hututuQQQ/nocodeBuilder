@@ -80,9 +80,33 @@ export function diagnoseSpecBlock(input: {
 
   if (input.spec.finalVerification?.success === false) {
     if (isBuildCommand(input.spec.finalVerification.command)) {
+      const output = input.spec.finalVerification.output;
+      const retryTask = failedTask ?? selectRetryableTask(input.revision);
+
+      if (hasActionableBuildError(output)) {
+        return {
+          kind: "build_blocked",
+          summary: `Final ${input.spec.finalVerification.command} failed with code diagnostics.`,
+          failedTaskId: failedTaskId ?? retryTask?.id,
+          failedRunId,
+          evidence,
+          recommendedPlan: {
+            action: "retry_task",
+            taskId: failedTaskId ?? retryTask?.id ?? input.revision.tasks[0]?.id ?? "unknown-task",
+            note: [
+              `Final ${input.spec.finalVerification.command} failed with actionable build output.`,
+              "Use this output as retry context:",
+              output.trim(),
+            ].filter(Boolean).join("\n"),
+          },
+        };
+      }
+
       return {
         kind: "build_blocked",
-        summary: `Final ${input.spec.finalVerification.command} failed.`,
+        summary: hasEnvironmentalBuildFailure(output)
+          ? `Final ${input.spec.finalVerification.command} appears to have failed for an environmental reason.`
+          : `Final ${input.spec.finalVerification.command} failed without actionable source diagnostics.`,
         failedTaskId,
         failedRunId,
         evidence,
@@ -231,6 +255,21 @@ function hasPlanEvidence(revision: SpecRevision, evidenceText: string) {
 
 function isBuildCommand(command: string) {
   return /(install|build|npm|pnpm)/i.test(command);
+}
+
+function hasActionableBuildError(output: string) {
+  return (
+    hasSourceLocation(output) ||
+    /(Type error|TS\d{4}|Failed to compile|Build error|Syntax error|Module not found|Cannot find module|Property .+ does not exist|Type .+ is not assignable|ESLint:|Parsing error)/i.test(output)
+  );
+}
+
+function hasSourceLocation(output: string) {
+  return /(?:^|\s)(?:\.\/)?(?:app|src|components|lib|styles|pages|middleware|public|server|client|next\.config|tsconfig|package\.json)[\w./-]*(?::\d+(?::\d+)?|\(\d+,\d+\))/i.test(output);
+}
+
+function hasEnvironmentalBuildFailure(output: string) {
+  return /(EAI_AGAIN|ECONNRESET|ETIMEDOUT|ENOTFOUND|network|timeout|timed out|registry|502|503|504|rate limit|temporary|temporarily|Internal Server Error|ERR_PNPM_FETCH|fetch failed|socket hang up)/i.test(output);
 }
 
 function inferExtraAllowedPaths(text: string, task: SpecTask | null) {

@@ -563,7 +563,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         !spec ||
         conversation.mode !== "spec" ||
         conversation.activeSpecId !== spec.id ||
-        !["review", "blocked"].includes(spec.status) ||
+        !["review", "blocked", "approved", "building"].includes(spec.status) ||
         isSpecWorkflowBusy(get()) ||
         !message
       ) {
@@ -586,6 +586,8 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
 
       set({ isRevisingSpec: true, projectError: null });
       const originalStatus = spec.status;
+      const expectedRevisionStatus =
+        originalStatus === "review" ? "revising" : originalStatus;
       const revisionSnapshot = {
         conversationId: conversation.id,
         currentRevisionId: spec.currentRevisionId,
@@ -622,7 +624,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         if (!isCurrentSpecSnapshot(
           store,
           revisionSnapshot,
-          originalStatus === "review" ? "revising" : "blocked",
+          expectedRevisionStatus,
         )) {
           return false;
         }

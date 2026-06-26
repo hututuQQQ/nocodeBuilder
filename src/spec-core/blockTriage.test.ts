@@ -23,6 +23,55 @@ describe("diagnoseSpecBlock", () => {
     expect(diagnosis.kind).toBe("build_blocked");
   });
 
+  it("retries the task when final build output contains actionable source diagnostics", () => {
+    const revision = createRevision({
+      tasks: [createTask({ status: "passed", runId: "run-1" })],
+    });
+    const diagnosis = diagnoseSpecBlock({
+      spec: createSpec(revision, {
+        finalVerification: {
+          checkedAt: "2026-01-01T00:00:00Z",
+          command: "npm run build",
+          output:
+            "Failed to compile.\napp/page.tsx:12:7\nType error: Property 'title' does not exist on type '{}'.",
+          success: false,
+        },
+      }),
+      revision,
+    });
+
+    expect(diagnosis.kind).toBe("build_blocked");
+    expect(diagnosis.recommendedPlan).toMatchObject({
+      action: "retry_task",
+      taskId: "task-1",
+    });
+    if (diagnosis.recommendedPlan.action !== "retry_task") {
+      throw new Error("Expected retry_task recovery plan.");
+    }
+    expect(diagnosis.recommendedPlan.note).toContain("app/page.tsx:12:7");
+    expect(diagnosis.recommendedPlan.note).toContain("Type error");
+  });
+
+  it("retries final verification for environmental build failures", () => {
+    const revision = createRevision({
+      tasks: [createTask({ status: "passed", runId: "run-1" })],
+    });
+    const diagnosis = diagnoseSpecBlock({
+      spec: createSpec(revision, {
+        finalVerification: {
+          checkedAt: "2026-01-01T00:00:00Z",
+          command: "pnpm install",
+          output: "ERR_PNPM_FETCH_503 registry returned 503 temporary failure",
+          success: false,
+        },
+      }),
+      revision,
+    });
+
+    expect(diagnosis.kind).toBe("build_blocked");
+    expect(diagnosis.recommendedPlan.action).toBe("retry_verification");
+  });
+
   it("detects scope blocked failures", () => {
     const task = createTask({
       error: "Policy denied edit_file: path is outside allowed paths.",

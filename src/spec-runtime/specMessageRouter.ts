@@ -105,19 +105,23 @@ export async function routeSpecUserMessage(input: {
   }
 
   if (status === "building" || status === "approved") {
+    if (hasDiagnoseIntent(normalized)) {
+      return { intent: "diagnose_block", confidence: 0.72 };
+    }
+
+    if (hasRevisionIntent(normalized) || looksLikeChangeRequest(normalized)) {
+      return {
+        intent: "request_revision",
+        confidence: 0.7,
+        revisionFeedback: message,
+      };
+    }
+
     if (hasRetryIntent(normalized)) {
       return {
         intent: "retry_with_note",
         confidence: 0.72,
         retryNote: message,
-      };
-    }
-
-    if (hasRevisionIntent(normalized)) {
-      return {
-        intent: "request_revision",
-        confidence: 0.7,
-        revisionFeedback: message,
       };
     }
 
@@ -169,11 +173,11 @@ function hasImplementationNoteIntent(
 }
 
 function hasDiagnoseIntent(message: string) {
-  return /(diagnose|why.*fail|failure reason|what failed|哪里错|为什么失败|看看原因|看原因|诊断|失败原因|哪里失败|哪儿错)/i.test(message);
+  return /(diagnose|why.*fail|failure reason|what failed|why.*not|why.*stuck|not.*continue|stuck|哪里错|为什么失败|为什么.*没|没有继续|不继续|卡住|看看原因|看原因|诊断|失败原因|哪里失败|哪儿错)/i.test(message);
 }
 
 function hasRetryIntent(message: string) {
-  return /(retry|rerun|run again|try again|重试|再跑|再试|重新跑|重新执行|再执行一次)/i.test(message);
+  return /(retry|rerun|run again|try again|fix.*fail|failed run|sync.*state|continue.*task|continue execution|重试|再跑|再试|重新跑|重新执行|再执行一次|继续.*任务|同步.*状态)/i.test(message);
 }
 
 function hasSwitchToChatIntent(message: string) {

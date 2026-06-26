@@ -915,7 +915,7 @@ describe("Headless RunController", () => {
     expect(ports.events.filter((event) => event.type === "tool.completed")).toHaveLength(1);
   });
 
-  it("surfaces forbidden-path policy denials to the next model turn", async () => {
+  it("surfaces forbidden-path drift guard denials to the next model turn", async () => {
     const ports = createFakePorts({
       modelActions: [
         {
@@ -941,10 +941,18 @@ describe("Headless RunController", () => {
     });
 
     expect(run.status).toBe("completed");
-    expect(ports.contexts[1]?.observations).toContain(
-      "Policy denied write_files: Tool target is inside a forbidden path such as .aibuilder or .env.",
+    expect(ports.contexts[1]?.observations.some((observation) =>
+      observation.includes("drift_guard") &&
+      observation.includes(".env.local") &&
+      observation.includes("forbiddenPaths"),
+    )).toBe(true);
+    expect(ports.events.some((event) =>
+      event.type === "model.failed" &&
+      JSON.stringify(event.payload).includes("forbiddenPaths"),
+    )).toBe(true);
+    expect(ports.events.map((event) => event.type)).not.toContain(
+      "policy.denied",
     );
-    expect(ports.events.map((event) => event.type)).toContain("policy.denied");
   });
 
   it("stops before executing a write tool after maxMutations is reached", async () => {

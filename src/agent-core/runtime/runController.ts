@@ -438,6 +438,7 @@ export class RunController {
         action,
         changedFiles: [...state.changedFiles],
         recentObservations: context.observations.slice(-8),
+        steering: context.steering,
       });
 
       if (!driftCheck.ok) {
