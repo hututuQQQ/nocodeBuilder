@@ -14,6 +14,8 @@ mod windows_native_smoke {
         os::windows::ffi::OsStrExt,
         path::{Path, PathBuf},
         process::{Command, Stdio},
+        thread,
+        time::{Duration, Instant},
     };
 
     use serde::{Deserialize, Serialize};
@@ -166,6 +168,7 @@ mod windows_native_smoke {
         assert_eq!(status.policy_version, POLICY_VERSION);
         assert!(status.message.contains("runner launch prerequisites"));
 
+        let job_probe_deadline = Instant::now() + Duration::from_secs(25);
         let runner_response = run_runner(
             &runner_exe,
             &RunnerRequest {
@@ -208,6 +211,10 @@ mod windows_native_smoke {
             command_marker.contains("command_started"),
             "sandbox command did not start after SID verification: {command_marker}"
         );
+        assert!(
+            workspace.join("job-child.txt").exists(),
+            "sandbox command did not start the process-tree cleanup probe"
+        );
 
         let network = fs::read_to_string(workspace.join("network.txt")).unwrap_or_default();
         if runner_response.ok && runner_response.state == "completed" {
@@ -227,6 +234,12 @@ mod windows_native_smoke {
                 "sandbox runner smoke command failed: {runner_response:?}\nmarker:\n{command_marker}\nnetwork:\n{network}"
             );
         }
+
+        wait_until(job_probe_deadline);
+        assert!(
+            !workspace.join("job-survivor.txt").exists(),
+            "sandbox Job Object did not terminate a descendant process"
+        );
     }
 
     fn run_setup(exe: &Path, request: &SetupRequest) -> SetupResponse {
@@ -333,6 +346,7 @@ mod windows_native_smoke {
     fn write_fake_npm(path: &Path) {
         let script = r#"@echo off
 echo command_started>command.txt
+start "" /b "%ComSpec%" /c "echo job_child_started>job-child.txt & %SystemRoot%\System32\ping.exe -n 21 127.0.0.1 >NUL & echo job_object_escape>job-survivor.txt"
 "%SystemRoot%\System32\curl.exe" --connect-timeout 2 --max-time 5 --silent http://1.1.1.1/ -o NUL
 if %ERRORLEVEL% EQU 0 (
   echo public_network_allowed>network.txt
@@ -343,6 +357,12 @@ if %ERRORLEVEL% EQU 0 (
 )
 "#;
         fs::write(path, script).expect("write fake npm.cmd");
+    }
+
+    fn wait_until(deadline: Instant) {
+        while Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(100));
+        }
     }
 
     fn cargo_bin(name: &str) -> PathBuf {
