@@ -92,7 +92,7 @@ Install network access goes through a managed allowlist proxy that supports HTTP
 ## Safety Boundaries
 
 - Rust validates project ids and file paths.
-- Agent file tools cannot write `.aibuilder`, `.env`, `node_modules`, build output, or paths outside the project.
+- Agent file tools cannot write `.aibuilder`, `.env*`, `node_modules`, build output, or paths outside the project.
 - Command execution remains limited to the project command whitelist.
 - Production command execution does not fall back to bare host npm/pnpm when the native sandbox is unavailable.
 - Model requests can be cancelled through `AbortSignal`; late results are ignored after cancellation.
