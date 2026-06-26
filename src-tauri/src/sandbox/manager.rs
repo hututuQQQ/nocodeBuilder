@@ -436,6 +436,19 @@ mod tests {
         });
     }
 
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn status_reports_unsupported_on_compile_only_platforms() {
+        let status = SandboxManager::default().status();
+
+        match status {
+            SandboxStatus::Unsupported { reason } => {
+                assert!(reason.contains("Windows and macOS"));
+            }
+            other => panic!("expected unsupported sandbox status, got {other:?}"),
+        }
+    }
+
     struct EnvGuard {
         old_home: Option<OsString>,
         old_userprofile: Option<OsString>,
