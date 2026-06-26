@@ -466,6 +466,7 @@ fn tunnel(client: TcpStream, remote: TcpStream) -> Result<(u64, u64), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     #[test]
     fn allowlist_matches_exact_and_wildcard_hosts() {
@@ -520,14 +521,24 @@ mod tests {
             start_managed_proxy("test-run".to_string(), vec!["localhost".to_string()], None)
                 .expect("proxy starts");
         let mut stream = TcpStream::connect(("127.0.0.1", proxy.port())).expect("connect proxy");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
 
         stream
             .write_all(b"CONNECT localhost:443 HTTP/1.1\r\nHost: localhost:443\r\n\r\n")
             .expect("write request");
 
         let mut response = String::new();
-        match BufReader::new(stream).read_line(&mut response) {
-            Ok(_) => assert!(response.contains("403")),
+        match BufReader::new(stream).read_to_string(&mut response) {
+            Ok(_) => {
+                if !response.is_empty() {
+                    assert!(
+                        response.starts_with("HTTP/1.1 403"),
+                        "expected 403 response, got {response:?}"
+                    );
+                }
+            }
             Err(error)
                 if matches!(
                     error.kind(),
@@ -537,6 +548,16 @@ mod tests {
                 ) => {}
             Err(error) => panic!("read response: {error}"),
         }
+
+        let record = wait_for_proxy_audit(&proxy);
+        assert_eq!(record.host, "localhost");
+        assert_eq!(record.port, 443);
+        assert!(!record.allowed);
+        assert!(
+            record.reason.contains("not allowed"),
+            "expected loopback rejection audit reason, got {:?}",
+            record.reason
+        );
     }
 
     #[test]
@@ -565,5 +586,21 @@ mod tests {
         assert!(content.contains("\"bytes_from_client\":12"));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn wait_for_proxy_audit(proxy: &ManagedProxy) -> ProxyAuditRecord {
+        let started = Instant::now();
+
+        loop {
+            if let Some(record) = proxy.audit_log.lock().unwrap().first().cloned() {
+                return record;
+            }
+
+            if started.elapsed() > Duration::from_secs(2) {
+                panic!("timed out waiting for proxy audit record");
+            }
+
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }
