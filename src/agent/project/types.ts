@@ -3,6 +3,7 @@ import type {
   AgentBudgetState,
   RunContextSummary,
 } from "../../agent-core/types";
+import type { TaskManifest } from "../../agent-core/manifest/taskManifest";
 import type {
   ProjectMemoryContext,
   TaskLedger,
@@ -266,6 +267,7 @@ export type AgentStepContext = {
   diagnostics: string | null;
   devServerStatus: string;
   fileTree: string | null;
+  manifest: TaskManifest;
   memory: (ProjectMemoryContext & {
     selectedSiteNodeId?: string | null;
     siteSpecPages?: Array<{

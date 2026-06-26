@@ -11,7 +11,7 @@ describe("TaskContract", () => {
     expect(contract.taskType).toBe("style_edit");
     expect(contract.scope.componentIds).toEqual(["home.hero"]);
     expect(contract.budget.maxModelTurns).toBeGreaterThan(1);
-    expect(contract.budget.maxModelTurns).toBeLessThan(20);
+    expect(contract.budget.maxModelTurns).toBe(28);
   });
 
   it("requires production deployment approval", () => {

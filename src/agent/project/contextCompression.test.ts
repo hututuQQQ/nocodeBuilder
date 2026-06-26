@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentRun } from "../../agent-core/types";
+import { createTaskManifestFromContract } from "../../agent-core/manifest/taskManifest";
 import {
   buildAgentBudgetState,
   compressAgentStepContext,
@@ -216,6 +217,49 @@ describe("agent context compression", () => {
     expect(compressed.budgetState.pressure).toBe("normal");
     expect(compressed.runContextSummary.nextStep).toContain("Repair the latest build failure");
   });
+
+  it("keeps current task linked requirements, criteria, and manifest beyond the first dozen", () => {
+    const context = createAgentStepContext({
+      specContext: {
+        ...createAgentStepContext().specContext!,
+        acceptanceCriteria: [
+          ...Array.from({ length: 16 }, (_, index) => ({
+            description: `Secondary criterion ${index}`,
+            id: `criterion-secondary-${index}`,
+            required: true,
+          })),
+          {
+            description: "Primary linked criterion that must survive compression.",
+            id: "criterion-linked",
+            required: true,
+          },
+        ],
+        currentTask: {
+          ...createAgentStepContext().specContext!.currentTask,
+          acceptanceCriteriaIds: ["criterion-linked"],
+          requirementIds: ["story-linked"],
+        },
+        requirements: [
+          ...Array.from({ length: 16 }, (_, index) => ({
+            description: `Secondary story ${index}`,
+            id: `story-secondary-${index}`,
+          })),
+          {
+            description: "Primary linked requirement that must survive compression.",
+            id: "story-linked",
+          },
+        ],
+      },
+    });
+
+    const compressed = compressAgentStepContext(context);
+
+    expect(compressed.manifest.rawUserGoal).toBe("Build an online poker game.");
+    expect(compressed.specContext?.acceptanceCriteria.map((item) => item.id))
+      .toContain("criterion-linked");
+    expect(compressed.specContext?.requirements.map((item) => item.id))
+      .toContain("story-linked");
+  });
 });
 
 function createAgentStepContext(
@@ -268,6 +312,12 @@ function createAgentStepContext(
     diagnostics: null,
     devServerStatus: "running",
     fileTree: `app/page.tsx\napp/api/rooms/route.ts\n${"x".repeat(20_000)}`,
+    manifest: createTaskManifestFromContract({
+      contract: createRun().contract,
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      rawUserGoal: "Build an online poker game.",
+    }),
     memory: null,
     observations: [],
     previewUrl: "http://localhost:3000",

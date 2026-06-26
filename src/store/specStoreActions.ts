@@ -18,7 +18,10 @@ import type {
   AgentRunFailureKind,
 } from "../agent-core/types";
 import { specApi } from "../services/specs";
-import { compileSpecTaskContract } from "../spec-core/taskCompiler";
+import {
+  compileSpecTaskContract,
+  compileSpecTaskManifest,
+} from "../spec-core/taskCompiler";
 import type {
   DevelopmentSpec,
   GeneratedSpecRevisionPayload,
@@ -32,6 +35,7 @@ import {
   computeAcceptanceResults,
   validateSpecForApproval,
 } from "../spec-core/validators";
+import { diagnoseSpecBlock } from "../spec-core/blockTriage";
 import {
   isTerminalSpecStatus,
   markSpecBlocked,
@@ -559,7 +563,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         !spec ||
         conversation.mode !== "spec" ||
         conversation.activeSpecId !== spec.id ||
-        spec.status !== "review" ||
+        !["review", "blocked", "approved", "building"].includes(spec.status) ||
         isSpecWorkflowBusy(get()) ||
         !message
       ) {
@@ -581,6 +585,9 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
       }
 
       set({ isRevisingSpec: true, projectError: null });
+      const originalStatus = spec.status;
+      const expectedRevisionStatus =
+        originalStatus === "review" ? "revising" : originalStatus;
       const revisionSnapshot = {
         conversationId: conversation.id,
         currentRevisionId: spec.currentRevisionId,
@@ -590,8 +597,14 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
       };
 
       try {
-        const revisingSpec = transitionSpecStatus(spec, "revising");
-        await saveSpecToStore(store, revisingSpec);
+        const revisingSpec =
+          originalStatus === "review"
+            ? transitionSpecStatus(spec, "revising")
+            : spec;
+
+        if (originalStatus === "review") {
+          await saveSpecToStore(store, revisingSpec);
+        }
 
         const currentRevision = getCurrentSpecRevision(spec);
         const payload = await requestSpecRevision({
@@ -608,7 +621,11 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
           },
         });
 
-        if (!isCurrentSpecSnapshot(store, revisionSnapshot, "revising")) {
+        if (!isCurrentSpecSnapshot(
+          store,
+          revisionSnapshot,
+          expectedRevisionStatus,
+        )) {
           return false;
         }
 
@@ -616,19 +633,33 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
           payload,
           currentRevision.version + 1,
         );
-        const nextSpec = transitionSpecStatus(
-          {
-            ...revisingSpec,
-            currentRevisionId: nextRevision.id,
-            revisions: [...revisingSpec.revisions, nextRevision],
-          },
-          "review",
-        );
+        const nextSpec = originalStatus === "review"
+          ? transitionSpecStatus(
+              {
+                ...revisingSpec,
+                currentRevisionId: nextRevision.id,
+                revisions: [...revisingSpec.revisions, nextRevision],
+              },
+              "review",
+            )
+          : {
+              ...spec,
+              blockDiagnosis: undefined,
+              currentRevisionId: nextRevision.id,
+              failureMessage: undefined,
+              finalVerification: undefined,
+              revisions: [...spec.revisions, nextRevision],
+              status: "review" as const,
+              updatedAt: new Date().toISOString(),
+            };
 
         await saveSpecToStore(store, nextSpec);
         return true;
       } catch (error) {
-        if (isCurrentSpecSnapshot(store, revisionSnapshot, "revising")) {
+        if (
+          originalStatus === "review" &&
+          isCurrentSpecSnapshot(store, revisionSnapshot, "revising")
+        ) {
           await saveSpecToStore(store, spec).catch(() => undefined);
         }
         recordSpecError(set, error);
@@ -698,7 +729,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
       }
     },
 
-    retrySpecTask: async (taskId) => {
+    retrySpecTask: async (taskId, retryNote) => {
       const spec = get().currentSpec;
       const conversation = get().currentConversation;
 
@@ -728,11 +759,12 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         return;
       }
 
-      const session = startSpecExecutionSession(spec);
+      const retrySpec = applyBlockDiagnosisScopeExpansion(spec, taskId);
+      const session = startSpecExecutionSession(retrySpec);
       set({ isExecutingSpec: true, projectError: null });
 
       try {
-        await resetSpecTaskAndExecute(store, spec, taskId, session);
+        await resetSpecTaskAndExecute(store, retrySpec, taskId, session, retryNote);
       } catch (error) {
         if (isSpecExecutionSessionActive(session)) {
           recordSpecError(set, error);
@@ -1150,6 +1182,13 @@ async function executeSpecTasks(
       spec: runningSpec,
       task: runningTask,
     });
+    const manifest = compileSpecTaskManifest({
+      contract,
+      conversationId: runningSpec.conversationId,
+      revision: runningRevision,
+      spec: runningSpec,
+      task: runningTask,
+    });
     const executionIdentity = {
       conversationId: runningSpec.conversationId,
       projectId: runningSpec.projectId,
@@ -1164,6 +1203,7 @@ async function executeSpecTasks(
         contract,
         conversationId: runningSpec.conversationId,
         executionMode,
+        manifest,
         project,
         resumeObservation: retryContext
           ? createSpecRetryObservation(runningTask, retryContext)
@@ -1999,7 +2039,8 @@ function assertExecutionIdentity(
 }
 
 async function saveSpecToStore(store: StoreAccess, spec: DevelopmentSpec) {
-  const saved = await specApi.saveSpec(spec.projectId, spec);
+  const specToSave = await withSpecBlockDiagnosis(store, spec);
+  const saved = await specApi.saveSpec(specToSave.projectId, specToSave);
 
   store.set((state) => ({
     currentSpec: isSavedSpecCurrentUi(state, saved) ? saved : state.currentSpec,
@@ -2011,6 +2052,51 @@ async function saveSpecToStore(store: StoreAccess, spec: DevelopmentSpec) {
   }));
 
   return saved;
+}
+
+async function withSpecBlockDiagnosis(
+  store: StoreAccess,
+  spec: DevelopmentSpec,
+): Promise<DevelopmentSpec> {
+  if (spec.status !== "blocked") {
+    return spec.blockDiagnosis ? { ...spec, blockDiagnosis: undefined } : spec;
+  }
+
+  const revision = getCurrentSpecRevision(spec);
+  const failedTask =
+    revision.tasks.find((task) =>
+      ["failed", "blocked", "cancelled"].includes(task.status),
+    ) ??
+    revision.tasks.find((task) => task.status === "running") ??
+    null;
+  const projectId = spec.projectId;
+  const latestRun = failedTask?.runId
+    ? await agentRuntimeApi.getRun(projectId, failedTask.runId).catch(() => null)
+    : null;
+  const latestVerificationReport = latestRun?.id
+    ? await agentRuntimeApi
+        .getLatestVerificationReport(projectId, latestRun.id)
+        .catch(() => null)
+    : null;
+  const blockDiagnosis = diagnoseSpecBlock({
+    spec,
+    revision,
+    latestRun,
+    latestVerificationReport,
+    projectError: store.get().projectError,
+  });
+
+  store.set((state) => ({
+    terminalLogs: appendLogs(state.terminalLogs, [
+      `[spec:block] ${blockDiagnosis.kind}: ${blockDiagnosis.summary}`,
+      `[spec:block] recovery=${blockDiagnosis.recommendedPlan.action}`,
+    ]),
+  }));
+
+  return {
+    ...spec,
+    blockDiagnosis,
+  };
 }
 
 function isSavedSpecCurrentUi(state: AppState, spec: DevelopmentSpec) {
@@ -2284,9 +2370,23 @@ async function resetSpecTaskAndExecute(
   spec: DevelopmentSpec,
   taskId: string,
   session: SpecExecutionLease,
+  retryNote?: string,
 ) {
   const revision = getCurrentSpecRevision(spec);
-  const resetRevision = restoreRetryableTaskGraph(revision, taskId);
+  const restoredRevision = restoreRetryableTaskGraph(revision, taskId);
+  const resetRevision = retryNote?.trim()
+    ? {
+        ...restoredRevision,
+        tasks: restoredRevision.tasks.map((task) =>
+          task.id === taskId
+            ? {
+                ...task,
+                retryContext: `User retry note:\n${retryNote.trim()}`,
+              }
+            : task,
+        ),
+      }
+    : restoredRevision;
   const resetBase = {
     ...spec,
     currentRevisionId: resetRevision.id,
@@ -2976,6 +3076,35 @@ async function readContextFiles(
 
 function appendUnique(values: string[], value: string) {
   return values.includes(value) ? values : [...values, value];
+}
+
+function appendUniqueValues(values: string[], extraValues: string[]) {
+  return Array.from(new Set([...values, ...extraValues]));
+}
+
+function applyBlockDiagnosisScopeExpansion(
+  spec: DevelopmentSpec,
+  taskId: string,
+) {
+  const plan = spec.blockDiagnosis?.recommendedPlan;
+
+  if (
+    plan?.action !== "expand_scope_and_retry" ||
+    plan.taskId !== taskId ||
+    plan.extraAllowedPaths.length === 0
+  ) {
+    return spec;
+  }
+
+  const task = getCurrentSpecRevision(spec).tasks.find((item) => item.id === taskId);
+
+  if (!task) {
+    return spec;
+  }
+
+  return updateTask(spec, taskId, {
+    allowedPaths: appendUniqueValues(task.allowedPaths, plan.extraAllowedPaths),
+  });
 }
 
 function upsertSpec(specs: DevelopmentSpec[], spec: DevelopmentSpec) {

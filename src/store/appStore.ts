@@ -173,7 +173,7 @@ export type AppState = {
   retryCurrentSpecTaskExecution: () => Promise<void>;
   reviseCurrentSpec: (feedback: string) => Promise<boolean>;
   approveAndExecuteCurrentSpec: () => Promise<void>;
-  retrySpecTask: (taskId: string) => Promise<void>;
+  retrySpecTask: (taskId: string, retryNote?: string) => Promise<void>;
   retrySpecVerification: () => Promise<void>;
   switchCurrentIterationToSpec: (brief: string) => Promise<void>;
   switchCurrentIterationToChat: (options?: {

@@ -349,6 +349,31 @@ describe("chat store actions", () => {
     );
   });
 
+  it("routes building Spec plan changes to revision instead of retry", async () => {
+    const retryCurrentSpecTaskExecution = vi.fn(async () => undefined);
+    const reviseCurrentSpec = vi.fn(async () => true);
+    const store = createStore({
+      retryCurrentSpecTaskExecution,
+      reviseCurrentSpec,
+      currentAgentRun: null,
+      currentConversation: createConversation({
+        activeSpecId: "spec-1",
+        mode: "spec",
+        specIds: ["spec-1"],
+      }),
+      currentSpec: createSpec({ runId: "run-current" }),
+    });
+    const actions = createChatActions(store as never);
+
+    await actions.sendMessage("改方案，换做法");
+
+    expect(retryCurrentSpecTaskExecution).not.toHaveBeenCalled();
+    expect(reviseCurrentSpec).toHaveBeenCalledWith("改方案，换做法");
+    expect(store.get().terminalLogs).toContain(
+      "[spec] Chat intent routed to request_revision during execution.",
+    );
+  });
+
   it("reconciles an executing Spec when no live task run can be steered", async () => {
     const retryCurrentSpecTaskExecution = vi.fn(async () => undefined);
     const store = createStore({
@@ -554,6 +579,7 @@ type StoreState = {
   isVerifyingSpec: boolean;
   projectError: string | null;
   retryCurrentSpecTaskExecution: ReturnType<typeof vi.fn>;
+  reviseCurrentSpec?: ReturnType<typeof vi.fn>;
   retrySpecTask: ReturnType<typeof vi.fn>;
   retrySpecVerification: ReturnType<typeof vi.fn>;
   sendAgentSteering: ReturnType<typeof vi.fn>;

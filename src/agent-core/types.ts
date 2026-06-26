@@ -88,6 +88,7 @@ export type AgentRun = {
   projectId: string;
   conversationId: string;
   contract: TaskContract;
+  manifest?: import("./manifest/taskManifest").TaskManifest;
   status: AgentRunStatus;
   phase: AgentRunPhase;
   stateVersion: number;

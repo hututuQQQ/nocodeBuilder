@@ -4052,9 +4052,9 @@ function createExecutionLease(
 }
 
 async function flushPromises() {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let index = 0; index < 10; index += 1) {
+    await Promise.resolve();
+  }
 }
 
 function createProject(patch: Partial<ProjectInfo> = {}): ProjectInfo {

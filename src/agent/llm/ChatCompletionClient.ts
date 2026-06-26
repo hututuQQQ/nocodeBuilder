@@ -18,6 +18,10 @@ import {
 
 export { LlmClientError } from "./errors";
 
+const TEST_CONNECTION_TIMEOUT_MS = 30_000;
+const CHAT_COMPLETION_TIMEOUT_MS = 180_000;
+const CHAT_COMPLETION_STREAM_TIMEOUT_MS = 300_000;
+
 export class ChatCompletionClient {
   private readonly config: LlmClientConfig;
   private readonly provider: AiProviderDefinition;
@@ -56,7 +60,9 @@ export class ChatCompletionClient {
     };
     body.max_tokens = 16;
 
-    const response = await this.sendChatCompletion(body, {});
+    const response = await this.sendChatCompletion(body, {
+      timeoutMs: TEST_CONNECTION_TIMEOUT_MS,
+    });
     const parsedResponse = parseApiResponse(
       response.body,
       response.ok,
@@ -185,6 +191,9 @@ export class ChatCompletionClient {
             apiKey: this.config.apiKey,
             body,
             provider: this.config.provider,
+            timeoutSecs: timeoutMsToSecs(
+              options.timeoutMs ?? CHAT_COMPLETION_TIMEOUT_MS,
+            ),
             url: this.getChatCompletionsUrl(),
           },
         }),
@@ -226,6 +235,9 @@ export class ChatCompletionClient {
             body,
             provider: this.config.provider,
             requestId,
+            timeoutSecs: timeoutMsToSecs(
+              options.timeoutMs ?? CHAT_COMPLETION_STREAM_TIMEOUT_MS,
+            ),
             url: this.getChatCompletionsUrl(),
           },
         }),
@@ -249,7 +261,10 @@ export class ChatCompletionClient {
     options: ChatJsonOptions,
   ): Promise<RawChatCompletionResponse> {
     const controller = new AbortController();
-    const timeoutId = globalThis.setTimeout(() => controller.abort(), 30000);
+    const timeoutId = globalThis.setTimeout(
+      () => controller.abort(),
+      options.timeoutMs ?? CHAT_COMPLETION_TIMEOUT_MS,
+    );
     const unlistenAbort = linkAbortSignals(options.signal, controller);
 
     try {
@@ -281,7 +296,10 @@ export class ChatCompletionClient {
     options: ChatJsonOptions,
   ): Promise<RawChatCompletionResponse> {
     const controller = new AbortController();
-    const timeoutId = globalThis.setTimeout(() => controller.abort(), 120000);
+    const timeoutId = globalThis.setTimeout(
+      () => controller.abort(),
+      options.timeoutMs ?? CHAT_COMPLETION_STREAM_TIMEOUT_MS,
+    );
     const unlistenAbort = linkAbortSignals(options.signal, controller);
 
     try {
@@ -461,19 +479,59 @@ function linkAbortSignals(source: AbortSignal | undefined, target: AbortControll
 }
 
 function createNetworkError(error: unknown, providerLabel: string) {
-  if (error instanceof Error && error.name === "AbortError") {
+  const detail = getNativeErrorDetail(error);
+  const lowerDetail = detail.toLowerCase();
+
+  if (
+    (error instanceof Error && error.name === "AbortError") ||
+    /\b(timed out|timeout|deadline)\b/i.test(detail)
+  ) {
     return new LlmClientError(
       "network",
-      `Network error: connecting to ${providerLabel} timed out. Check your network, proxy, or Base URL.`,
+      withNetworkDetail(
+        `Network error: connecting to ${providerLabel} timed out. Check your network, proxy, or Base URL.`,
+        detail,
+      ),
+      { cause: error },
+    );
+  }
+
+  if (lowerDetail.startsWith("credential:")) {
+    return new LlmClientError(
+      "api_key",
+      `${providerLabel} API key could not be loaded. Reconnect the provider in settings. ${detail}`,
       { cause: error },
     );
   }
 
   return new LlmClientError(
     "network",
-    `Network error: cannot connect to ${providerLabel}. Check your network, proxy, or Base URL.`,
+    withNetworkDetail(
+      `Network error: cannot connect to ${providerLabel}. Check your network, proxy, or Base URL.`,
+      detail,
+    ),
     { cause: error },
   );
+}
+
+function getNativeErrorDetail(error: unknown) {
+  if (typeof error === "string") {
+    return error.trim();
+  }
+
+  if (error instanceof Error) {
+    return error.message.trim();
+  }
+
+  return "";
+}
+
+function withNetworkDetail(message: string, detail: string) {
+  return detail ? `${message} Details: ${detail}` : message;
+}
+
+function timeoutMsToSecs(timeoutMs: number) {
+  return Math.max(1, Math.ceil(timeoutMs / 1000));
 }
 
 function parseApiResponse(

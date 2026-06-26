@@ -876,7 +876,7 @@ function formatReadFileResult(
   offset?: number,
   limit?: number,
 ) {
-  const lines = content.split(/\r?\n/);
+  const lines = splitContentIntoLines(content);
   const startLine = Math.min(Math.max(offset ?? 1, 1), Math.max(lines.length, 1));
   const requestedLimit =
     limit ?? (content.length > MAX_READ_FILE_CHARS ? 360 : lines.length);
@@ -886,20 +886,56 @@ function formatReadFileResult(
   const lineNumberedContent = selectedLines
     .map((line, index) => {
       const lineNumber = String(startLine + index).padStart(lineNumberWidth, " ");
-      return `${lineNumber} | ${line}`;
+      return `${lineNumber} | ${line.text}`;
     })
     .join("\n");
+  const exactContent = selectedLines
+    .map((line, index) =>
+      index < selectedLines.length - 1 ? `${line.text}${line.lineEnding}` : line.text,
+    )
+    .join("");
 
   return {
-    content: lineNumberedContent,
+    content: exactContent,
     contentHash: hashText(content),
     endLine,
+    numberedContent: lineNumberedContent,
     path,
     readAt: new Date().toISOString(),
     startLine,
     totalLines: lines.length,
     truncated: startLine > 1 || endLine < lines.length,
   };
+}
+
+function splitContentIntoLines(content: string) {
+  const lines: Array<{ lineEnding: string; text: string }> = [];
+  let lineStart = 0;
+
+  for (let index = 0; index < content.length;) {
+    const char = content[index];
+
+    if (char === "\r" || char === "\n") {
+      const lineEnding =
+        char === "\r" && content[index + 1] === "\n" ? "\r\n" : char;
+      lines.push({
+        lineEnding,
+        text: content.slice(lineStart, index),
+      });
+      index += lineEnding.length;
+      lineStart = index;
+      continue;
+    }
+
+    index += 1;
+  }
+
+  lines.push({
+    lineEnding: "",
+    text: content.slice(lineStart),
+  });
+
+  return lines;
 }
 
 async function grepProjectFiles(
@@ -1026,23 +1062,245 @@ function applyTextEdit(
     throw new Error("edit_file old_string and new_string are identical.");
   }
 
-  const occurrenceCount = countOccurrences(content, args.old_string);
+  const exactEdit = tryApplyExactTextEdit(
+    content,
+    args.old_string,
+    args.new_string,
+    args.replace_all,
+  );
 
-  if (occurrenceCount === 0) {
-    throw new Error("edit_file old_string was not found in the current file.");
+  if (exactEdit !== null) {
+    return exactEdit;
   }
 
-  if (occurrenceCount > 1 && !args.replace_all) {
+  const lineEndingEdit = tryApplyLineEndingNormalizedTextEdit(
+    content,
+    args.old_string,
+    args.new_string,
+    args.replace_all,
+  );
+
+  if (lineEndingEdit !== null) {
+    return lineEndingEdit;
+  }
+
+  const strippedOldString = stripReadFilesLinePrefixes(args.old_string);
+
+  if (strippedOldString !== null && strippedOldString !== args.old_string) {
+    const strippedNewString =
+      stripReadFilesLinePrefixes(args.new_string) ?? args.new_string;
+    const strippedExactEdit = tryApplyExactTextEdit(
+      content,
+      strippedOldString,
+      strippedNewString,
+      args.replace_all,
+    );
+
+    if (strippedExactEdit !== null) {
+      return strippedExactEdit;
+    }
+
+    const strippedLineEndingEdit = tryApplyLineEndingNormalizedTextEdit(
+      content,
+      strippedOldString,
+      strippedNewString,
+      args.replace_all,
+    );
+
+    if (strippedLineEndingEdit !== null) {
+      return strippedLineEndingEdit;
+    }
+  }
+
+  throw new Error(
+    "edit_file old_string was not found in the current file. If copying from read_files, use the exact content field and omit numberedContent line prefixes.",
+  );
+}
+
+function tryApplyExactTextEdit(
+  content: string,
+  oldString: string,
+  newString: string,
+  replaceAll?: boolean,
+) {
+  const occurrenceCount = countOccurrences(content, oldString);
+
+  if (occurrenceCount === 0) {
+    return null;
+  }
+
+  if (occurrenceCount > 1 && !replaceAll) {
     throw new Error(
       `edit_file old_string matched ${occurrenceCount} times. Provide a more specific old_string or set replace_all.`,
     );
   }
 
-  if (args.replace_all) {
-    return content.split(args.old_string).join(args.new_string);
+  return replaceAll
+    ? content.split(oldString).join(newString)
+    : content.replace(oldString, newString);
+}
+
+function tryApplyLineEndingNormalizedTextEdit(
+  content: string,
+  oldString: string,
+  newString: string,
+  replaceAll?: boolean,
+) {
+  const normalizedContent = normalizeLineEndingsWithMap(content);
+  const normalizedOldString = normalizeLineEndings(oldString);
+
+  if (
+    normalizedContent.content === content &&
+    normalizedOldString === oldString
+  ) {
+    return null;
   }
 
-  return content.replace(args.old_string, args.new_string);
+  const ranges = findNormalizedMatchRanges(
+    normalizedContent.content,
+    normalizedOldString,
+    normalizedContent.originalIndexByNormalizedIndex,
+    content.length,
+  );
+
+  if (ranges.length === 0) {
+    return null;
+  }
+
+  if (ranges.length > 1 && !replaceAll) {
+    throw new Error(
+      `edit_file old_string matched ${ranges.length} times after normalizing line endings. Provide a more specific old_string or set replace_all.`,
+    );
+  }
+
+  let nextContent = content;
+
+  for (const range of ranges.slice().reverse()) {
+    const originalSegment = content.slice(range.start, range.end);
+    const replacement = adaptReplacementLineEndings(
+      newString,
+      originalSegment,
+      content,
+    );
+    nextContent =
+      nextContent.slice(0, range.start) +
+      replacement +
+      nextContent.slice(range.end);
+  }
+
+  return nextContent;
+}
+
+function normalizeLineEndings(value: string) {
+  return value.replace(/\r\n|\r/g, "\n");
+}
+
+function normalizeLineEndingsWithMap(value: string) {
+  let content = "";
+  const originalIndexByNormalizedIndex: number[] = [];
+
+  for (let index = 0; index < value.length;) {
+    const char = value[index];
+
+    if (char === "\r") {
+      content += "\n";
+      originalIndexByNormalizedIndex.push(index);
+      index += value[index + 1] === "\n" ? 2 : 1;
+      continue;
+    }
+
+    content += char;
+    originalIndexByNormalizedIndex.push(index);
+    index += 1;
+  }
+
+  return { content, originalIndexByNormalizedIndex };
+}
+
+function findNormalizedMatchRanges(
+  normalizedContent: string,
+  normalizedSearch: string,
+  originalIndexByNormalizedIndex: number[],
+  originalContentLength: number,
+) {
+  const ranges: Array<{ end: number; start: number }> = [];
+
+  if (!normalizedSearch) {
+    return ranges;
+  }
+
+  let index = 0;
+
+  while (index !== -1) {
+    index = normalizedContent.indexOf(normalizedSearch, index);
+
+    if (index === -1) {
+      break;
+    }
+
+    const normalizedEnd = index + normalizedSearch.length;
+    const end =
+      normalizedEnd >= normalizedContent.length
+        ? originalContentLength
+        : originalIndexByNormalizedIndex[normalizedEnd];
+
+    ranges.push({
+      end,
+      start: originalIndexByNormalizedIndex[index],
+    });
+    index += normalizedSearch.length;
+  }
+
+  return ranges;
+}
+
+function adaptReplacementLineEndings(
+  replacement: string,
+  originalSegment: string,
+  fullContent: string,
+) {
+  const lineEnding =
+    detectDominantLineEnding(originalSegment) ??
+    detectDominantLineEnding(fullContent);
+
+  if (!lineEnding) {
+    return replacement;
+  }
+
+  return normalizeLineEndings(replacement).replace(/\n/g, lineEnding);
+}
+
+function detectDominantLineEnding(value: string) {
+  const crlf = countOccurrences(value, "\r\n");
+  const withoutCrlf = value.replace(/\r\n/g, "");
+  const lf = countOccurrences(withoutCrlf, "\n");
+  const cr = countOccurrences(withoutCrlf, "\r");
+
+  if (crlf === 0 && lf === 0 && cr === 0) {
+    return null;
+  }
+
+  if (crlf >= lf && crlf >= cr) {
+    return "\r\n";
+  }
+
+  return lf >= cr ? "\n" : "\r";
+}
+
+function stripReadFilesLinePrefixes(value: string) {
+  const lines = value.split(/\r?\n/);
+  const nonEmptyLines = lines.filter((line) => line.trim().length > 0);
+
+  if (
+    nonEmptyLines.length === 0 ||
+    !nonEmptyLines.every((line) => /^\s*\d+\s+\|\s?/.test(line))
+  ) {
+    return null;
+  }
+
+  return lines
+    .map((line) => line.replace(/^\s*\d+\s+\|\s?/, ""))
+    .join("\n");
 }
 
 function countOccurrences(content: string, search: string) {

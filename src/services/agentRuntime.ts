@@ -11,6 +11,7 @@ import type {
   VerificationReport,
 } from "../agent-core/types";
 import type { RunTransitionResult } from "../agent-core/runtime/runStateMachine";
+import { createTaskManifestFromContract } from "../agent-core/manifest/taskManifest";
 
 type AgentEventRecord = {
   id: string;
@@ -51,27 +52,32 @@ export type AgentArtifactContent = AgentArtifactRecord & {
 
 export const agentRuntimeApi = {
   createRun(projectId: string, run: AgentRun) {
+    const normalizedRun = normalizeAgentRun(run);
+
     return invoke<AgentRun>("create_agent_run", {
       projectId,
       run: {
-        id: run.id,
-        projectId: run.projectId,
-        conversationId: run.conversationId,
-        contract: run.contract,
-        status: run.status,
-        phase: run.phase,
-        startedAt: run.startedAt,
-        updatedAt: run.updatedAt,
+        id: normalizedRun.id,
+        projectId: normalizedRun.projectId,
+        conversationId: normalizedRun.conversationId,
+        contract: normalizedRun.contract,
+        manifest: normalizedRun.manifest,
+        status: normalizedRun.status,
+        phase: normalizedRun.phase,
+        startedAt: normalizedRun.startedAt,
+        updatedAt: normalizedRun.updatedAt,
       },
-    });
+    }).then(normalizeAgentRun);
   },
 
   listRuns(projectId: string) {
-    return invoke<AgentRun[]>("list_agent_runs", { projectId });
+    return invoke<AgentRun[]>("list_agent_runs", { projectId })
+      .then((runs) => runs.map(normalizeAgentRun));
   },
 
   getRun(projectId: string, runId: string) {
-    return invoke<AgentRun | null>("get_agent_run", { projectId, runId });
+    return invoke<AgentRun | null>("get_agent_run", { projectId, runId })
+      .then((run) => run ? normalizeAgentRun(run) : null);
   },
 
   async transitionRun(
@@ -102,7 +108,7 @@ export const agentRuntimeApi = {
     });
 
     return {
-      run: record.run,
+      run: normalizeAgentRun(record.run),
       event: mapEventRecord(record.event),
     };
   },
@@ -131,7 +137,7 @@ export const agentRuntimeApi = {
     });
 
     return {
-      run: record.run,
+      run: normalizeAgentRun(record.run),
       event: mapEventRecord(record.event),
     };
   },
@@ -316,6 +322,21 @@ function mapEventRecord(record: AgentEventRecord): AgentEvent {
     timestamp: record.timestamp,
     payload: record.payload,
     artifactIds: record.artifactIds,
+  };
+}
+
+function normalizeAgentRun(run: AgentRun): AgentRun {
+  if (run.manifest) {
+    return run;
+  }
+
+  return {
+    ...run,
+    manifest: createTaskManifestFromContract({
+      contract: run.contract,
+      conversationId: run.conversationId,
+      projectId: run.projectId,
+    }),
   };
 }
 

@@ -5,6 +5,7 @@ import {
   buildModifyProjectMessages,
 } from "./prompts";
 import type { AgentStepContext, ModificationContext } from "./types";
+import { createTaskManifestFromContract } from "../../agent-core/manifest/taskManifest";
 
 const CHINESE_RULE =
   "If the latest request is primarily Chinese, use Simplified Chinese.";
@@ -121,7 +122,10 @@ describe("project prompts", () => {
     };
 
     expect(systemContent).toContain(
-      "If exact edit_file old_string text is no longer visible, reread only the smallest useful range",
+      "If exact edit_file old_string text is no longer visible there, reread only the smallest useful range",
+    );
+    expect(systemContent).toContain(
+      "Copy edit_file old_string from file.content only, never from numberedContent.",
     );
     expect(userPayload.instructions).toContain(
       "Avoid repeating full-file read_files for the same unchanged path; when exact text is missing, reread the smallest useful range with offset/limit.",
@@ -235,6 +239,33 @@ function createAgentStepContext(): AgentStepContext {
     diagnostics: null,
     devServerStatus: "stopped",
     fileTree: "app/page.tsx",
+    manifest: createTaskManifestFromContract({
+      contract: {
+        acceptanceCriteria: [],
+        budget: {
+          maxModelTurns: 10,
+          maxMutations: 4,
+          maxRepairCycles: 2,
+          maxToolCalls: 20,
+        },
+        objective: "Demo request",
+        permissions: {
+          databaseChange: "deny",
+          dependencyChange: "ask",
+          fileDelete: "ask",
+          fileWrite: true,
+          previewDeployment: "ask",
+          productionDeployment: "ask",
+        },
+        scope: {
+          allowedPaths: ["app/**"],
+          forbiddenPaths: [".env*"],
+        },
+        taskType: "component_edit",
+      },
+      conversationId: "conversation-1",
+      projectId: "project-1",
+    }),
     memory: null,
     observations: [],
     previewUrl: null,
