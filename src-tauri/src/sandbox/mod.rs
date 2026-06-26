@@ -18,8 +18,12 @@ use crate::commands::DevServerRegistry;
 pub use manager::SandboxManager;
 pub use process::{SandboxChild, SandboxedProcess};
 pub(crate) use types::SandboxNetworkPolicy;
+#[cfg(test)]
+pub(crate) use types::{SandboxBackendKind, SandboxResourceLimits};
 pub use types::{SandboxMetadata, SandboxStatus};
 pub(crate) use workspace::SandboxWorkspace;
+#[cfg(test)]
+pub(crate) use workspace::SandboxWorkspaceKind;
 
 #[tauri::command]
 pub fn get_sandbox_status(manager: State<'_, SandboxManager>) -> Result<SandboxStatus, String> {

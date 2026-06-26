@@ -50,6 +50,13 @@ struct SourceSyncHandle {
     handle: Option<thread::JoinHandle<()>>,
 }
 
+struct DevServerStopResult {
+    project_id: String,
+    command: String,
+    pid: u32,
+    result: Result<(), String>,
+}
+
 pub fn start_dev_server(
     app: AppHandle,
     registry: DevServerRegistry,
@@ -213,21 +220,16 @@ pub fn stop_dev_server(
     };
 
     if let Some(server) = server {
-        let terminate_result = server
-            .process
-            .lock()
-            .map_err(|_| "command: failed to lock dev server process".to_string())
-            .and_then(|mut process| process.terminate_tree().map_err(|error| error.to_string()));
-        server.source_sync.stop();
-        server.workspace.cleanup_after_dev_server();
-        terminate_result?;
+        let command = server.command.clone();
+        let pid = server.pid;
+        terminate_and_cleanup_dev_server(server)?;
         emit_status(
             &app,
             &project_id,
-            &server.command,
+            &command,
             "stopped",
             None,
-            Some(format!("stopped pid {}", server.pid)),
+            Some(format!("stopped pid {pid}")),
             None,
         );
     }
@@ -236,35 +238,21 @@ pub fn stop_dev_server(
 }
 
 pub fn stop_all_dev_servers(app: AppHandle, registry: &DevServerRegistry) -> Result<(), String> {
-    let servers = {
-        let mut servers = lock_servers(&registry)?;
-        servers.drain().collect::<Vec<_>>()
-    };
-
-    for (project_id, server) in servers {
-        let result = server
-            .process
-            .lock()
-            .map_err(|_| "command: failed to lock dev server process".to_string())
-            .and_then(|mut process| process.terminate_tree().map_err(|error| error.to_string()));
-
-        server.source_sync.stop();
-        server.workspace.cleanup_after_dev_server();
-
-        match result {
+    for stopped in stop_all_dev_servers_inner(registry)? {
+        match stopped.result {
             Ok(()) => emit_status(
                 &app,
-                &project_id,
-                &server.command,
+                &stopped.project_id,
+                &stopped.command,
                 "stopped",
                 None,
-                Some(format!("stopped pid {}", server.pid)),
+                Some(format!("stopped pid {}", stopped.pid)),
                 None,
             ),
             Err(error) => emit_status(
                 &app,
-                &project_id,
-                &server.command,
+                &stopped.project_id,
+                &stopped.command,
                 "failed",
                 None,
                 Some(error),
@@ -274,6 +262,44 @@ pub fn stop_all_dev_servers(app: AppHandle, registry: &DevServerRegistry) -> Res
     }
 
     Ok(())
+}
+
+fn stop_all_dev_servers_inner(
+    registry: &DevServerRegistry,
+) -> Result<Vec<DevServerStopResult>, String> {
+    let servers = {
+        let mut servers = lock_servers(&registry)?;
+        servers.drain().collect::<Vec<_>>()
+    };
+    let mut stopped = Vec::with_capacity(servers.len());
+
+    for (project_id, server) in servers {
+        let command = server.command.clone();
+        let pid = server.pid;
+        let result = terminate_and_cleanup_dev_server(server);
+
+        stopped.push(DevServerStopResult {
+            project_id,
+            command,
+            pid,
+            result,
+        });
+    }
+
+    Ok(stopped)
+}
+
+fn terminate_and_cleanup_dev_server(server: DevServerProcess) -> Result<(), String> {
+    let terminate_result = server
+        .process
+        .lock()
+        .map_err(|_| "command: failed to lock dev server process".to_string())
+        .and_then(|mut process| process.terminate_tree().map_err(|error| error.to_string()));
+
+    server.source_sync.stop();
+    server.workspace.cleanup_after_dev_server();
+
+    terminate_result
 }
 
 fn spawn_dev_server_watcher(
@@ -575,7 +601,82 @@ fn lock_servers<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
+    use crate::sandbox::{SandboxBackendKind, SandboxResourceLimits};
+    use std::{
+        fs,
+        net::TcpListener,
+        process::{Command, Stdio},
+    };
+
+    #[test]
+    fn stop_all_dev_servers_drains_registry_and_cleans_dev_workspaces() {
+        let registry = DevServerRegistry::default();
+        let root = std::env::temp_dir().join(format!(
+            "ncb-dev-server-stop-all-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let workspace_root = root.join("workspace");
+        let tmp_root = root.join("tmp");
+        let source_manifest_path = root.join("state").join("source-manifest.json");
+        fs::create_dir_all(&workspace_root).unwrap();
+        fs::create_dir_all(&tmp_root).unwrap();
+        fs::create_dir_all(source_manifest_path.parent().unwrap()).unwrap();
+        fs::write(workspace_root.join("marker.txt"), "dev").unwrap();
+        fs::write(tmp_root.join("marker.txt"), "tmp").unwrap();
+        fs::write(&source_manifest_path, "{}").unwrap();
+
+        let child = SandboxChild::new(
+            long_running_command(),
+            SandboxBackendKind::Unsupported,
+            SandboxResourceLimits {
+                timeout_seconds: None,
+                memory_bytes: 128 * 1024 * 1024,
+                active_process_limit: 8,
+                max_output_bytes: 1024,
+            },
+        )
+        .unwrap();
+        let pid = child.native_pid().unwrap_or_default();
+        let source_sync_shutdown = Arc::new(AtomicBool::new(false));
+        let project_id = "stop-all-dev-project".to_string();
+
+        registry.servers.lock().unwrap().insert(
+            project_id.clone(),
+            DevServerProcess {
+                command: "npm run dev".to_string(),
+                pid,
+                process: Arc::new(Mutex::new(child)),
+                workspace: SandboxWorkspace {
+                    project_id: project_id.clone(),
+                    kind: crate::sandbox::SandboxWorkspaceKind::DevServer,
+                    workspace_root: workspace_root.clone(),
+                    cache_root: root.join("cache"),
+                    tmp_root: tmp_root.clone(),
+                    source_manifest_path: source_manifest_path.clone(),
+                },
+                source_sync: SourceSyncHandle {
+                    shutdown: source_sync_shutdown.clone(),
+                    handle: None,
+                },
+                started_at: current_timestamp(),
+                url: Arc::new(Mutex::new(Some("http://127.0.0.1:5173/".to_string()))),
+            },
+        );
+
+        let stopped = stop_all_dev_servers_inner(&registry).unwrap();
+
+        assert_eq!(stopped.len(), 1);
+        assert_eq!(stopped[0].project_id, project_id);
+        assert_eq!(stopped[0].command, "npm run dev");
+        assert!(stopped[0].result.is_ok());
+        assert!(!registry.servers.lock().unwrap().contains_key(&project_id));
+        assert!(source_sync_shutdown.load(Ordering::Relaxed));
+        assert!(!workspace_root.exists());
+        assert!(!tmp_root.exists());
+        assert!(!source_manifest_path.exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn readiness_probe_rejects_public_hosts() {
@@ -598,5 +699,30 @@ mod tests {
 
         probe_local_http_url(&format!("http://127.0.0.1:{port}/")).unwrap();
         handle.join().unwrap();
+    }
+
+    fn long_running_command() -> Command {
+        #[cfg(target_os = "windows")]
+        let mut command = {
+            let mut command = Command::new("ping");
+            command.args(["-n", "30", "127.0.0.1"]);
+            command
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        let mut command = {
+            let mut command = Command::new("sleep");
+            command.arg("30");
+            command
+        };
+
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+
+        command.stdin(Stdio::null());
+        command
     }
 }
