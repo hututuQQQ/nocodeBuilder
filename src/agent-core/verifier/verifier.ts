@@ -1,4 +1,5 @@
 import type {
+  AgentReadSnapshot,
   AgentRun,
   PreviewDiagnostic,
   SiteSpec,
@@ -82,12 +83,14 @@ export type VerificationInput = {
   baselinePackageJson?: string | null;
   changedFiles: string[];
   deletedFiles?: string[];
+  externalEffects?: string[];
   noOpReason?: string;
   packageChanged: boolean;
   approvedPackageChangeKeys?: string[];
   approvedDeletionPaths?: string[];
   previewDiagnostics?: PreviewDiagnostic[];
   previewUrl?: string | null;
+  readSnapshots?: AgentReadSnapshot[];
   run: AgentRun;
 };
 
@@ -993,7 +996,7 @@ function buildVerificationReport(
     newlyIntroducedFailures: collectNewlyIntroducedFailures(failedChecks),
     missingEvidence: inconclusiveChecks.map((check) => check.summary),
     artifactIds: checks.flatMap((check) => check.artifactIds ?? []),
-    repairFeedback: failedChecks.map((check) => `${check.title}: ${check.summary}`),
+    repairFeedback: failedChecks.map(buildRepairFeedbackForCheck),
     createdAt: new Date().toISOString(),
   };
 }
@@ -1024,7 +1027,16 @@ function verifyAcceptanceCriteria(
     }
 
     if (criterion.id === "request-addressed") {
-      const evidence = collectRequestAddressedEvidence(contract, input, siteSpec);
+      const technicalPassed = summarizeStatus(technicalChecks) === "passed";
+      const evidence = collectRequestAddressedEvidence(
+        contract,
+        input,
+        siteSpec,
+        technicalPassed,
+      );
+      const missingEvidence =
+        describeMissingRequestAddressedEvidence(contract, input, technicalPassed) ??
+        "No non-model evidence shows that the request was addressed.";
 
       return evidence
         ? passedCheck(
@@ -1036,7 +1048,7 @@ function verifyAcceptanceCriteria(
         : unavailableEvidenceCheck(
             `acceptance:${criterion.id}`,
             `Acceptance: ${criterion.id}`,
-            "No non-model evidence shows that the request was addressed.",
+            missingEvidence,
             criterion.required,
           );
     }
@@ -1054,8 +1066,18 @@ function collectRequestAddressedEvidence(
   contract: TaskContract,
   input: VerificationInput,
   siteSpec: SiteSpec | null,
+  allowExistingWorkspaceEvidence: boolean,
 ) {
   const changedFiles = input.changedFiles.map(normalizeProjectPath);
+  const expectedFiles = getExpectedFiles(contract);
+  if (expectedFiles.length > 0) {
+    const evidencePaths = collectTaskEvidencePaths(contract, input);
+    const missingExpectedFiles = findMissingExpectedFiles(expectedFiles, evidencePaths);
+
+    if (missingExpectedFiles.length > 0) {
+      return null;
+    }
+  }
 
   if (contract.taskType === "answer" && input.answerMessage?.trim()) {
     return "AnswerVerifier produced a non-empty answer for the read-only task.";
@@ -1065,8 +1087,17 @@ function collectRequestAddressedEvidence(
     return `No-op conclusion supplied: ${input.noOpReason.trim()}`;
   }
 
+  const externalEffects = (input.externalEffects ?? [])
+    .map((effect) => effect.trim())
+    .filter(Boolean);
+  if (externalEffects.length > 0) {
+    return `External tool evidence: ${externalEffects.slice(-3).join(" ")}`;
+  }
+
   if (changedFiles.length === 0) {
-    return null;
+    return allowExistingWorkspaceEvidence
+      ? collectExistingWorkspaceEvidence(contract, input.readSnapshots ?? [], siteSpec)
+      : null;
   }
 
   const scopeEvidence = changedFiles.some((path) =>
@@ -1104,6 +1135,129 @@ function collectRequestAddressedEvidence(
   }
 
   return `Changed ${changedFiles.length} task-scoped file(s).`;
+}
+
+function describeMissingRequestAddressedEvidence(
+  contract: TaskContract,
+  input: VerificationInput,
+  technicalPassed: boolean,
+) {
+  const expectedFiles = getExpectedFiles(contract);
+
+  if (expectedFiles.length === 0) {
+    return null;
+  }
+
+  if (!technicalPassed) {
+    return null;
+  }
+
+  const missingExpectedFiles = findMissingExpectedFiles(
+    expectedFiles,
+    collectTaskEvidencePaths(contract, input),
+  );
+
+  return missingExpectedFiles.length > 0
+    ? `Expected file evidence is missing for: ${missingExpectedFiles.slice(0, 8).join(", ")}.`
+    : null;
+}
+
+function getExpectedFiles(contract: TaskContract) {
+  return contract.source?.mode === "spec"
+    ? (contract.source.expectedFiles ?? []).map(normalizeProjectPath)
+    : [];
+}
+
+function collectTaskEvidencePaths(
+  contract: TaskContract,
+  input: VerificationInput,
+) {
+  return uniqueStrings([
+    ...input.changedFiles.map(normalizeProjectPath),
+    ...(input.readSnapshots ?? []).map((snapshot) => normalizeProjectPath(snapshot.path)),
+  ]).filter((path) =>
+    path &&
+    !isInvalidProjectPath(path) &&
+    contract.scope.allowedPaths.some((pattern) =>
+      matchesProjectPathPattern(path, pattern),
+    ) &&
+    !isPathForbidden(path, contract.scope.forbiddenPaths),
+  );
+}
+
+function findMissingExpectedFiles(expectedFiles: string[], evidencePaths: string[]) {
+  return expectedFiles.filter(
+    (expected) =>
+      !evidencePaths.some((path) =>
+        path === expected || matchesProjectPathPattern(path, expected),
+      ),
+  );
+}
+
+function collectExistingWorkspaceEvidence(
+  contract: TaskContract,
+  readSnapshots: AgentReadSnapshot[],
+  siteSpec: SiteSpec | null,
+) {
+  const readPaths = uniqueStrings(
+    readSnapshots
+      .map((snapshot) => normalizeProjectPath(snapshot.path))
+      .filter((path) => path && !isInvalidProjectPath(path))
+      .filter((path) =>
+        contract.scope.allowedPaths.some((pattern) =>
+          matchesProjectPathPattern(path, pattern),
+        ),
+      )
+      .filter((path) =>
+        !isPathForbidden(path, contract.scope.forbiddenPaths),
+      ),
+  );
+
+  if (readPaths.length === 0) {
+    return null;
+  }
+
+  const expectedFiles =
+    contract.source?.mode === "spec"
+      ? (contract.source.expectedFiles ?? []).map(normalizeProjectPath)
+      : [];
+  if (expectedFiles.length > 0) {
+    const matchingExpectedFiles = readPaths.filter((path) =>
+      expectedFiles.some((expected) =>
+        expected === path || matchesProjectPathPattern(path, expected),
+      ),
+    );
+
+    return matchingExpectedFiles.length > 0
+      ? `Existing workspace evidence inspected expected file(s): ${matchingExpectedFiles.slice(-6).join(", ")}.`
+      : null;
+  }
+
+  const componentIds = contract.scope.componentIds ?? [];
+  if (componentIds.length > 0 && siteSpec) {
+    const componentSourcePaths = collectComponentSourcePaths(siteSpec, componentIds);
+    const matchingReadFile = readPaths.find((path) => componentSourcePaths.has(path));
+
+    return matchingReadFile
+      ? `Existing workspace evidence inspected ${matchingReadFile} for scoped component(s): ${componentIds.join(", ")}.`
+      : null;
+  }
+
+  const pages = contract.scope.pages ?? [];
+  if (pages.length > 0 && siteSpec) {
+    const pageSourcePaths = collectPageSourcePaths(siteSpec, pages);
+    const matchingReadFile = readPaths.find((path) => pageSourcePaths.has(path));
+
+    return matchingReadFile
+      ? `Existing workspace evidence inspected ${matchingReadFile} for scoped page(s): ${pages.join(", ")}.`
+      : null;
+  }
+
+  return null;
+}
+
+function uniqueStrings(values: string[]) {
+  return Array.from(new Set(values));
 }
 
 function collectComponentSourcePaths(siteSpec: SiteSpec, componentIds: string[]) {
@@ -1233,6 +1387,71 @@ function collectNewlyIntroducedFailures(failedChecks: VerificationCheck[]) {
           `${failure.checkId}: ${failure.summary} (baseline ${failure.baselineStatus})`,
       ),
   );
+}
+
+function buildRepairFeedbackForCheck(check: VerificationCheck) {
+  const diagnostics = extractCheckDiagnostics(check.details).slice(0, 10);
+
+  if (diagnostics.length === 0) {
+    return `${check.title}: ${check.summary}`;
+  }
+
+  return [
+    `${check.title}: ${check.summary}`,
+    "Diagnostics:",
+    ...diagnostics.map((diagnostic) => `- ${compactDiagnostic(diagnostic, 320)}`),
+  ].join("\n");
+}
+
+function extractCheckDiagnostics(details: unknown) {
+  if (!isRecord(details)) {
+    return [];
+  }
+
+  const diagnostics: string[] = [];
+
+  for (const failure of extractCommandFailures(details)) {
+    diagnostics.push(...failure.diagnostics);
+  }
+
+  const detailDiagnostics = details.diagnostics;
+  if (Array.isArray(detailDiagnostics)) {
+    for (const diagnostic of detailDiagnostics) {
+      if (typeof diagnostic === "string") {
+        diagnostics.push(diagnostic);
+        continue;
+      }
+
+      if (isRecord(diagnostic)) {
+        const summary = readDiagnosticRecordSummary(diagnostic);
+        if (summary) {
+          diagnostics.push(summary);
+        }
+      }
+    }
+  }
+
+  return uniqueStrings(diagnostics.map((diagnostic) => diagnostic.trim()).filter(Boolean));
+}
+
+function readDiagnosticRecordSummary(record: Record<string, unknown>) {
+  const parts = ["kind", "message", "text", "summary"]
+    .map((key) => record[key])
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+
+  return parts.join(": ");
+}
+
+function compactDiagnostic(value: string, maxLength: number) {
+  const compacted = value.replace(/\s+/g, " ").trim();
+
+  return compacted.length <= maxLength
+    ? compacted
+    : `${compacted.slice(0, maxLength)}...`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function extractCommandFailures(details: unknown): CommandFailureDetail[] {
@@ -1433,10 +1652,70 @@ function isPreviewRequired(contract: TaskContract) {
 }
 
 function extractDiagnostics(output: string) {
-  return output
+  const lines = output
     .split(/\r?\n/)
-    .filter((line) => /error|failed|exception|type/i.test(line))
-    .slice(-20);
+    .map((line) => stripAnsi(line).trimEnd());
+  const diagnostics: string[] = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+
+    if (!isDiagnosticAnchor(line)) {
+      continue;
+    }
+
+    const previousIndex = findPreviousNonEmptyLineIndex(lines, index);
+    const startIndex =
+      /type error/i.test(line) &&
+      previousIndex !== null &&
+      isDiagnosticLocation(lines[previousIndex] ?? "")
+        ? previousIndex
+        : index;
+
+    for (
+      let windowIndex = startIndex;
+      windowIndex < Math.min(lines.length, startIndex + 10);
+      windowIndex += 1
+    ) {
+      const diagnosticLine = lines[windowIndex]?.trim();
+
+      if (!diagnosticLine) {
+        if (windowIndex > index) {
+          break;
+        }
+        continue;
+      }
+
+      diagnostics.push(diagnosticLine);
+    }
+  }
+
+  return uniqueStrings(diagnostics).slice(-40);
+}
+
+function isDiagnosticAnchor(line: string) {
+  return (
+    isDiagnosticLocation(line) ||
+    /\b(error|failed|failure|exception|type error)\b/i.test(line)
+  );
+}
+
+function isDiagnosticLocation(line: string) {
+  return /(?:^|\s)(?:\.\/)?[A-Za-z0-9_./@-]+\.[A-Za-z0-9]+:\d+:\d+\b/.test(line);
+}
+
+function findPreviousNonEmptyLineIndex(lines: string[], index: number) {
+  for (let current = index - 1; current >= 0; current -= 1) {
+    if ((lines[current] ?? "").trim().length > 0) {
+      return current;
+    }
+  }
+
+  return null;
+}
+
+function stripAnsi(value: string) {
+  return value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
 function getErrorMessage(error: unknown) {

@@ -167,7 +167,10 @@ export type AppState = {
     title: string,
     brief: string,
   ) => Promise<ProjectConversation | null>;
-  continueCurrentSpecExecution: () => Promise<void>;
+  continueCurrentSpecExecution: (options?: {
+    recoverStaleRun?: boolean;
+  }) => Promise<void>;
+  retryCurrentSpecTaskExecution: () => Promise<void>;
   reviseCurrentSpec: (feedback: string) => Promise<boolean>;
   approveAndExecuteCurrentSpec: () => Promise<void>;
   retrySpecTask: (taskId: string) => Promise<void>;
@@ -248,6 +251,7 @@ const initialState = {
   | "createFeatureSpecIteration"
   | "createInitialSpec"
   | "continueCurrentSpecExecution"
+  | "retryCurrentSpecTaskExecution"
   | "createProject"
   | "deployCurrentProject"
   | "denyCurrentAgentApproval"

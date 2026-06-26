@@ -13,6 +13,7 @@ export {
   getContextFilePaths,
 } from "./project/pathRules";
 export {
+  AgentStepValidationError,
   requestAgentStep,
   requestProjectGeneration,
   requestProjectModification,

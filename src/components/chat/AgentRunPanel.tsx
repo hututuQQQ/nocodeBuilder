@@ -383,7 +383,7 @@ function isApprovalPending(approval: AgentApproval) {
   return (
     !approval.decision &&
     !approval.resolvedAt &&
-    new Date(approval.expiresAt).getTime() > Date.now()
+    !approval.consumedAt
   );
 }
 

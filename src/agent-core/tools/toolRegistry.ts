@@ -225,7 +225,7 @@ const TOOL_METADATA: Array<
   ),
   legacyTool(
     "apply_supabase_schema",
-    "Create missing Supabase tables and add missing columns for the current project. Non-destructive; requires the project .env Supabase DB URL and secret key.",
+    "Create missing Supabase tables and add missing columns for the current project. Non-destructive; requires the project .env Supabase DB URL and secret key. Use canonical column types and safe defaultValue literals only.",
     false,
     false,
     "database_write",

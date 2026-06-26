@@ -96,6 +96,7 @@ export type SpecTask = {
   error?: string;
   blockedByTaskId?: string;
   autoRetryCount?: number;
+  retryContext?: string;
 };
 
 export type SpecAcceptanceResult = {
@@ -120,7 +121,12 @@ export type GeneratedSpecRevisionPayload = {
   tasks: Array<
     Omit<
       SpecTask,
-      "status" | "runId" | "error" | "blockedByTaskId" | "autoRetryCount"
+      | "status"
+      | "runId"
+      | "error"
+      | "blockedByTaskId"
+      | "autoRetryCount"
+      | "retryContext"
     >
   >;
 };

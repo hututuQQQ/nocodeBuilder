@@ -1,4 +1,9 @@
-import { formatProjectFileTree, getContextFilePaths } from "../agent/projectModifier";
+import {
+  formatProjectFileTree,
+  getContextFilePaths,
+  type AgentObservation,
+} from "../agent/projectModifier";
+import { buildProjectBackendContext } from "../agent/project/backendContext";
 import { runSpecTaskRuntime } from "../agent-runtime/runController";
 import { agentRuntimeApi } from "../services/agentRuntime";
 import { keyStore } from "../services/keyStore";
@@ -8,6 +13,10 @@ import {
   type FileTree,
   type ProjectConversation,
 } from "../services/projects";
+import type {
+  AgentEvent,
+  AgentRunFailureKind,
+} from "../agent-core/types";
 import { specApi } from "../services/specs";
 import { compileSpecTaskContract } from "../spec-core/taskCompiler";
 import type {
@@ -59,12 +68,17 @@ type SpecActions = Pick<
   | "createInitialSpec"
   | "loadConversationSpecHistory"
   | "loadCurrentSpec"
+  | "retryCurrentSpecTaskExecution"
   | "retrySpecTask"
   | "retrySpecVerification"
   | "reviseCurrentSpec"
   | "switchCurrentIterationToChat"
   | "switchCurrentIterationToSpec"
 >;
+
+type ContinueSpecExecutionOptions = {
+  recoverStaleRun?: boolean;
+};
 
 const SPEC_TASK_AUTO_RETRY_LIMIT = 2;
 
@@ -123,7 +137,7 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         });
         await get().loadConversationSpecHistory();
         if (["approved", "building", "verifying"].includes(spec.status)) {
-          void get().continueCurrentSpecExecution();
+          void get().continueCurrentSpecExecution({ recoverStaleRun: true });
         }
       } catch (error) {
         if (!isStillCurrentSpecLoad()) {
@@ -220,7 +234,9 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
       set({ isGeneratingSpec: true, projectError: null });
 
       try {
+        const planningContext = await buildSpecPlanningContext(project.id);
         const payload = await requestInitialSpec({
+          backendContext: planningContext.backendContext ?? planningContext,
           config,
           projectBrief,
           projectName: project.name,
@@ -384,14 +400,15 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
       }
     },
 
-    continueCurrentSpecExecution: async () => {
+    continueCurrentSpecExecution: async (
+      options?: ContinueSpecExecutionOptions,
+    ) => {
       const spec = get().currentSpec;
       const conversation = get().currentConversation;
 
       if (
         !spec ||
         !conversation ||
-        get().isExecutingSpec ||
         !["approved", "building", "verifying"].includes(spec.status)
       ) {
         return;
@@ -404,10 +421,91 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         return;
       }
 
+      if (get().isExecutingSpec) {
+        const canRecoverStaleRun = options?.recoverStaleRun
+          ? await canRecoverStaleSpecExecutionLock(store, spec)
+          : false;
+
+        if (!canRecoverStaleRun) {
+          set((state) => ({
+            projectError: options?.recoverStaleRun
+              ? "Spec executor is already busy; no stale terminal task run was found to recover."
+              : state.projectError,
+            terminalLogs: appendLogs(state.terminalLogs, [
+              options?.recoverStaleRun
+                ? "[spec] Reconcile request skipped because Spec execution is already busy."
+                : "[spec] Continue request skipped because Spec execution is already busy.",
+            ]),
+          }));
+          return;
+        }
+
+        set((state) => ({
+          terminalLogs: appendLogs(state.terminalLogs, [
+            "[spec] Recovering stale Spec execution lock for a terminal task run.",
+          ]),
+        }));
+      }
+
       set({ isExecutingSpec: true, projectError: null });
 
       try {
         await reconcileAndContinueSpecExecution(store, spec.id);
+      } catch (error) {
+        recordSpecError(set, error);
+      } finally {
+        set({ isExecutingSpec: false });
+      }
+    },
+
+    retryCurrentSpecTaskExecution: async () => {
+      const project = get().currentProject;
+      const spec = get().currentSpec;
+      const conversation = get().currentConversation;
+
+      if (
+        !project ||
+        !spec ||
+        !conversation ||
+        !["approved", "building"].includes(spec.status) ||
+        isNonExecutingSpecWorkflowBusy(get())
+      ) {
+        return;
+      }
+
+      if (!isActiveConversationSpec(conversation, spec)) {
+        set({
+          projectError: "Active Spec does not belong to the current conversation.",
+        });
+        return;
+      }
+
+      const revision = getCurrentSpecRevision(spec);
+      const runningTask = revision.tasks.find((task) => task.status === "running");
+
+      if (!runningTask) {
+        await get().continueCurrentSpecExecution({ recoverStaleRun: true });
+        return;
+      }
+
+      const run = runningTask.runId
+        ? await agentRuntimeApi.getRun(project.id, runningTask.runId).catch(() => null)
+        : null;
+
+      if (run && !isTerminalRunStatus(run.status)) {
+        await syncCurrentAgentRunState(store, project.id, run);
+        return;
+      }
+
+      if (run?.status === "completed") {
+        await get().continueCurrentSpecExecution({ recoverStaleRun: true });
+        return;
+      }
+
+      set({ isExecutingSpec: true, projectError: null });
+
+      try {
+        await resetSpecTaskAndExecute(store, spec, runningTask.id);
       } catch (error) {
         recordSpecError(set, error);
       } finally {
@@ -466,6 +564,14 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
           config,
           currentRevision,
           feedback: message,
+          planningContext: {
+            ...(await buildSpecPlanningContext(project.id)),
+            currentConversation: {
+              id: conversation.id,
+              messages: conversation.messages.slice(-12),
+              title: conversation.title,
+            },
+          },
         });
 
         if (!isCurrentSpecSnapshot(store, revisionSnapshot, "revising")) {
@@ -580,27 +686,10 @@ export function createSpecActions({ get, set }: StoreAccess): SpecActions {
         return;
       }
 
-      const resetRevision = restoreRetryableTaskGraph(revision, taskId);
-      const resetBase = {
-        ...spec,
-        currentRevisionId: resetRevision.id,
-        finalVerification: undefined,
-        failureMessage: undefined,
-        revisions: spec.revisions.map((item) =>
-          item.id === resetRevision.id ? resetRevision : item,
-        ),
-        updatedAt: new Date().toISOString(),
-      };
-      const resetSpec =
-        resetBase.status === "blocked"
-          ? transitionSpecStatus(resetBase, "building")
-          : resetBase;
-
       set({ isExecutingSpec: true, projectError: null });
 
       try {
-        await saveSpecToStore(store, resetSpec);
-        await executeSpecTasks(store, resetSpec.id);
+        await resetSpecTaskAndExecute(store, spec, taskId);
       } catch (error) {
         recordSpecError(set, error);
       } finally {
@@ -962,9 +1051,11 @@ async function executeSpecTasks(store: StoreAccess, specId: string) {
     }
 
     const runId = createId("run");
+    const retryContext = task.retryContext;
     const runningSpec = updateTask(spec, task.id, {
       error: undefined,
       runId,
+      retryContext: undefined,
       status: "running",
     });
     await saveSpecToStore(store, runningSpec);
@@ -999,6 +1090,9 @@ async function executeSpecTasks(store: StoreAccess, specId: string) {
       conversationId: runningSpec.conversationId,
       executionMode,
       project,
+      resumeObservation: retryContext
+        ? createSpecRetryObservation(runningTask, retryContext)
+        : undefined,
       runId,
       store,
       taskObjective: runningTask.objective,
@@ -1070,7 +1164,15 @@ async function executeSpecTasks(store: StoreAccess, specId: string) {
       runId: run?.id ?? runId,
     });
     const latestTask = findSpecTask(latestExecutionSpec, task.id);
-    const failureMessage = getFailedSpecRunMessage(run?.status, report);
+    const failureDetails = await getSpecRunFailureDetails({
+      failureKind: result.failureKind,
+      failureReason: result.failureReason,
+      projectId: project.id,
+      report,
+      runId: run?.id ?? runId,
+      runStatus: run?.status,
+    });
+    const failureMessage = failureDetails.message;
 
     if (
       run?.status !== "cancelled" &&
@@ -1080,6 +1182,7 @@ async function executeSpecTasks(store: StoreAccess, specId: string) {
         latestExecutionSpec,
         latestTask,
         failureMessage,
+        failureDetails.failureKind,
       )
     ) {
       continue;
@@ -1198,11 +1301,23 @@ async function reconcileAndContinueSpecExecution(
     return;
   }
 
-  const failureMessage = getFailedSpecRunMessage(run.status, report);
+  const failureDetails = await getSpecRunFailureDetails({
+    projectId: project.id,
+    report,
+    runId: run.id,
+    runStatus: run.status,
+  });
+  const failureMessage = failureDetails.message;
 
   if (
     run.status !== "cancelled" &&
-    await saveAutoRetrySpecTask(store, spec, runningTask, failureMessage)
+    await saveAutoRetrySpecTask(
+      store,
+      spec,
+      runningTask,
+      failureMessage,
+      failureDetails.failureKind,
+    )
   ) {
     await executeSpecTasks(store, spec.id);
     return;
@@ -1231,6 +1346,34 @@ async function reconcileAndContinueSpecExecution(
       `Task ${runningTask.title} failed.`,
     ),
   );
+}
+
+async function canRecoverStaleSpecExecutionLock(
+  store: StoreAccess,
+  spec: DevelopmentSpec,
+) {
+  const project = store.get().currentProject;
+
+  if (!project || spec.status !== "building") {
+    return false;
+  }
+
+  const revision = getCurrentSpecRevision(spec);
+  const runningTask = revision.tasks.find((task) => task.status === "running");
+
+  if (!runningTask) {
+    return false;
+  }
+
+  if (!runningTask.runId) {
+    return true;
+  }
+
+  const run = await agentRuntimeApi
+    .getRun(project.id, runningTask.runId)
+    .catch(() => null);
+
+  return !run || isTerminalRunStatus(run.status);
 }
 
 async function verifyCompletedTasks(store: StoreAccess, spec: DevelopmentSpec) {
@@ -1849,8 +1992,40 @@ function findSpecTask(spec: DevelopmentSpec, taskId: string) {
   return getCurrentSpecRevision(spec).tasks.find((task) => task.id === taskId);
 }
 
-function canAutoRetrySpecTask(task: SpecTask) {
-  return (task.autoRetryCount ?? 0) < SPEC_TASK_AUTO_RETRY_LIMIT;
+async function resetSpecTaskAndExecute(
+  store: StoreAccess,
+  spec: DevelopmentSpec,
+  taskId: string,
+) {
+  const revision = getCurrentSpecRevision(spec);
+  const resetRevision = restoreRetryableTaskGraph(revision, taskId);
+  const resetBase = {
+    ...spec,
+    currentRevisionId: resetRevision.id,
+    finalVerification: undefined,
+    failureMessage: undefined,
+    revisions: spec.revisions.map((item) =>
+      item.id === resetRevision.id ? resetRevision : item,
+    ),
+    updatedAt: new Date().toISOString(),
+  };
+  const resetSpec =
+    resetBase.status === "blocked" || resetBase.status === "approved"
+      ? transitionSpecStatus(resetBase, "building")
+      : resetBase;
+
+  await saveSpecToStore(store, resetSpec);
+  await executeSpecTasks(store, resetSpec.id);
+}
+
+function canAutoRetrySpecTask(
+  task: SpecTask,
+  failureKind?: AgentRunFailureKind,
+) {
+  return (
+    failureKind !== "loop_exhausted" &&
+    (task.autoRetryCount ?? 0) < SPEC_TASK_AUTO_RETRY_LIMIT
+  );
 }
 
 async function saveAutoRetrySpecTask(
@@ -1858,18 +2033,25 @@ async function saveAutoRetrySpecTask(
   spec: DevelopmentSpec,
   task: SpecTask,
   reason: string,
+  failureKind?: AgentRunFailureKind,
 ) {
-  if (!canAutoRetrySpecTask(task)) {
+  if (!canAutoRetrySpecTask(task, failureKind)) {
     return false;
   }
 
   const retryCount = (task.autoRetryCount ?? 0) + 1;
+  const retryContext = await buildSpecTaskRetryContext(
+    spec.projectId,
+    task,
+    reason,
+  );
   const retrySpec = prepareSpecForAutoRetry(
     updateTask(spec, task.id, {
       autoRetryCount: retryCount,
       blockedByTaskId: undefined,
       error: undefined,
       runId: undefined,
+      retryContext,
       status: "pending",
     }),
     task,
@@ -1908,15 +2090,254 @@ function prepareSpecForAutoRetry(spec: DevelopmentSpec, task: SpecTask) {
   return spec;
 }
 
+async function buildSpecTaskRetryContext(
+  projectId: string,
+  task: SpecTask,
+  reason: string,
+) {
+  const previousRunId = task.runId;
+  const parts = [
+    `Spec task retry context for ${task.title}.`,
+    `Task objective: ${task.objective}`,
+    `Failure reason: ${reason}`,
+  ];
+
+  if (!previousRunId) {
+    return parts.join("\n");
+  }
+
+  const [run, checkpoint, report, events] = await Promise.all([
+    agentRuntimeApi.getRun(projectId, previousRunId).catch(() => null),
+    agentRuntimeApi.getLatestCheckpoint(projectId, previousRunId).catch(() => null),
+    agentRuntimeApi
+      .getLatestVerificationReport(projectId, previousRunId)
+      .catch(() => null),
+    agentRuntimeApi.listEvents(projectId, previousRunId).catch(() => []),
+  ]);
+  const terminalDetails = getRunTerminalFailureDetailsFromEvents(events);
+
+  parts.push(`Previous run id: ${previousRunId}`);
+
+  if (run) {
+    parts.push(
+      [
+        `Previous run status: ${run.status}`,
+        `modelTurns=${run.modelTurns}`,
+        `toolCalls=${run.toolCalls}`,
+        `mutations=${run.mutationCount}`,
+        `repairCycles=${run.repairCycles}`,
+      ].join(", "),
+    );
+  }
+
+  if (terminalDetails.failureKind || terminalDetails.failureReason) {
+    parts.push(
+      [
+        terminalDetails.failureKind
+          ? `Terminal failure kind: ${terminalDetails.failureKind}`
+          : "",
+        terminalDetails.failureReason
+          ? `Terminal failure reason: ${terminalDetails.failureReason}`
+          : "",
+      ].filter(Boolean).join("\n"),
+    );
+  }
+
+  if (report) {
+    const reportFeedback = [
+      ...report.repairFeedback,
+      ...report.missingEvidence,
+      ...report.newlyIntroducedFailures,
+    ].slice(-10);
+    parts.push(`Previous verification status: ${report.status}`);
+    if (reportFeedback.length > 0) {
+      parts.push(
+        `Verification feedback:\n${reportFeedback
+          .map((item) => compactRetryContext(item, 700))
+          .join("\n")}`,
+      );
+    }
+  }
+
+  if (checkpoint) {
+    const changedFiles = [
+      ...checkpoint.changedFiles,
+      ...checkpoint.deletedFiles.map((path) => `${path} (deleted)`),
+    ];
+    if (changedFiles.length > 0) {
+      parts.push(`Files touched by previous run:\n${changedFiles.slice(-12).join("\n")}`);
+    }
+
+    const readFiles = checkpoint.readSnapshots
+      .map((snapshot) => snapshot.path)
+      .slice(-12);
+    if (readFiles.length > 0) {
+      parts.push(`Files already read in previous run:\n${readFiles.join("\n")}`);
+    }
+
+    const failureObservations = checkpoint.observations
+      .filter(isRetryFailureObservation)
+      .slice(-6)
+      .map(formatRetryObservation)
+      .filter(Boolean);
+    if (failureObservations.length > 0) {
+      parts.push(`Key failure observations from previous run:\n${failureObservations.join("\n\n")}`);
+    }
+  }
+
+  parts.push(
+    "Continue from this state. Avoid repeating completed reads or invalid tool arguments. If exact file text is needed for edit_file, read that file again before editing.",
+  );
+
+  return compactRetryContext(parts.join("\n\n"), 6_000);
+}
+
+function createSpecRetryObservation(
+  task: SpecTask,
+  retryContext: string,
+): AgentObservation {
+  return {
+    content: retryContext,
+    ok: false,
+    step: 1,
+    summary: `Continuing Spec task ${task.title} after an automatic retry.`,
+    tool: "spec_retry_context",
+  };
+}
+
+function formatRetryObservation(value: unknown) {
+  if (typeof value === "string") {
+    return compactRetryContext(value, 900);
+  }
+
+  try {
+    return compactRetryContext(JSON.stringify(value), 900);
+  } catch {
+    return "";
+  }
+}
+
+function isRetryFailureObservation(value: unknown) {
+  const parsed = parseRetryObservation(value);
+
+  if (isRecord(parsed)) {
+    if (parsed.tool === "loop_rescue" || parsed.tool === "model_validation") {
+      return true;
+    }
+
+    if (typeof parsed.ok === "boolean") {
+      return !parsed.ok;
+    }
+
+    if (typeof parsed.status === "string") {
+      return !["success", "passed", "ok"].includes(parsed.status.toLowerCase());
+    }
+  }
+
+  const text = typeof parsed === "string"
+    ? parsed
+    : (() => {
+        try {
+          return JSON.stringify(parsed);
+        } catch {
+          return "";
+        }
+      })();
+
+  return /\b(error|failed|failure|exception|timeout|denied|invalid|not found|cannot|can't|budget|context)\b/i
+    .test(text);
+}
+
+function parseRetryObservation(value: unknown) {
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+}
+
+function compactRetryContext(value: string, maxLength = 10_000) {
+  const compacted = value.replace(/\s+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+
+  if (compacted.length <= maxLength) {
+    return compacted;
+  }
+
+  return `${compacted.slice(0, maxLength)}\n[truncated retry context]`;
+}
+
+async function getSpecRunFailureDetails({
+  failureKind,
+  failureReason,
+  projectId,
+  report,
+  runId,
+  runStatus,
+}: {
+  failureKind?: AgentRunFailureKind;
+  failureReason?: string;
+  projectId: string;
+  report: {
+    missingEvidence: string[];
+    newlyIntroducedFailures: string[];
+    repairFeedback: string[];
+  } | null | undefined;
+  runId?: string;
+  runStatus: string | undefined;
+}) {
+  const terminalDetails = runId
+    ? await getRunTerminalFailureDetails(projectId, runId)
+    : {};
+
+  return {
+    failureKind: failureKind ?? terminalDetails.failureKind,
+    message: getFailedSpecRunMessage(
+      runStatus,
+      report,
+      failureReason ?? terminalDetails.failureReason,
+    ),
+  };
+}
+
+async function getRunTerminalFailureDetails(projectId: string, runId: string) {
+  const events = await agentRuntimeApi
+    .listEvents(projectId, runId)
+    .catch(() => []);
+  return getRunTerminalFailureDetailsFromEvents(events);
+}
+
+function getRunTerminalFailureDetailsFromEvents(events: AgentEvent[]) {
+  const terminalEvent = [...events]
+    .reverse()
+    .find((event) => event.type === "run.budget_exceeded" || event.type === "run.failed");
+
+  if (!terminalEvent) {
+    return {};
+  }
+
+  return {
+    failureKind: readFailureKindFromEvent(terminalEvent),
+    failureReason: readFailureReasonFromEvent(terminalEvent),
+  };
+}
+
 function getFailedSpecRunMessage(
   runStatus: string | undefined,
   report: {
     missingEvidence: string[];
+    newlyIntroducedFailures: string[];
     repairFeedback: string[];
   } | null | undefined,
+  terminalReason?: string,
 ) {
   return (
+    terminalReason ||
     report?.repairFeedback.join("\n") ||
+    report?.newlyIntroducedFailures.join("\n") ||
     report?.missingEvidence.join("\n") ||
     (runStatus
       ? `AgentRun ended with status ${runStatus}.`
@@ -1983,6 +2404,7 @@ function restoreRetryableTaskGraph(
           blockedByTaskId: undefined,
           error: undefined,
           runId: undefined,
+          retryContext: undefined,
           status: "pending" as const,
         };
       }
@@ -1994,6 +2416,7 @@ function restoreRetryableTaskGraph(
           blockedByTaskId: undefined,
           error: undefined,
           runId: undefined,
+          retryContext: undefined,
           status: "pending" as const,
         };
       }
@@ -2203,9 +2626,11 @@ async function buildFeatureSpecContext(store: StoreAccess, projectId: string) {
     agentRuntimeApi.readSiteSpec(projectId).catch(() => null),
     agentRuntimeApi.readSiteSourceMap(projectId).catch(() => null),
   ]);
+  const planningContext = await buildSpecPlanningContext(projectId);
   const currentConversation = isCurrentProject ? state.currentConversation : null;
 
   return {
+    ...planningContext,
     changeHistory: isCurrentProject ? state.changeHistory.slice(0, 8) : [],
     currentConversation: {
       id: currentConversation?.id,
@@ -2217,6 +2642,20 @@ async function buildFeatureSpecContext(store: StoreAccess, projectId: string) {
     siteSpec,
     sourceMap,
   };
+}
+
+async function buildSpecPlanningContext(projectId: string) {
+  try {
+    return {
+      backendContext: await buildProjectBackendContext(projectId, {
+        includeSchema: true,
+      }),
+    };
+  } catch (error) {
+    return {
+      backendContextError: getProjectErrorMessage(error),
+    };
+  }
 }
 
 async function readContextFiles(
@@ -2264,6 +2703,41 @@ function isSpecWorkflowBusy(state: AppState) {
     state.isGeneratingSpec ||
       state.isRevisingSpec ||
       state.isExecutingSpec ||
+      state.isVerifyingSpec ||
+      state.isSwitchingIterationMode,
+  );
+}
+
+function readFailureReasonFromEvent(event: AgentEvent) {
+  return isRecord(event.payload) && typeof event.payload.reason === "string"
+    ? event.payload.reason
+    : undefined;
+}
+
+function readFailureKindFromEvent(event: AgentEvent): AgentRunFailureKind | undefined {
+  if (!isRecord(event.payload)) {
+    return undefined;
+  }
+
+  return isAgentRunFailureKind(event.payload.failureKind)
+    ? event.payload.failureKind
+    : undefined;
+}
+
+function isAgentRunFailureKind(value: unknown): value is AgentRunFailureKind {
+  return value === "local_budget" ||
+    value === "context_budget" ||
+    value === "loop_exhausted";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonExecutingSpecWorkflowBusy(state: AppState) {
+  return Boolean(
+    state.isGeneratingSpec ||
+      state.isRevisingSpec ||
       state.isVerifyingSpec ||
       state.isSwitchingIterationMode,
   );

@@ -26,6 +26,11 @@ export type AgentRunPhase =
   | "cancelled"
   | "budget_exceeded";
 
+export type AgentRunFailureKind =
+  | "local_budget"
+  | "context_budget"
+  | "loop_exhausted";
+
 export type AcceptanceCriterion = {
   id: string;
   description: string;
@@ -52,6 +57,7 @@ export type TaskContract = {
     taskId: string;
     requirementIds: string[];
     acceptanceCriteriaIds: string[];
+    expectedFiles?: string[];
     executionMode?: "generate" | "modify";
   };
   scope: {
@@ -94,6 +100,35 @@ export type AgentRun = {
   startedAt: string;
   updatedAt: string;
   completedAt?: string;
+};
+
+export type RunContextSummary = {
+  changedFiles: string[];
+  completed: string[];
+  decisions: string[];
+  deletedFiles: string[];
+  importantFiles: string[];
+  latestFailures: string[];
+  nextStep: string;
+  objective: string;
+  summarizedObservationCount: number;
+  updatedAt?: string;
+};
+
+export type AgentBudgetMetric = {
+  max: number;
+  remaining: number;
+  used: number;
+};
+
+export type AgentBudgetPressure = "normal" | "low" | "critical";
+
+export type AgentBudgetState = {
+  modelTurns: AgentBudgetMetric;
+  mutations: AgentBudgetMetric;
+  pressure: AgentBudgetPressure;
+  repairCycles: AgentBudgetMetric;
+  toolCalls: AgentBudgetMetric;
 };
 
 export type AgentEventType =
@@ -222,6 +257,7 @@ export type ToolResult = {
   workspaceEffects?: {
     changedFiles: string[];
     deletedFiles?: string[];
+    externalEffects?: string[];
     packageChanged: boolean;
     readSnapshots?: AgentReadSnapshot[];
   };

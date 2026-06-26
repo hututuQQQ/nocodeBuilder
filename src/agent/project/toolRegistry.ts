@@ -46,7 +46,14 @@ export function getAgentToolDefinition(name: AgentToolName) {
 
 export function formatAgentToolListForPrompt() {
   return AGENT_TOOL_DEFINITIONS.map(
-    (tool) => `- ${tool.name} args ${tool.argsDescription}: ${tool.description}`,
+    (tool) => {
+      const description =
+        tool.name === "run_command"
+          ? `${tool.description} Command must exactly equal one of: ${AGENT_COMMANDS.join(", ")}. Do not add pipes, redirects, flags, package names, or shell operators.`
+          : tool.description;
+
+      return `- ${tool.name} args ${tool.argsDescription}: ${description}`;
+    },
   ).join("\n");
 }
 

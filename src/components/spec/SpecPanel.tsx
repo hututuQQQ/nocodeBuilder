@@ -18,6 +18,7 @@ import {
   getAiProviderDefinition,
   type AiProviderId,
 } from "../../services/aiProviders";
+import type { AgentApproval, AgentRun } from "../../agent-core/types";
 import { useAppStore } from "../../store/appStore";
 import type { ChatMessage } from "../../store/chatMessages";
 import type {
@@ -55,7 +56,11 @@ export function SpecPanel({
   const chatMessages = useAppStore((state) => state.chatMessages);
   const currentProject = useAppStore((state) => state.currentProject);
   const currentConversation = useAppStore((state) => state.currentConversation);
+  const currentAgentApproval = useAppStore(
+    (state) => state.currentAgentApproval,
+  );
   const currentAgentRun = useAppStore((state) => state.currentAgentRun);
+  const agentRuns = useAppStore((state) => state.agentRuns);
   const currentSpec = useAppStore((state) => state.currentSpec);
   const historicalSpecs = useAppStore((state) => state.historicalSpecs);
   const isLoadingSpec = useAppStore((state) => state.isLoadingSpec);
@@ -69,6 +74,12 @@ export function SpecPanel({
   const reviseCurrentSpec = useAppStore((state) => state.reviseCurrentSpec);
   const approveAndExecuteCurrentSpec = useAppStore(
     (state) => state.approveAndExecuteCurrentSpec,
+  );
+  const approveCurrentAgentApproval = useAppStore(
+    (state) => state.approveCurrentAgentApproval,
+  );
+  const denyCurrentAgentApproval = useAppStore(
+    (state) => state.denyCurrentAgentApproval,
   );
   const retrySpecTask = useAppStore((state) => state.retrySpecTask);
   const retrySpecVerification = useAppStore(
@@ -107,6 +118,14 @@ export function SpecPanel({
     isArchived: Boolean(currentConversation?.archivedAt),
     isBusy: busy,
   });
+  const pendingSpecApproval = shouldShowSpecApprovalNotice({
+    approval: currentAgentApproval,
+    conversation: currentConversation,
+    run: currentAgentRun,
+    spec: currentSpec,
+  })
+    ? currentAgentApproval
+    : null;
 
   async function handleChangeModel(selection: ConfiguredModelOption) {
     setModelError(null);
@@ -235,10 +254,18 @@ export function SpecPanel({
             <RequirementsView revision={revision} />
             <DesignView revision={revision} />
             <SpecTaskList
+              agentRuns={currentAgentRun ? [currentAgentRun, ...agentRuns] : agentRuns}
               disabled={busy}
               onRetry={(taskId) => void retrySpecTask(taskId)}
               tasks={revision.tasks}
             />
+            {pendingSpecApproval ? (
+              <SpecApprovalNotice
+                approval={pendingSpecApproval}
+                onApprove={() => void approveCurrentAgentApproval()}
+                onDeny={() => void denyCurrentAgentApproval()}
+              />
+            ) : null}
             <ReviewActions
               busy={busy}
               feedback={feedback}
@@ -442,10 +469,12 @@ function DesignView({ revision }: { revision: SpecRevision }) {
 }
 
 function SpecTaskList({
+  agentRuns,
   disabled,
   onRetry,
   tasks,
 }: {
+  agentRuns: AgentRun[];
   disabled: boolean;
   onRetry: (taskId: string) => void;
   tasks: SpecTask[];
@@ -454,68 +483,77 @@ function SpecTaskList({
     <section className="rounded-md border border-zinc-800 bg-zinc-950/70 p-4">
       <SectionHeader icon={<CheckCircle2 size={15} aria-hidden="true" />} title="Tasks" />
       <div className="mt-3 space-y-2">
-        {tasks.map((task) => (
-          <div
-            className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3"
-            key={task.id}
-          >
-            <div className="flex min-w-0 items-start gap-3">
-              <StatusDot status={task.status} />
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h4 className="truncate text-sm font-medium text-zinc-100">
-                    {task.title}
-                  </h4>
-                  <span className="rounded border border-zinc-800 px-2 py-0.5 text-[11px] text-zinc-500">
-                    {task.status}
-                  </span>
-                  {task.runId ? (
+        {tasks.map((task) => {
+          const displayStatus = getSpecTaskDisplayStatus(task, agentRuns);
+          const runMessage = getSpecTaskRunStatusMessage(task, displayStatus);
+
+          return (
+            <div
+              className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3"
+              key={task.id}
+            >
+              <div className="flex min-w-0 items-start gap-3">
+                <StatusDot status={displayStatus} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h4 className="truncate text-sm font-medium text-zinc-100">
+                      {task.title}
+                    </h4>
                     <span className="rounded border border-zinc-800 px-2 py-0.5 text-[11px] text-zinc-500">
-                      {task.runId.slice(0, 16)}
+                      {displayStatus}
                     </span>
+                    {task.runId ? (
+                      <span className="rounded border border-zinc-800 px-2 py-0.5 text-[11px] text-zinc-500">
+                        {task.runId.slice(0, 16)}
+                      </span>
+                    ) : null}
+                    {formatSpecTaskAutoRetryLabel(task) ? (
+                      <span
+                        className="inline-flex items-center gap-1 rounded border border-blue-400/30 bg-blue-400/10 px-2 py-0.5 text-[11px] text-blue-100"
+                        title="Automatic retry is in progress"
+                      >
+                        <RefreshCcw size={11} aria-hidden="true" />
+                        {formatSpecTaskAutoRetryLabel(task)}
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="mt-1 text-xs leading-5 text-zinc-400">
+                    {task.objective}
+                  </p>
+                  <p className="mt-2 truncate text-[11px] text-zinc-600">
+                    Paths: {task.allowedPaths.join(", ")}
+                  </p>
+                  {task.dependencyIds.length > 0 ? (
+                    <p className="mt-1 truncate text-[11px] text-zinc-600">
+                      Dependencies: {task.dependencyIds.join(", ")}
+                    </p>
                   ) : null}
-                  {formatSpecTaskAutoRetryLabel(task) ? (
-                    <span
-                      className="inline-flex items-center gap-1 rounded border border-blue-400/30 bg-blue-400/10 px-2 py-0.5 text-[11px] text-blue-100"
-                      title="Automatic retry is in progress"
-                    >
-                      <RefreshCcw size={11} aria-hidden="true" />
-                      {formatSpecTaskAutoRetryLabel(task)}
-                    </span>
+                  {task.error ? (
+                    <p className="mt-2 whitespace-pre-wrap rounded border border-red-400/30 bg-red-400/10 px-2 py-1.5 text-xs leading-5 text-red-200">
+                      {task.error}
+                    </p>
+                  ) : runMessage ? (
+                    <p className="mt-2 whitespace-pre-wrap rounded border border-red-400/30 bg-red-400/10 px-2 py-1.5 text-xs leading-5 text-red-200">
+                      {runMessage}
+                    </p>
                   ) : null}
                 </div>
-                <p className="mt-1 text-xs leading-5 text-zinc-400">
-                  {task.objective}
-                </p>
-                <p className="mt-2 truncate text-[11px] text-zinc-600">
-                  Paths: {task.allowedPaths.join(", ")}
-                </p>
-                {task.dependencyIds.length > 0 ? (
-                  <p className="mt-1 truncate text-[11px] text-zinc-600">
-                    Dependencies: {task.dependencyIds.join(", ")}
-                  </p>
-                ) : null}
-                {task.error ? (
-                  <p className="mt-2 whitespace-pre-wrap rounded border border-red-400/30 bg-red-400/10 px-2 py-1.5 text-xs leading-5 text-red-200">
-                    {task.error}
-                  </p>
+                {canShowSpecTaskRetry(task, tasks) ? (
+                  <button
+                    aria-label={`Retry ${task.title}`}
+                    className="grid size-8 shrink-0 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-blue-400/40 hover:text-blue-100 disabled:cursor-not-allowed disabled:text-zinc-700"
+                    disabled={disabled}
+                    onClick={() => onRetry(task.id)}
+                    title="Retry"
+                    type="button"
+                  >
+                    <RefreshCcw size={14} aria-hidden="true" />
+                  </button>
                 ) : null}
               </div>
-              {canShowSpecTaskRetry(task, tasks) ? (
-                <button
-                  aria-label={`Retry ${task.title}`}
-                  className="grid size-8 shrink-0 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-blue-400/40 hover:text-blue-100 disabled:cursor-not-allowed disabled:text-zinc-700"
-                  disabled={disabled}
-                  onClick={() => onRetry(task.id)}
-                  title="Retry"
-                  type="button"
-                >
-                  <RefreshCcw size={14} aria-hidden="true" />
-                </button>
-              ) : null}
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </section>
   );
@@ -734,6 +772,94 @@ export function canUseSpecChat({
     hasConversation &&
     !isArchived &&
     (!isBusy || canSteerActiveRun)
+  );
+}
+
+type SpecApprovalNoticeConversation = {
+  activeSpecId: string | null;
+  id: string;
+  mode: string;
+};
+
+type SpecApprovalNoticeSpec = {
+  currentRevisionId: string;
+  id: string;
+  revisions: Array<{
+    id: string;
+    tasks: Array<Pick<SpecTask, "id" | "runId" | "status">>;
+  }>;
+};
+
+export function shouldShowSpecApprovalNotice({
+  approval,
+  conversation,
+  now = Date.now(),
+  run,
+  spec,
+}: {
+  approval: Pick<
+    AgentApproval,
+    "consumedAt" | "decision" | "expiresAt" | "resolvedAt" | "runId"
+  > | null;
+  conversation: SpecApprovalNoticeConversation | null;
+  now?: number;
+  run: Pick<AgentRun, "contract" | "conversationId" | "id" | "status"> | null;
+  spec: SpecApprovalNoticeSpec | null;
+}) {
+  if (
+    !approval ||
+    !conversation ||
+    !run ||
+    !spec ||
+    !isApprovalPendingAt(approval, now) ||
+    approval.runId !== run.id ||
+    run.status !== "waiting_approval"
+  ) {
+    return false;
+  }
+
+  const source = run.contract.source;
+  const revision = spec.revisions.find(
+    (item) => item.id === spec.currentRevisionId,
+  );
+  const runningTask = revision?.tasks.find(
+    (task) => task.status === "running",
+  );
+
+  return (
+    conversation.mode === "spec" &&
+    conversation.activeSpecId === spec.id &&
+    run.conversationId === conversation.id &&
+    source?.mode === "spec" &&
+    source.specId === spec.id &&
+    source.revisionId === revision?.id &&
+    Boolean(runningTask) &&
+    source.taskId === runningTask?.id &&
+    runningTask?.runId === run.id
+  );
+}
+
+export function formatApprovalExpiryLabel(
+  _expiresAt: string,
+  _now = Date.now(),
+) {
+  return "No timeout";
+}
+
+function isApprovalPendingAt(
+  approval: Pick<
+    AgentApproval,
+    "consumedAt" | "decision" | "expiresAt" | "resolvedAt"
+  >,
+  _now: number,
+) {
+  const expiresMs = new Date(approval.expiresAt).getTime();
+
+  return (
+    !approval.decision &&
+    !approval.resolvedAt &&
+    !approval.consumedAt &&
+    Number.isFinite(expiresMs)
   );
 }
 
@@ -1040,22 +1166,129 @@ function StatusPill({ status }: { status: "passed" | "failed" | "pending" }) {
   );
 }
 
+function SpecApprovalNotice({
+  approval,
+  onApprove,
+  onDeny,
+}: {
+  approval: AgentApproval;
+  onApprove: () => void;
+  onDeny: () => void;
+}) {
+  return (
+    <section
+      aria-live="assertive"
+      className="rounded-md border border-amber-300/50 bg-amber-400/10 p-4 shadow-[0_0_0_1px_rgba(251,191,36,0.08)]"
+    >
+      <div className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-center">
+        <div className="flex min-w-0 flex-1 items-start gap-3">
+          <div className="grid size-10 shrink-0 place-items-center rounded-md border border-amber-300/40 bg-amber-300/10 text-amber-100">
+            <ShieldCheck size={18} aria-hidden="true" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-sm font-semibold text-amber-50">
+                Approval required
+              </h3>
+              <span className="rounded border border-amber-300/30 bg-amber-300/10 px-2 py-0.5 text-[11px] text-amber-100">
+                {approval.toolName}
+              </span>
+              <span className="rounded border border-amber-300/20 px-2 py-0.5 text-[11px] text-amber-200/80">
+                {formatApprovalExpiryLabel(approval.expiresAt)}
+              </span>
+            </div>
+            <p className="mt-1 break-words text-xs leading-5 text-zinc-300">
+              {approval.exactSideEffect}
+            </p>
+            {approval.targetResources.length > 0 ? (
+              <p className="mt-1 truncate text-[11px] text-zinc-500">
+                {approval.targetResources.join(", ")}
+              </p>
+            ) : null}
+          </div>
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-2">
+          <button
+            aria-label={`Approve ${approval.toolName}`}
+            className="flex h-9 min-w-28 items-center justify-center gap-2 rounded-md border border-emerald-400/40 bg-emerald-400/10 px-3 text-sm font-medium text-emerald-100 transition hover:border-emerald-300/70 hover:bg-emerald-400/15"
+            onClick={onApprove}
+            type="button"
+          >
+            <CheckCircle2 size={15} aria-hidden="true" />
+            Approve
+          </button>
+          <button
+            aria-label={`Deny ${approval.toolName}`}
+            className="flex h-9 min-w-24 items-center justify-center gap-2 rounded-md border border-red-400/40 bg-red-400/10 px-3 text-sm font-medium text-red-100 transition hover:border-red-300/70 hover:bg-red-400/15"
+            onClick={onDeny}
+            type="button"
+          >
+            <XCircle size={15} aria-hidden="true" />
+            Deny
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export function getSpecTaskDisplayStatus(
+  task: Pick<SpecTask, "runId" | "status">,
+  agentRuns: Array<Pick<AgentRun, "id" | "status">>,
+) {
+  if (task.status !== "running" || !task.runId) {
+    return task.status;
+  }
+
+  const run = agentRuns.find((item) => item.id === task.runId);
+
+  if (run?.status === "waiting_approval") {
+    return "waiting_approval";
+  }
+
+  if (!run || !isTerminalAgentRun(run.status)) {
+    return task.status;
+  }
+
+  return run.status;
+}
+
+function getSpecTaskRunStatusMessage(
+  task: Pick<SpecTask, "runId" | "status">,
+  displayStatus: string,
+) {
+  if (
+    task.status !== "running" ||
+    displayStatus === "running" ||
+    displayStatus === "waiting_approval" ||
+    !task.runId
+  ) {
+    return null;
+  }
+
+  return `AgentRun ${task.runId} ended with status ${displayStatus}.`;
+}
+
 function StatusDot({ status }: { status: string }) {
   const tone =
-    status === "passed"
+    status === "passed" || status === "completed"
       ? "border-emerald-400/40 bg-emerald-400/10 text-emerald-200"
-      : status === "failed" || status === "cancelled" || status === "blocked"
+      : status === "failed" || status === "cancelled" || status === "blocked" || status === "budget_exceeded"
         ? "border-red-400/40 bg-red-400/10 text-red-200"
+        : status === "waiting_approval"
+          ? "border-amber-400/40 bg-amber-400/10 text-amber-200"
         : status === "running"
           ? "border-blue-400/40 bg-blue-400/10 text-blue-200"
           : "border-zinc-800 text-zinc-500";
 
   return (
     <div className={`mt-0.5 grid size-8 shrink-0 place-items-center rounded-md border ${tone}`}>
-      {status === "passed" ? (
+      {status === "passed" || status === "completed" ? (
         <CheckCircle2 size={15} aria-hidden="true" />
-      ) : status === "failed" || status === "cancelled" || status === "blocked" ? (
+      ) : status === "failed" || status === "cancelled" || status === "blocked" || status === "budget_exceeded" ? (
         <XCircle size={15} aria-hidden="true" />
+      ) : status === "waiting_approval" ? (
+        <ShieldCheck size={15} aria-hidden="true" />
       ) : status === "running" ? (
         <Loader2 size={15} className="animate-spin" aria-hidden="true" />
       ) : (

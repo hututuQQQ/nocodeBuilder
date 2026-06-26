@@ -106,7 +106,11 @@ function inferTaskType(objective: string): TaskType {
     return "deployment";
   }
 
-  if (/(database|supabase|crud|auth|login|orders|backend|api|数据库|登录|后台)/i.test(objective)) {
+  if (isReadOnlyQuestion(objective, text)) {
+    return "answer";
+  }
+
+  if (/(database|supabase|crud|auth|login|orders|backend|api|server|server-side|multiplayer|multi-player|online|realtime|real-time|websocket|room|rooms|\u540e\u7aef|\u670d\u52a1\u7aef|\u6570\u636e\u5e93|\u63a5\u53e3|\u8054\u673a|\u591a\u4eba|\u5b9e\u65f6|\u623f\u95f4|数据库|登录|后台)/i.test(objective)) {
     return "backend_feature";
   }
 
@@ -133,11 +137,31 @@ function inferTaskType(objective: string): TaskType {
   return "component_edit";
 }
 
+function isReadOnlyQuestion(objective: string, lowerObjective: string) {
+  const asksForInformation =
+    /(question|explain|why|status|what\s+is|where\s+(is|are|can)|is\s+there|do\s+we\s+have|does\s+.*\s+have|currently|right\s+now|can'?t\s+find|cannot\s+find|not\s+found)/i.test(lowerObjective) ||
+    /(\u4ec0\u4e48|\u4e3a\u4ec0\u4e48|\u5982\u4f55|\u600e\u4e48|\u54ea\u91cc|\u5728\u54ea|\u6709\u6ca1\u6709|\u662f\u5426|\u76ee\u524d|\u5f53\u524d|\u73b0\u5728|\u627e\u4e0d\u5230|\u6ca1\u6709\u627e\u5230)/u.test(objective);
+
+  if (asksForInformation) {
+    return true;
+  }
+
+  if (hasImplementationIntent(objective)) {
+    return false;
+  }
+
+  return /(\?|\u5417|\u4e48)/u.test(objective);
+}
+
+function hasImplementationIntent(objective: string) {
+  return /(add|create|build|implement|fix|update|change|modify|remove|delete|wire|integrate|generate|\u65b0\u589e|\u6dfb\u52a0|\u521b\u5efa|\u5b9e\u73b0|\u4fee\u590d|\u4fee\u6539|\u6539\u6210|\u5220\u9664|\u63a5\u5165|\u96c6\u6210|\u751f\u6210|\u6784\u5efa|\u52a0\u4e00\u4e2a|\u505a\u4e00\u4e2a)/i.test(objective);
+}
+
 function budgetForTaskType(taskType: TaskType): TaskContract["budget"] {
   switch (taskType) {
     case "answer":
       return {
-        maxModelTurns: 2,
+        maxModelTurns: 4,
         maxToolCalls: 8,
         maxMutations: 0,
         maxRepairCycles: 0,

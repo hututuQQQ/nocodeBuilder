@@ -2,6 +2,7 @@ import type {
   AgentEvent,
   AgentEventType,
   AgentRun,
+  AgentRunFailureKind,
   AgentRunPhase,
   AgentRunStatus,
   TaskContract,
@@ -29,6 +30,7 @@ export type RunTransition =
   | {
       type: "budget_exceeded";
       budget: keyof TaskContract["budget"];
+      failureKind?: AgentRunFailureKind;
       reason: string;
     }
   | { type: "repair_budget_exceeded"; report?: VerificationReport }
@@ -286,6 +288,7 @@ export class RunStateMachine {
           "budget_exceeded",
           "run.budget_exceeded",
           {
+            failureKind: "local_budget",
             reason: "Repair budget exceeded after verification failed.",
             reportId: transition.report.id,
             },
@@ -312,6 +315,7 @@ export class RunStateMachine {
           "run.budget_exceeded",
           {
             budget: transition.budget,
+            failureKind: transition.failureKind ?? "local_budget",
             reason: transition.reason,
           },
           now,
@@ -324,6 +328,7 @@ export class RunStateMachine {
           "budget_exceeded",
           "run.budget_exceeded",
           {
+            failureKind: "local_budget",
             reason: "Repair budget exceeded.",
             reportId: transition.report?.id,
           },

@@ -38,4 +38,55 @@ describe("TaskContract", () => {
     expect(contract.permissions.databaseChange).toBe("deny");
     expect(contract.permissions.productionDeployment).toBe("ask");
   });
+
+  it("treats multiplayer and realtime work as backend features", () => {
+    const contract = compileTaskContract({
+      objective: "Implement multiplayer room realtime sync for online poker",
+    });
+
+    expect(contract.taskType).toBe("backend_feature");
+    expect(contract.permissions.databaseChange).toBe("ask");
+  });
+
+  it("treats login entry status questions as read-only answers", () => {
+    const contract = compileTaskContract({
+      objective: "\u76ee\u524d\u6709\u767b\u5f55\u5165\u53e3\u5417\uff0c\u6211\u6ca1\u6709\u627e\u5230",
+    });
+
+    expect(contract.taskType).toBe("answer");
+    expect(contract.permissions.fileWrite).toBe(false);
+    expect(contract.permissions.databaseChange).toBe("deny");
+  });
+
+  it("does not let login keywords override location questions", () => {
+    const contract = compileTaskContract({
+      objective: "Where is the login entry? I cannot find it.",
+    });
+
+    expect(contract.taskType).toBe("answer");
+  });
+
+  it("treats login enabled questions as read-only answers", () => {
+    const contract = compileTaskContract({
+      objective: "Is login enabled?",
+    });
+
+    expect(contract.taskType).toBe("answer");
+  });
+
+  it("keeps question-shaped implementation requests as backend features", () => {
+    const contract = compileTaskContract({
+      objective: "Can you add login with Supabase auth?",
+    });
+
+    expect(contract.taskType).toBe("backend_feature");
+  });
+
+  it("keeps implementation requests with login keywords as backend features", () => {
+    const contract = compileTaskContract({
+      objective: "Implement login with Supabase auth",
+    });
+
+    expect(contract.taskType).toBe("backend_feature");
+  });
 });

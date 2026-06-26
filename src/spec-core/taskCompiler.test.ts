@@ -17,6 +17,7 @@ describe("compileSpecTaskContract", () => {
     ]);
     expect(contract.source).toEqual({
       acceptanceCriteriaIds: task.acceptanceCriteriaIds,
+      expectedFiles: task.expectedFiles,
       mode: "spec",
       requirementIds: task.requirementIds,
       revisionId: revision.id,
@@ -95,6 +96,101 @@ describe("compileSpecTaskContract", () => {
         "postcss.config.*",
       ]),
     );
+  });
+
+  it("uses wider budgets for Spec tasks than generic chat tasks", () => {
+    const revision = createRevision();
+    const spec = createSpec(revision);
+    const contract = compileSpecTaskContract({
+      revision,
+      spec,
+      task: revision.tasks[0],
+    });
+
+    expect(contract.budget).toMatchObject({
+      maxModelTurns: expect.any(Number),
+      maxToolCalls: expect.any(Number),
+      maxMutations: expect.any(Number),
+      maxRepairCycles: 4,
+    });
+    expect(contract.budget.maxModelTurns).toBeGreaterThanOrEqual(23);
+    expect(contract.budget.maxToolCalls).toBeGreaterThanOrEqual(73);
+    expect(contract.budget.maxMutations).toBeGreaterThanOrEqual(18);
+  });
+
+  it("expands Spec task budgets on automatic retry", () => {
+    const revision = createRevision();
+    const spec = createSpec(revision);
+    const firstContract = compileSpecTaskContract({
+      revision,
+      spec,
+      task: revision.tasks[0],
+    });
+    const retryTask = {
+      ...revision.tasks[0],
+      autoRetryCount: 2,
+    };
+    const retryContract = compileSpecTaskContract({
+      revision,
+      spec,
+      task: retryTask,
+    });
+
+    expect(retryContract.budget.maxModelTurns)
+      .toBe(firstContract.budget.maxModelTurns + 20);
+    expect(retryContract.budget.maxToolCalls)
+      .toBe(firstContract.budget.maxToolCalls + 72);
+    expect(retryContract.budget.maxMutations)
+      .toBe(firstContract.budget.maxMutations + 24);
+    expect(retryContract.budget.maxRepairCycles)
+      .toBe(firstContract.budget.maxRepairCycles + 2);
+  });
+
+  it("gives backend and Initial Build generation tasks enough execution room", () => {
+    const backendTask = createTask({
+      expectedFiles: [
+        "lib/supabase/server.ts",
+        "lib/supabase/client.ts",
+        "app/api/rooms/route.ts",
+        "app/game/[roomId]/page.tsx",
+      ],
+      objective: "Implement Supabase realtime rooms and game state APIs.",
+    });
+    const generateTask = createTask({
+      expectedFiles: [
+        "package.json",
+        "app/page.tsx",
+        "app/layout.tsx",
+        "components/table.tsx",
+        "lib/game.ts",
+      ],
+      objective: "Generate the initial online poker application.",
+    });
+    const revision = createRevision({ tasks: [generateTask, backendTask] });
+    const spec = createSpec(revision, { kind: "initial_build" });
+
+    const generatedContract = compileSpecTaskContract({
+      executionMode: "generate",
+      revision,
+      spec,
+      task: generateTask,
+    });
+    const backendContract = compileSpecTaskContract({
+      executionMode: "modify",
+      revision,
+      spec,
+      task: backendTask,
+    });
+
+    expect(generatedContract.budget.maxModelTurns).toBeGreaterThanOrEqual(44);
+    expect(generatedContract.budget.maxToolCalls).toBeGreaterThanOrEqual(180);
+    expect(generatedContract.budget.maxMutations).toBeGreaterThanOrEqual(90);
+    expect(generatedContract.budget.maxRepairCycles).toBe(8);
+    expect(backendContract.taskType).toBe("backend_feature");
+    expect(backendContract.budget.maxModelTurns).toBeGreaterThanOrEqual(34);
+    expect(backendContract.budget.maxToolCalls).toBeGreaterThanOrEqual(130);
+    expect(backendContract.budget.maxMutations).toBeGreaterThanOrEqual(48);
+    expect(backendContract.budget.maxRepairCycles).toBe(10);
   });
 
   it("infers Initial Build style tasks normally after generation", () => {

@@ -7,7 +7,12 @@ import type {
   VerificationReport,
 } from "../agent-core/types";
 import { compileTaskContract } from "../agent-core/contract/taskContract";
+import type { AgentStepContext } from "../agent/project/types";
+import { compileSpecTaskContract } from "../spec-core/taskCompiler";
+import type { DevelopmentSpec } from "../spec-core/types";
 import type { ProjectInfo } from "../services/projects";
+import { AgentStepValidationError } from "../agent/project/requests";
+import { LlmClientError } from "../agent/llm/errors";
 
 const fake = vi.hoisted(() => ({
   actions: [] as unknown[],
@@ -204,7 +209,7 @@ vi.mock("../services/agentRuntime", () => ({
         (approval) =>
           approval.runId === runId &&
           !approval.decision &&
-          new Date(approval.expiresAt).getTime() > Date.now(),
+          !approval.resolvedAt,
       ) ?? null,
     ),
     getRun: vi.fn(async (_projectId, runId) => fake.runs.get(runId) ?? null),
@@ -362,6 +367,7 @@ vi.mock("../store/conversationState", () => ({
 const {
   generateInitialProjectRuntime,
   modifyCurrentProjectRuntime,
+  runSpecTaskRuntime,
 } = await import("./applicationAdapter");
 const conversationState = await import("../store/conversationState");
 
@@ -414,6 +420,76 @@ describe("Application runtime adapter", () => {
       modelTurns: 1,
       toolCalls: 0,
     });
+  });
+
+  it("turns agent response validation errors into retry observations", async () => {
+    fake.actions = [
+      new AgentStepValidationError({
+        attempts: 3,
+        invalidResponse: {
+          args: {
+            tables: [
+              {
+                columns: [{ dataType: "int2", name: "seat" }],
+                name: "room_players",
+              },
+            ],
+          },
+          tool: "apply_supabase_schema",
+          type: "tool_call",
+        },
+        validationError: "Invalid model response: unsupported Supabase column type \"int2\".",
+      }),
+      {
+        type: "finish_candidate",
+        summary: "Schema response repaired",
+      },
+    ];
+    fake.verificationStatuses = ["passed"];
+
+    const result = await modifyCurrentProjectRuntime(
+      createFakeStore(),
+      "Create poker room schema",
+    );
+    const run = [...fake.runs.values()][0];
+
+    expect(result).toBe(true);
+    expect(run).toMatchObject({
+      modelTurns: 2,
+      status: "completed",
+    });
+    expect(fake.failedMessages).toEqual([]);
+    expect(fake.events.map((event) => event.type)).toContain("model.failed");
+    expect(JSON.stringify(fake.modelContexts[1])).toContain("model_validation");
+    expect(JSON.stringify(fake.modelContexts[1])).toContain("int2");
+  });
+
+  it("injects resume observations into a new runtime run", async () => {
+    fake.actions = [
+      {
+        type: "answer",
+        message: "Continued from retry context.",
+      },
+    ];
+    fake.verificationStatuses = ["passed"];
+
+    const result = await modifyCurrentProjectRuntime(
+      createFakeStore(),
+      "Continue task",
+      {
+        resumeObservation: {
+          content: "Previous run status: budget_exceeded\nFix the Supabase schema.",
+          ok: false,
+          step: 1,
+          summary: "Continuing after budget exhaustion.",
+          tool: "spec_retry_context",
+        },
+      },
+    );
+
+    expect(result).toBe(true);
+    expect(JSON.stringify(fake.modelContexts[0])).toContain("spec_retry_context");
+    expect(JSON.stringify(fake.modelContexts[0])).toContain("budget_exceeded");
   });
 
   it("classifies answer tasks before baseline commands and skips build checks", async () => {
@@ -698,7 +774,7 @@ describe("Application runtime adapter", () => {
     });
   });
 
-  it("expires stale approvals, returns to planning, and requests a fresh approval", async () => {
+  it("keeps stale approvals waiting until the user decides", async () => {
     fake.actions = [
       {
         type: "tool_call",
@@ -737,14 +813,13 @@ describe("Application runtime adapter", () => {
     expect(result).toBe(false);
     expect(run?.status).toBe("waiting_approval");
     expect(fake.toolNames).toEqual([]);
-    expect(fake.approvals).toHaveLength(2);
-    expect(fake.approvals[0]).toMatchObject({
-      decision: "expired",
-    });
-    expect(fake.events.map((event) => event.type)).toContain("approval.expired");
+    expect(fake.approvals).toHaveLength(1);
+    expect(fake.approvals[0]?.decision).toBeUndefined();
+    expect(fake.approvals[0]?.resolvedAt).toBeUndefined();
+    expect(fake.events.map((event) => event.type)).not.toContain("approval.expired");
   });
 
-  it("resumes a previously approved action even when current time is past expiresAt", async () => {
+  it("resumes an approved action even when the user clicked after expiresAt", async () => {
     const deleteAction = {
       type: "tool_call",
       tool: "delete_files",
@@ -762,7 +837,7 @@ describe("Application runtime adapter", () => {
       ...fake.approvals[0],
       decision: "approved",
       expiresAt: "2000-01-01T00:10:00.000Z",
-      resolvedAt: "2000-01-01T00:01:00.000Z",
+      resolvedAt: "2000-01-01T00:11:00.000Z",
     };
     fake.actions = [{ type: "finish_candidate", summary: "Deleted old component" }];
     fake.verificationStatuses = ["passed", "passed"];
@@ -1345,6 +1420,100 @@ describe("Application runtime adapter", () => {
     expect(fake.toolNames).toEqual(["get_site_spec"]);
   });
 
+  it("injects compact Spec context into agent task planning", async () => {
+    const spec = createRuntimeSpec();
+    const revision = spec.revisions[0];
+    const task = revision.tasks[0];
+    const store = createFakeStore();
+    (store as unknown as { set: (patch: Record<string, unknown>) => void }).set({
+      currentConversation: {
+        activeSpecId: spec.id,
+        id: spec.conversationId,
+        messages: [],
+        mode: "spec",
+        specIds: [spec.id],
+      },
+      currentSpec: spec,
+    });
+    const project = (store as unknown as { get: () => { currentProject: ProjectInfo } })
+      .get()
+      .currentProject;
+    fake.actions = [{ type: "finish_candidate", summary: "Spec task done" }];
+    fake.verificationStatuses = ["passed"];
+
+    await runSpecTaskRuntime({
+      contract: compileSpecTaskContract({
+        executionMode: "modify",
+        revision,
+        spec,
+        task,
+      }),
+      conversationId: spec.conversationId,
+      executionMode: "modify",
+      project,
+      runId: "run-spec-context",
+      store: store as never,
+      taskObjective: task.objective,
+    });
+
+    const context = fake.modelContexts[0] as AgentStepContext;
+
+    expect(context.specContext?.currentTask.id).toBe(task.id);
+    expect(context.specContext?.requirements[0]?.description).toContain("join a poker room");
+    expect(context.specContext?.acceptanceCriteria[0]?.description).toContain("Realtime");
+    expect(context.specContext?.design.dataModel).toContain("rooms, room_players, game_states");
+    expect(context.specContext?.design.integrations).toContain("Supabase Realtime");
+  });
+
+  it("forwards read snapshots from runtime checkpoints into the production verifier", async () => {
+    const spec = createRuntimeSpec();
+    const revision = spec.revisions[0];
+    const task = revision.tasks[0];
+    const store = createFakeStore();
+    const project = (store as unknown as { get: () => { currentProject: ProjectInfo } })
+      .get()
+      .currentProject;
+    fake.actions = [
+      {
+        type: "tool_call",
+        tool: "read_files",
+        rationale: "Inspect expected file",
+        args: { paths: ["app/api/rooms/route.ts"] },
+      },
+      {
+        type: "tool_call",
+        tool: "read_files",
+        rationale: "Should not be needed after auto verification",
+        args: { paths: ["app/api/rooms/route.ts"] },
+      },
+    ];
+    fake.verificationStatuses = ["passed"];
+
+    const result = await runSpecTaskRuntime({
+      contract: compileSpecTaskContract({
+        executionMode: "modify",
+        revision,
+        spec,
+        task,
+      }),
+      conversationId: spec.conversationId,
+      executionMode: "modify",
+      project,
+      runId: "run-read-snapshot-verifier-forwarding",
+      store: store as never,
+      taskObjective: task.objective,
+    });
+
+    const verifierInput = fake.verifierInputs[0] as {
+      readSnapshots?: Array<{ path: string }>;
+    };
+
+    expect(result.run?.status).toBe("completed");
+    expect(fake.toolNames).toEqual(["read_files"]);
+    expect(verifierInput.readSnapshots?.map((snapshot) => snapshot.path))
+      .toEqual(["app/api/rooms/route.ts"]);
+  });
+
   it("enforces maxToolCalls in the production adapter path", async () => {
     const run = createExistingRun("run-tool-budget", {
       contract: lowBudgetContract({ maxToolCalls: 0 }),
@@ -1401,6 +1570,30 @@ describe("Application runtime adapter", () => {
     expect(fake.toolNames).toEqual([]);
   });
 
+  it("classifies LLM context budget errors as budget_exceeded", async () => {
+    fake.actions = [
+      new LlmClientError(
+        "context_budget",
+        "Fake AI request exceeded the model context length.",
+      ),
+    ];
+
+    const result = await modifyCurrentProjectRuntime(
+      createFakeStore(),
+      "Fix the project",
+    );
+    const persisted = [...fake.runs.values()][0];
+    const terminalEvent = fake.events.find((event) => event.type === "run.budget_exceeded");
+
+    expect(result).toBe(false);
+    expect(persisted?.status).toBe("budget_exceeded");
+    expect(terminalEvent?.payload).toMatchObject({
+      failureKind: "context_budget",
+      reason: expect.stringContaining("context length"),
+    });
+    expect(fake.failedMessages[0]).toContain("context length");
+  });
+
   it("surfaces same-project second write run rejection", async () => {
     fake.rejectNextCreateRun = true;
     fake.actions = [{ type: "answer", message: "Should not run" }];
@@ -1447,6 +1640,68 @@ function persistRunPatch(runId: string, patch: Partial<AgentRun>) {
     stateVersion: run.stateVersion + 1,
     updatedAt: "2026-01-01T00:00:01.000Z",
   });
+}
+
+function createRuntimeSpec(): DevelopmentSpec {
+  return {
+    conversationId: "conversation-1",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    currentRevisionId: "revision-1",
+    id: "spec-1",
+    kind: "initial_build",
+    projectId: "project-1",
+    revisions: [
+      {
+        brief: "Build an online poker game.",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        design: {
+          components: [],
+          dataModel: ["rooms, room_players, game_states"],
+          integrations: ["Supabase Realtime"],
+          pages: [],
+          summary: "Use Supabase for realtime multiplayer state.",
+          technicalDecisions: ["Server writes go through App Router API routes."],
+          verificationStrategy: ["Run build after backend wiring."],
+        },
+        id: "revision-1",
+        requirements: {
+          acceptanceCriteria: [
+            {
+              description: "Realtime room state is persisted and broadcast.",
+              id: "criterion-1",
+              required: true,
+            },
+          ],
+          constraints: [],
+          goal: "Players can play online poker together.",
+          outOfScope: [],
+          unresolvedQuestions: [],
+          userStories: [
+            {
+              description: "As a player, I can join a poker room.",
+              id: "story-1",
+            },
+          ],
+        },
+        tasks: [
+          {
+            acceptanceCriteriaIds: ["criterion-1"],
+            allowedPaths: ["app/**", "lib/**"],
+            dependencyIds: [],
+            expectedFiles: ["app/api/rooms/route.ts"],
+            id: "task-1",
+            objective: "Create the realtime poker room backend.",
+            requirementIds: ["story-1"],
+            status: "pending",
+            title: "Realtime room backend",
+          },
+        ],
+        version: 1,
+      },
+    ],
+    status: "building",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
 }
 
 function createExistingRun(

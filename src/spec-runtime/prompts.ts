@@ -38,11 +38,17 @@ const SPEC_RESPONSE_SHAPE = `{
   }]
 }`;
 
+const SPEC_ANSWER_RESPONSE_SHAPE = `{
+  "answer": "string"
+}`;
+
 export function buildInitialSpecMessages({
+  backendContext,
   policy = DEFAULT_PROJECT_POLICY,
   projectBrief,
   projectName,
 }: {
+  backendContext?: unknown;
   policy?: ProjectPolicy;
   projectBrief: string;
   projectName: string;
@@ -51,6 +57,7 @@ export function buildInitialSpecMessages({
     policy,
     task: "Create the Initial Build Spec for a new Next.js App Router project.",
     payload: {
+      backendContext,
       fixedStack: policy.preferredStackInstruction,
       projectBrief,
       projectName,
@@ -90,10 +97,12 @@ export function buildFeatureSpecMessages({
 export function buildSpecRevisionMessages({
   currentRevision,
   feedback,
+  planningContext,
   policy = DEFAULT_PROJECT_POLICY,
 }: {
   currentRevision: unknown;
   feedback: string;
+  planningContext?: unknown;
   policy?: ProjectPolicy;
 }): LlmChatMessage[] {
   return buildSpecMessages({
@@ -102,6 +111,7 @@ export function buildSpecRevisionMessages({
     payload: {
       currentRevision,
       feedback,
+      planningContext,
       requirements: [
         "Return a complete replacement revision payload.",
         "Do not mutate or omit accepted constraints unless feedback requires it.",
@@ -109,6 +119,48 @@ export function buildSpecRevisionMessages({
       ],
     },
   });
+}
+
+export function buildSpecQuestionMessages({
+  conversationMessages = [],
+  currentRevision,
+  planningContext,
+  question,
+}: {
+  conversationMessages?: unknown[];
+  currentRevision: unknown;
+  planningContext?: unknown;
+  question: string;
+}): LlmChatMessage[] {
+  return [
+    {
+      role: "system",
+      content: [
+        "You are the Spec Coding reviewer for nocodeBuilder.",
+        "Return JSON only. Do not output Markdown, prose, comments, or code fences.",
+        `The response shape must strictly match: ${SPEC_ANSWER_RESPONSE_SHAPE}`,
+        ...formatUserLanguageInstruction("The answer"),
+        "Answer questions about the current Spec revision without changing it.",
+        "Explain the rationale, tradeoffs, risks, and implementation implications when asked.",
+        "If the user asks for a change, explain that Request revision creates the edited Spec and include concise suggested revision feedback they can use.",
+        "Use planningContext when present, especially backend and Supabase configuration status.",
+        "If Supabase is configured and the Spec chose an in-memory or custom WebSocket backend for multiplayer, realtime, persistence, rooms, or server-managed state, call out that mismatch and recommend a Supabase-backed revision.",
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: JSON.stringify(
+        {
+          conversationMessages,
+          currentRevision,
+          planningContext,
+          question,
+        },
+        null,
+        2,
+      ),
+    },
+  ];
 }
 
 function buildSpecMessages({
@@ -130,6 +182,11 @@ function buildSpecMessages({
         ...formatUserLanguageInstruction(
           "User-facing Spec fields such as brief, requirements, design text, task titles, task objectives, summaries, and unresolved questions",
         ),
+        "Use backendContext or planningContext when present.",
+        "If Supabase is configured and the user request implies backend, persistence, rooms, multiplayer, online play, realtime sync, or server-managed state, plan a Supabase-backed implementation.",
+        "For Supabase-backed features, use Next.js App Router route handlers under app/api/**/route.ts or server-only modules under lib/**, and Supabase Postgres or Realtime where appropriate.",
+        "Do not choose a custom WebSocket server or in-memory Map for multiplayer/server state when Supabase is configured unless the user explicitly requests that architecture.",
+        "If Supabase is not configured but backend behavior is required, make the backend readiness and required env variables explicit; do not pretend mock or in-memory data is durable.",
         "Every required acceptance criterion must be covered by at least one task.",
         "Every task must include at least one acceptanceCriteriaIds entry that references an existing acceptance criterion.",
         "Do not create implementation-only tasks with an empty acceptanceCriteriaIds array; attach setup, dependency, styling, verification, or support work to the acceptance criterion it enables.",

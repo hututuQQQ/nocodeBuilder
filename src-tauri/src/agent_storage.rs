@@ -1104,7 +1104,7 @@ async fn list_agent_approvals_with_pool(
 async fn get_pending_agent_approval_with_pool(
     pool: &SqlitePool,
     run_id: &str,
-    now: &str,
+    _now: &str,
 ) -> Result<Option<AgentApprovalRecord>, String> {
     let row = sqlx::query(
         r#"
@@ -1112,13 +1112,11 @@ async fn get_pending_agent_approval_with_pool(
         WHERE run_id = ?1
           AND resolved_at IS NULL
           AND decision IS NULL
-          AND expires_at > ?2
         ORDER BY created_at ASC, id ASC
         LIMIT 1
         "#,
     )
     .bind(run_id)
-    .bind(now)
     .fetch_optional(pool)
     .await
     .map_err(|error| format!("agent-storage: failed to read pending approval: {error}"))?;
@@ -1145,14 +1143,10 @@ async fn resolve_agent_approval_with_pool(
     .fetch_optional(pool)
     .await
     .map_err(|error| format!("agent-storage: failed to read approval before resolve: {error}"))?;
-    let approval = existing
+    let _approval = existing
         .map(row_to_approval)
         .transpose()?
         .ok_or_else(|| "agent-storage: pending approval not found".to_string())?;
-
-    if resolution.decision != "expired" && approval.expires_at <= resolution.resolved_at {
-        return Err("agent-storage: expired approval cannot be approved or denied".to_string());
-    }
 
     let result = sqlx::query(
         r#"
@@ -2218,7 +2212,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_approval_resolution_after_expiry_except_expired_decision() {
+    fn allows_approval_resolution_after_expiry_until_user_decides() {
         tauri::async_runtime::block_on(async {
             let root =
                 std::env::temp_dir().join(format!("agent-storage-expired-{}", rand_suffix()));
@@ -2254,7 +2248,10 @@ mod tests {
                 },
             )
             .await;
-            assert!(approved.is_err(), "expired approvals must not be approved");
+            assert!(
+                approved.is_ok(),
+                "expired approvals should remain actionable until the user decides"
+            );
 
             create_agent_approval_with_pool(
                 &pool,
@@ -2283,9 +2280,12 @@ mod tests {
                 },
             )
             .await;
-            assert!(denied.is_err(), "expired approvals must not be denied");
+            assert!(
+                denied.is_ok(),
+                "expired approvals should remain deniable until the user decides"
+            );
 
-            let expired = resolve_agent_approval_with_pool(
+            let second_resolution = resolve_agent_approval_with_pool(
                 &pool,
                 AgentApprovalResolveInput {
                     run_id: "run-expired-approval".to_string(),
@@ -2294,10 +2294,12 @@ mod tests {
                     resolved_at: "2026-01-01T00:02:00Z".to_string(),
                 },
             )
-            .await
-            .expect("mark expired");
+            .await;
 
-            assert_eq!(expired.decision.as_deref(), Some("expired"));
+            assert!(
+                second_resolution.is_err(),
+                "resolved approvals must not accept a second decision"
+            );
 
             let _ = fs::remove_dir_all(root);
         });
