@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
-    io::ErrorKind,
+    io::{self, ErrorKind},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::UNIX_EPOCH,
@@ -9,26 +9,33 @@ use std::{
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::types::{SandboxError, SandboxErrorKind};
 
 const SANDBOX_DIR_NAME: &str = "nocodeBuilder";
+const DEPENDENCY_LAYER_DIR_NAME: &str = "dependency-layer";
 const MAX_WRITE_BACK_BYTES: u64 = 10 * 1024 * 1024;
 const SOURCE_MANIFEST_VERSION: u32 = 1;
+const DEPENDENCY_FINGERPRINT_VERSION: u32 = 1;
 const WRITE_BACK_FILES: [&str; 3] = ["package-lock.json", "pnpm-lock.yaml", "next-env.d.ts"];
+const DEPENDENCY_INPUT_FILES: [&str; 3] = ["package.json", "package-lock.json", "pnpm-lock.yaml"];
 
 #[derive(Clone, Debug)]
 pub struct SandboxWorkspace {
     pub project_id: String,
     pub kind: SandboxWorkspaceKind,
     pub workspace_root: PathBuf,
+    pub dependency_root: PathBuf,
     pub cache_root: PathBuf,
     pub tmp_root: PathBuf,
     pub source_manifest_path: PathBuf,
+    pub dependency_fingerprint_path: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SandboxWorkspaceKind {
+    Install,
     Run,
     DevServer,
 }
@@ -47,10 +54,53 @@ struct SourceFileSnapshot {
     modified_millis: Option<u64>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DependencyFingerprint {
+    version: u32,
+    package_manager: String,
+    managed_node_version: String,
+    files: BTreeMap<String, Option<String>>,
+}
+
+#[derive(Clone, Debug)]
+struct SandboxProjectPaths {
+    dependency_root: PathBuf,
+    dependency_fingerprint_path: PathBuf,
+}
+
+impl SandboxProjectPaths {
+    fn resolve(project_id: &str) -> Result<Self, SandboxError> {
+        validate_project_id(project_id)?;
+        let sandbox_root = sandbox_root_dir()?;
+        fs::create_dir_all(&sandbox_root)?;
+        let sandbox_root = sandbox_root.canonicalize()?;
+
+        Ok(Self {
+            dependency_root: sandbox_root
+                .join("workspaces")
+                .join(project_id)
+                .join(DEPENDENCY_LAYER_DIR_NAME),
+            dependency_fingerprint_path: sandbox_root
+                .join("state")
+                .join(project_id)
+                .join("dependency-fingerprint.json"),
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct SandboxWorkspaceManager;
 
 impl SandboxWorkspaceManager {
+    pub fn prepare_install(
+        &self,
+        project_id: &str,
+        project_dir: &Path,
+    ) -> Result<SandboxWorkspace, SandboxError> {
+        self.prepare_workspace(project_id, project_dir, SandboxWorkspaceKind::Install)
+    }
+
     pub fn prepare_run(
         &self,
         project_id: &str,
@@ -77,24 +127,28 @@ impl SandboxWorkspaceManager {
         let sandbox_root = sandbox_root_dir()?;
         fs::create_dir_all(&sandbox_root)?;
         let sandbox_root = sandbox_root.canonicalize()?;
+        let project_workspace_root = sandbox_root.join("workspaces").join(project_id);
+        let dependency_root = project_workspace_root.join(DEPENDENCY_LAYER_DIR_NAME);
         let run_id = unique_workspace_id(match kind {
+            SandboxWorkspaceKind::Install => "install",
             SandboxWorkspaceKind::Run => "run",
             SandboxWorkspaceKind::DevServer => "dev",
         });
-        let workspace_root = sandbox_root
-            .join("workspaces")
-            .join(project_id)
-            .join(match kind {
-                SandboxWorkspaceKind::Run => "runs",
-                SandboxWorkspaceKind::DevServer => "dev",
-            })
-            .join(&run_id);
+        let workspace_root = match kind {
+            SandboxWorkspaceKind::Install => dependency_root.clone(),
+            SandboxWorkspaceKind::Run => dependency_root.join("runs").join(&run_id),
+            SandboxWorkspaceKind::DevServer => dependency_root.join("dev").join(&run_id),
+        };
         let cache_root = sandbox_root.join("cache").join(project_id);
         let tmp_root = sandbox_root.join("tmp").join(project_id).join(&run_id);
         let state_root = sandbox_root.join("state").join(project_id);
         let source_manifest_path = state_root.join(format!("{run_id}-source-manifest.json"));
+        let dependency_fingerprint_path = state_root.join("dependency-fingerprint.json");
 
-        remove_child_dir_if_exists(&sandbox_root, &workspace_root)?;
+        if kind != SandboxWorkspaceKind::Install {
+            remove_child_dir_if_exists(&sandbox_root, &workspace_root)?;
+        }
+        fs::create_dir_all(&dependency_root)?;
         fs::create_dir_all(&workspace_root)?;
         fs::create_dir_all(&cache_root)?;
         fs::create_dir_all(&tmp_root)?;
@@ -104,13 +158,37 @@ impl SandboxWorkspaceManager {
             project_id: project_id.to_string(),
             kind,
             workspace_root,
+            dependency_root,
             cache_root,
             tmp_root,
             source_manifest_path,
+            dependency_fingerprint_path,
         };
-        workspace.sync_source_changes_from(project_dir)?;
+        match kind {
+            SandboxWorkspaceKind::Install => workspace.sync_dependency_inputs_from(project_dir)?,
+            SandboxWorkspaceKind::Run | SandboxWorkspaceKind::DevServer => {
+                workspace.sync_source_changes_from(project_dir)?;
+            }
+        }
 
         Ok(workspace)
+    }
+
+    pub fn ensure_dependency_layer_current(
+        &self,
+        project_id: &str,
+        project_dir: &Path,
+        package_manager: &str,
+        managed_node_version: &str,
+    ) -> Result<(), SandboxError> {
+        let paths = SandboxProjectPaths::resolve(project_id)?;
+        ensure_dependency_layer_current(
+            &paths.dependency_root,
+            &paths.dependency_fingerprint_path,
+            project_dir,
+            package_manager,
+            managed_node_version,
+        )
     }
 
     pub fn reset_project(&self, project_id: &str) -> Result<(), SandboxError> {
@@ -164,6 +242,33 @@ impl SandboxWorkspace {
         )
     }
 
+    pub fn sync_dependency_inputs_from(&self, project_dir: &Path) -> Result<(), SandboxError> {
+        sync_dependency_inputs_to_layer(project_dir, &self.dependency_root)
+    }
+
+    pub fn mark_dependency_layer_current(
+        &self,
+        project_dir: &Path,
+        package_manager: &str,
+        managed_node_version: &str,
+    ) -> Result<(), SandboxError> {
+        mark_dependency_layer_current(
+            &self.dependency_root,
+            &self.dependency_fingerprint_path,
+            project_dir,
+            package_manager,
+            managed_node_version,
+        )
+    }
+
+    pub fn dependency_node_modules(&self) -> PathBuf {
+        self.dependency_root.join("node_modules")
+    }
+
+    pub fn dependency_node_bin(&self) -> PathBuf {
+        self.dependency_node_modules().join(".bin")
+    }
+
     pub fn write_back_allowed_outputs(
         &self,
         project_dir: &Path,
@@ -199,7 +304,7 @@ impl SandboxWorkspace {
             fs::create_dir_all(parent)?;
             ensure_child_path(&project_dir.canonicalize()?, &parent.canonicalize()?)?;
 
-            fs::copy(&source, &target)?;
+            write_back_file_atomically(&source, &target, relative)?;
             written.push(relative.to_string());
         }
 
@@ -212,6 +317,218 @@ pub fn sync_project_to_workspace(
     workspace_root: &Path,
 ) -> Result<(), SandboxError> {
     sync_project_to_workspace_with_manifest(project_dir, workspace_root, None)
+}
+
+fn sync_dependency_inputs_to_layer(
+    project_dir: &Path,
+    dependency_root: &Path,
+) -> Result<(), SandboxError> {
+    let project_dir = project_dir.canonicalize()?;
+    ensure_safe_directory(dependency_root)?;
+    let dependency_root = dependency_root.canonicalize()?;
+
+    for relative in DEPENDENCY_INPUT_FILES {
+        let source = project_dir.join(relative);
+        let destination = dependency_root.join(relative);
+
+        match fs::symlink_metadata(&source) {
+            Ok(metadata) => {
+                if is_forbidden_link(&metadata) {
+                    return Err(SandboxError::policy_denied(format!(
+                        "refusing to copy linked or reparse-point dependency input '{relative}'"
+                    )));
+                }
+
+                if !metadata.is_file() {
+                    return Err(SandboxError::policy_denied(format!(
+                        "refusing to copy non-file dependency input '{relative}'"
+                    )));
+                }
+
+                let canonical_source = source.canonicalize()?;
+                ensure_child_path(&project_dir, &canonical_source)?;
+                inspect_destination_file(&destination)?;
+                fs::copy(&source, &destination)?;
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                remove_dependency_input_if_present(&destination)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Ok(())
+}
+
+fn remove_dependency_input_if_present(path: &Path) -> Result<(), SandboxError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+
+    if is_forbidden_link(&metadata) || !metadata.is_file() {
+        return Err(SandboxError::policy_denied(format!(
+            "refusing to remove unsafe dependency input '{}'",
+            path.display()
+        )));
+    }
+
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+fn mark_dependency_layer_current(
+    dependency_root: &Path,
+    fingerprint_path: &Path,
+    project_dir: &Path,
+    package_manager: &str,
+    managed_node_version: &str,
+) -> Result<(), SandboxError> {
+    ensure_dependency_node_modules_is_directory(dependency_root)?;
+    let fingerprint = dependency_fingerprint(project_dir, package_manager, managed_node_version)?;
+    save_dependency_fingerprint(fingerprint_path, &fingerprint)
+}
+
+fn ensure_dependency_layer_current(
+    dependency_root: &Path,
+    fingerprint_path: &Path,
+    project_dir: &Path,
+    package_manager: &str,
+    managed_node_version: &str,
+) -> Result<(), SandboxError> {
+    ensure_dependency_node_modules_is_directory(dependency_root)?;
+    let expected = dependency_fingerprint(project_dir, package_manager, managed_node_version)?;
+    let actual = load_dependency_fingerprint(fingerprint_path)?;
+
+    if actual == expected {
+        return Ok(());
+    }
+
+    Err(stale_dependency_layer_error(package_manager))
+}
+
+fn ensure_dependency_node_modules_is_directory(dependency_root: &Path) -> Result<(), SandboxError> {
+    let node_modules = dependency_root.join("node_modules");
+    let metadata = match fs::symlink_metadata(&node_modules) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Err(missing_dependency_layer_error())
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    if is_forbidden_link(&metadata) {
+        return Err(SandboxError::policy_denied(format!(
+            "sandbox dependency layer node_modules '{}' is a link or reparse point",
+            node_modules.display()
+        )));
+    }
+
+    if metadata.is_dir() {
+        Ok(())
+    } else {
+        Err(SandboxError::policy_denied(format!(
+            "sandbox dependency layer node_modules '{}' is not a directory",
+            node_modules.display()
+        )))
+    }
+}
+
+fn dependency_fingerprint(
+    project_dir: &Path,
+    package_manager: &str,
+    managed_node_version: &str,
+) -> Result<DependencyFingerprint, SandboxError> {
+    let mut files = BTreeMap::new();
+
+    for relative in DEPENDENCY_INPUT_FILES {
+        files.insert(
+            relative.to_string(),
+            dependency_input_hash(project_dir, relative)?,
+        );
+    }
+
+    Ok(DependencyFingerprint {
+        version: DEPENDENCY_FINGERPRINT_VERSION,
+        package_manager: package_manager.to_string(),
+        managed_node_version: managed_node_version.to_string(),
+        files,
+    })
+}
+
+fn dependency_input_hash(
+    project_dir: &Path,
+    relative: &str,
+) -> Result<Option<String>, SandboxError> {
+    let path = project_dir.join(relative);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+
+    if is_forbidden_link(&metadata) || !metadata.is_file() {
+        return Err(SandboxError::policy_denied(format!(
+            "refusing to fingerprint unsafe dependency input '{relative}'"
+        )));
+    }
+
+    let content = fs::read(path)?;
+    let mut hasher = Sha256::new();
+    hasher.update(content);
+    Ok(Some(format!("{:x}", hasher.finalize())))
+}
+
+fn load_dependency_fingerprint(path: &Path) -> Result<DependencyFingerprint, SandboxError> {
+    let content = fs::read(path).map_err(|error| {
+        if error.kind() == ErrorKind::NotFound {
+            missing_dependency_layer_error()
+        } else {
+            error.into()
+        }
+    })?;
+    let fingerprint: DependencyFingerprint = serde_json::from_slice(&content).map_err(|error| {
+        SandboxError::policy_denied(format!("invalid sandbox dependency fingerprint: {error}"))
+    })?;
+
+    if fingerprint.version != DEPENDENCY_FINGERPRINT_VERSION {
+        return Err(stale_dependency_layer_error(&fingerprint.package_manager));
+    }
+
+    Ok(fingerprint)
+}
+
+fn save_dependency_fingerprint(
+    path: &Path,
+    fingerprint: &DependencyFingerprint,
+) -> Result<(), SandboxError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| SandboxError::policy_denied("invalid dependency fingerprint path"))?;
+    fs::create_dir_all(parent)?;
+    let temp_path = path.with_extension("json.tmp");
+    let content = serde_json::to_vec(fingerprint).map_err(|error| {
+        SandboxError::unavailable(format!(
+            "failed to serialize dependency fingerprint: {error}"
+        ))
+    })?;
+
+    fs::write(&temp_path, content)?;
+    replace_file(&temp_path, path)?;
+    Ok(())
+}
+
+fn missing_dependency_layer_error() -> SandboxError {
+    SandboxError::policy_denied(
+        "sandbox dependency layer is missing; run npm install or pnpm install before build/dev/test/lint",
+    )
+}
+
+fn stale_dependency_layer_error(package_manager: &str) -> SandboxError {
+    SandboxError::policy_denied(format!(
+        "sandbox dependency layer is stale; run {package_manager} install before build/dev/test/lint"
+    ))
 }
 
 fn sync_project_to_workspace_with_manifest(
@@ -354,6 +671,88 @@ fn save_source_manifest(path: &Path, manifest: &SourceManifest) -> Result<(), Sa
         fs::remove_file(path)?;
     }
     fs::rename(temp_path, path)?;
+    Ok(())
+}
+
+fn write_back_file_atomically(
+    source: &Path,
+    target: &Path,
+    relative: &str,
+) -> Result<(), SandboxError> {
+    reject_unsafe_write_back_target(target, relative)?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| SandboxError::policy_denied("invalid write-back target"))?;
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| SandboxError::policy_denied("invalid write-back target"))?
+        .to_string_lossy();
+    let temp_path = parent.join(format!(
+        ".{file_name}.ncb-write-{}-{}.tmp",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+
+    copy_to_new_regular_file(source, &temp_path)?;
+    reject_unsafe_write_back_target(target, relative)?;
+    replace_file(&temp_path, target).map_err(|error| {
+        let _ = fs::remove_file(&temp_path);
+        error
+    })
+}
+
+fn reject_unsafe_write_back_target(target: &Path, relative: &str) -> Result<(), SandboxError> {
+    let metadata = match fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+
+    if is_forbidden_link(&metadata) {
+        return Err(SandboxError::policy_denied(format!(
+            "refusing to write back '{relative}' through a symlink or reparse point"
+        )));
+    }
+
+    if metadata.is_file() {
+        return Ok(());
+    }
+
+    Err(SandboxError::policy_denied(format!(
+        "refusing to write back '{relative}' over a non-file target"
+    )))
+}
+
+fn copy_to_new_regular_file(source: &Path, destination: &Path) -> Result<(), SandboxError> {
+    let mut input = fs::File::open(source)?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    io::copy(&mut input, &mut output)?;
+    output.sync_all()?;
+    Ok(())
+}
+
+fn replace_file(source: &Path, target: &Path) -> Result<(), SandboxError> {
+    #[cfg(target_os = "windows")]
+    {
+        match fs::symlink_metadata(target) {
+            Ok(metadata) => {
+                if is_forbidden_link(&metadata) || !metadata.is_file() {
+                    return Err(SandboxError::policy_denied(format!(
+                        "refusing to replace unsafe target '{}'",
+                        target.display()
+                    )));
+                }
+                fs::remove_file(target)?;
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    fs::rename(source, target)?;
     Ok(())
 }
 
@@ -805,9 +1204,11 @@ mod tests {
             project_id: "test".to_string(),
             kind: SandboxWorkspaceKind::DevServer,
             workspace_root: workspace_root.clone(),
+            dependency_root: root.join("dependency-layer"),
             cache_root: root.join("cache"),
             tmp_root: root.join("tmp"),
             source_manifest_path: state.join("source-manifest.json"),
+            dependency_fingerprint_path: state.join("dependency-fingerprint.json"),
         };
 
         workspace.sync_source_changes_from(&project).unwrap();
@@ -877,9 +1278,11 @@ mod tests {
             project_id: "test".to_string(),
             kind: SandboxWorkspaceKind::Run,
             workspace_root,
+            dependency_root: root.join("dependency-layer"),
             cache_root: root.join("cache"),
             tmp_root: root.join("tmp"),
             source_manifest_path: root.join("state").join("source-manifest.json"),
+            dependency_fingerprint_path: root.join("state").join("dependency-fingerprint.json"),
         };
 
         let written = workspace.write_back_allowed_outputs(&project).unwrap();
@@ -934,9 +1337,11 @@ mod tests {
             project_id: "test".to_string(),
             kind: SandboxWorkspaceKind::Run,
             workspace_root,
+            dependency_root: root.join("dependency-layer"),
             cache_root: root.join("cache"),
             tmp_root: root.join("tmp"),
             source_manifest_path: root.join("state").join("source-manifest.json"),
+            dependency_fingerprint_path: root.join("state").join("dependency-fingerprint.json"),
         };
 
         let error = workspace
@@ -949,6 +1354,100 @@ mod tests {
             fs::read_to_string(project.join("package-lock.json")).unwrap(),
             "real lock"
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_back_rejects_project_symlink_target_without_modifying_link_destination() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "ncb-sandbox-write-back-symlink-test-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let project = root.join("project");
+        let workspace_root = root.join("workspace");
+        let outside = root.join("outside-lock.json");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&workspace_root).unwrap();
+        fs::write(&outside, "outside lock").unwrap();
+        symlink(&outside, project.join("package-lock.json")).unwrap();
+        fs::write(workspace_root.join("package-lock.json"), "sandbox lock").unwrap();
+
+        let workspace = SandboxWorkspace {
+            project_id: "test".to_string(),
+            kind: SandboxWorkspaceKind::Run,
+            workspace_root,
+            dependency_root: root.join("dependency-layer"),
+            cache_root: root.join("cache"),
+            tmp_root: root.join("tmp"),
+            source_manifest_path: root.join("state").join("source-manifest.json"),
+            dependency_fingerprint_path: root.join("state").join("dependency-fingerprint.json"),
+        };
+
+        let error = workspace
+            .write_back_allowed_outputs(&project)
+            .expect_err("symlink write-back target should be rejected");
+
+        assert_eq!(error.kind, SandboxErrorKind::PolicyDenied);
+        assert!(error.message.contains("symlink") || error.message.contains("reparse"));
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "outside lock");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn write_back_rejects_windows_reparse_target_when_symlink_creation_is_available() {
+        use std::os::windows::fs::symlink_file;
+
+        let root = std::env::temp_dir().join(format!(
+            "ncb-sandbox-write-back-reparse-test-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let project = root.join("project");
+        let workspace_root = root.join("workspace");
+        let outside = root.join("outside-lock.json");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&workspace_root).unwrap();
+        fs::write(&outside, "outside lock").unwrap();
+
+        match symlink_file(&outside, project.join("package-lock.json")) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::PermissionDenied | ErrorKind::Unsupported
+                ) || error.raw_os_error() == Some(1314) =>
+            {
+                let _ = fs::remove_dir_all(root);
+                return;
+            }
+            Err(error) => panic!("unexpected symlink creation error: {error}"),
+        }
+
+        fs::write(workspace_root.join("package-lock.json"), "sandbox lock").unwrap();
+
+        let workspace = SandboxWorkspace {
+            project_id: "test".to_string(),
+            kind: SandboxWorkspaceKind::Run,
+            workspace_root,
+            dependency_root: root.join("dependency-layer"),
+            cache_root: root.join("cache"),
+            tmp_root: root.join("tmp"),
+            source_manifest_path: root.join("state").join("source-manifest.json"),
+            dependency_fingerprint_path: root.join("state").join("dependency-fingerprint.json"),
+        };
+
+        let error = workspace
+            .write_back_allowed_outputs(&project)
+            .expect_err("Windows reparse-point write-back target should be rejected");
+
+        assert_eq!(error.kind, SandboxErrorKind::PolicyDenied);
+        assert!(error.message.contains("symlink") || error.message.contains("reparse"));
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "outside lock");
 
         let _ = fs::remove_dir_all(root);
     }
@@ -969,11 +1468,13 @@ mod tests {
             assert_ne!(dev_workspace.workspace_root, run_workspace.workspace_root);
             assert!(dev_workspace.workspace_root.ends_with(
                 Path::new("project1")
+                    .join(DEPENDENCY_LAYER_DIR_NAME)
                     .join("dev")
                     .join(dev_workspace.workspace_root.file_name().unwrap())
             ));
             assert!(run_workspace.workspace_root.ends_with(
                 Path::new("project1")
+                    .join(DEPENDENCY_LAYER_DIR_NAME)
                     .join("runs")
                     .join(run_workspace.workspace_root.file_name().unwrap())
             ));
@@ -1012,6 +1513,122 @@ mod tests {
 
             first.cleanup_after_command();
             second.cleanup_after_command();
+        });
+    }
+
+    #[test]
+    fn install_dependency_layer_survives_command_cleanup() {
+        with_sandbox_root("ncb-sandbox-dependency-persist", |sandbox_root| {
+            let project = sandbox_root.join("real-project");
+            fs::create_dir_all(&project).unwrap();
+            fs::write(project.join("package.json"), "{\"scripts\":{}}").unwrap();
+
+            let manager = SandboxWorkspaceManager::default();
+            let workspace = manager.prepare_install("project1", &project).unwrap();
+            fs::create_dir_all(workspace.dependency_node_bin()).unwrap();
+            fs::write(workspace.dependency_node_bin().join("vite"), "").unwrap();
+            let dependency_root = workspace.dependency_root.clone();
+
+            workspace.cleanup_after_command();
+
+            assert!(dependency_root.join("node_modules").is_dir());
+            assert!(dependency_root
+                .join("node_modules")
+                .join(".bin")
+                .join("vite")
+                .is_file());
+        });
+    }
+
+    #[test]
+    fn dependency_layer_missing_fails_closed() {
+        with_sandbox_root("ncb-sandbox-dependency-missing", |sandbox_root| {
+            let project = sandbox_root.join("real-project");
+            fs::create_dir_all(&project).unwrap();
+            fs::write(project.join("package.json"), "{\"scripts\":{}}").unwrap();
+
+            let manager = SandboxWorkspaceManager::default();
+            let error = manager
+                .ensure_dependency_layer_current("project1", &project, "npm", "v-test")
+                .expect_err("missing dependency layer should fail");
+
+            assert_eq!(error.kind, SandboxErrorKind::PolicyDenied);
+            assert!(error.message.contains("dependency layer is missing"));
+        });
+    }
+
+    #[test]
+    fn dependency_fingerprint_changes_when_package_inputs_change() {
+        with_sandbox_root("ncb-sandbox-dependency-stale", |sandbox_root| {
+            let project = sandbox_root.join("real-project");
+            fs::create_dir_all(&project).unwrap();
+            fs::write(project.join("package.json"), "{\"dependencies\":{}}").unwrap();
+
+            let manager = SandboxWorkspaceManager::default();
+            let workspace = manager.prepare_install("project1", &project).unwrap();
+            fs::create_dir_all(workspace.dependency_node_modules()).unwrap();
+            workspace
+                .mark_dependency_layer_current(&project, "npm", "v-test")
+                .unwrap();
+
+            manager
+                .ensure_dependency_layer_current("project1", &project, "npm", "v-test")
+                .unwrap();
+
+            fs::write(
+                project.join("package.json"),
+                "{\"dependencies\":{\"left-pad\":\"1.3.0\"}}",
+            )
+            .unwrap();
+            let error = manager
+                .ensure_dependency_layer_current("project1", &project, "npm", "v-test")
+                .expect_err("changed package.json should stale dependency layer");
+
+            assert_eq!(error.kind, SandboxErrorKind::PolicyDenied);
+            assert!(error.message.contains("dependency layer is stale"));
+        });
+    }
+
+    #[test]
+    fn dependency_fingerprint_changes_when_lockfile_changes() {
+        with_sandbox_root("ncb-sandbox-dependency-lock-stale", |sandbox_root| {
+            let project = sandbox_root.join("real-project");
+            fs::create_dir_all(&project).unwrap();
+            fs::write(project.join("package.json"), "{\"dependencies\":{}}").unwrap();
+            fs::write(project.join("package-lock.json"), "{\"lockfileVersion\":3}").unwrap();
+
+            let manager = SandboxWorkspaceManager::default();
+            let workspace = manager.prepare_install("project1", &project).unwrap();
+            fs::create_dir_all(workspace.dependency_node_modules()).unwrap();
+            workspace
+                .mark_dependency_layer_current(&project, "npm", "v-test")
+                .unwrap();
+
+            fs::write(project.join("package-lock.json"), "{\"lockfileVersion\":4}").unwrap();
+            let error = manager
+                .ensure_dependency_layer_current("project1", &project, "npm", "v-test")
+                .expect_err("changed lockfile should stale dependency layer");
+
+            assert_eq!(error.kind, SandboxErrorKind::PolicyDenied);
+            assert!(error.message.contains("dependency layer is stale"));
+        });
+    }
+
+    #[test]
+    fn reset_project_removes_dependency_layer() {
+        with_sandbox_root("ncb-sandbox-dependency-reset", |sandbox_root| {
+            let project = sandbox_root.join("real-project");
+            fs::create_dir_all(&project).unwrap();
+            fs::write(project.join("package.json"), "{\"scripts\":{}}").unwrap();
+
+            let manager = SandboxWorkspaceManager::default();
+            let workspace = manager.prepare_install("project1", &project).unwrap();
+            fs::create_dir_all(workspace.dependency_node_modules()).unwrap();
+            let dependency_root = workspace.dependency_root.clone();
+
+            manager.reset_project("project1").unwrap();
+
+            assert!(!dependency_root.exists());
         });
     }
 

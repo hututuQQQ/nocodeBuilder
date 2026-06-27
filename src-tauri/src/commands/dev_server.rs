@@ -22,7 +22,10 @@ use crate::{
 
 use super::{
     command_whitelist::preferred_dev_command,
-    events::{emit_output_line, emit_status, spawn_output_reader},
+    events::{
+        emit_output_line, emit_status, output_event_budget, spawn_output_reader,
+        DEFAULT_EVENT_OUTPUT_BYTES, DEFAULT_MAX_OUTPUT_LINE_BYTES,
+    },
     time::current_timestamp,
     types::DevServerInfo,
 };
@@ -134,6 +137,8 @@ pub fn start_dev_server(
         None,
     );
 
+    let event_budget = output_event_budget(DEFAULT_EVENT_OUTPUT_BYTES);
+
     if let Some(stdout) = stdout {
         spawn_output_reader(
             app.clone(),
@@ -145,6 +150,8 @@ pub fn start_dev_server(
             None,
             None,
             None,
+            Some(DEFAULT_MAX_OUTPUT_LINE_BYTES),
+            Some(event_budget.clone()),
             None,
         );
     }
@@ -160,6 +167,8 @@ pub fn start_dev_server(
             None,
             None,
             None,
+            Some(DEFAULT_MAX_OUTPUT_LINE_BYTES),
+            Some(event_budget.clone()),
             None,
         );
     }
@@ -650,9 +659,13 @@ mod tests {
                     project_id: project_id.clone(),
                     kind: crate::sandbox::SandboxWorkspaceKind::DevServer,
                     workspace_root: workspace_root.clone(),
+                    dependency_root: root.join("dependency-layer"),
                     cache_root: root.join("cache"),
                     tmp_root: tmp_root.clone(),
                     source_manifest_path: source_manifest_path.clone(),
+                    dependency_fingerprint_path: root
+                        .join("state")
+                        .join("dependency-fingerprint.json"),
                 },
                 source_sync: SourceSyncHandle {
                     shutdown: source_sync_shutdown.clone(),

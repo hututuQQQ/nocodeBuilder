@@ -59,7 +59,8 @@ struct NodeRuntimeManifestTarget {
     sha256: String,
 }
 
-pub fn resolve_package_manager_command(
+#[allow(dead_code)]
+pub fn resolve_package_manager_command_for_dev_tools(
     package_manager: &str,
     args: &[&str],
 ) -> Result<ResolvedCommand, String> {
@@ -76,7 +77,15 @@ pub fn resolve_package_manager_command(
         });
     }
 
-    let runtime = ensure_managed_node_runtime()?;
+    let runtime = ensure_managed_node_runtime_allowing_overrides()?;
+    runtime.package_manager_command(package_manager, args)
+}
+
+pub fn resolve_package_manager_command_for_sandbox(
+    package_manager: &str,
+    args: &[&str],
+) -> Result<ResolvedCommand, String> {
+    let runtime = ensure_strict_managed_node_runtime()?;
     runtime.package_manager_command(package_manager, args)
 }
 
@@ -94,7 +103,7 @@ pub fn resolve_npx_command(args: Vec<String>) -> Result<ResolvedCommand, String>
         });
     }
 
-    ensure_managed_node_runtime()?.npx_command(args)
+    ensure_managed_node_runtime_allowing_overrides()?.npx_command(args)
 }
 
 pub fn managed_node_version() -> Result<String, String> {
@@ -127,11 +136,15 @@ pub fn apply_runtime_environment(
     Ok(())
 }
 
-fn ensure_managed_node_runtime() -> Result<NodeRuntime, String> {
+fn ensure_managed_node_runtime_allowing_overrides() -> Result<NodeRuntime, String> {
     if let Some(configured_runtime) = configured_node_runtime()? {
         return Ok(configured_runtime);
     }
 
+    ensure_strict_managed_node_runtime()
+}
+
+fn ensure_strict_managed_node_runtime() -> Result<NodeRuntime, String> {
     let _guard = NODE_INSTALL_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -729,6 +742,8 @@ fn command_executable_name(command: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, OnceLock};
 
     #[test]
     fn rejects_unsafe_archive_paths() {
@@ -745,5 +760,123 @@ mod tests {
         assert!(manifest.targets.contains_key("win-arm64"));
         assert!(manifest.targets.contains_key("darwin-x64"));
         assert!(manifest.targets.contains_key("darwin-arm64"));
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn sandbox_resolver_ignores_host_override_and_arbitrary_node_dir() {
+        crate::test_support::with_env_lock(|| {
+            let root = unique_test_root("strict-resolver");
+            let runtime_parent = root.join("runtime");
+            let arbitrary_node = root.join("arbitrary-node");
+            create_fake_runtime(&runtime_parent);
+            create_fake_arbitrary_node_dir(&arbitrary_node);
+
+            let _host = EnvVarGuard::set(NODE_HOST_OVERRIDE_ENV, "1");
+            let _node_dir = EnvVarGuard::set_os(NODE_DIR_ENV, arbitrary_node.as_os_str());
+            let _runtime = EnvVarGuard::set_os(RUNTIME_DIR_ENV, runtime_parent.as_os_str());
+
+            let resolved =
+                resolve_package_manager_command_for_sandbox("npm", &["run", "build"]).unwrap();
+
+            assert!(resolved.executable.is_absolute());
+            assert!(resolved
+                .runtime_root
+                .starts_with(runtime_parent.join("node")));
+            assert!(!resolved.runtime_root.starts_with(&arbitrary_node));
+            assert_ne!(resolved.runtime_version, "host-override");
+
+            let _ = fs::remove_dir_all(root);
+        });
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn dev_tool_resolver_keeps_arbitrary_node_dir_override() {
+        crate::test_support::with_env_lock(|| {
+            let root = unique_test_root("dev-resolver");
+            let arbitrary_node = root.join("arbitrary-node");
+            create_fake_arbitrary_node_dir(&arbitrary_node);
+
+            let _node_dir = EnvVarGuard::set_os(NODE_DIR_ENV, arbitrary_node.as_os_str());
+
+            let resolved =
+                resolve_package_manager_command_for_dev_tools("npm", &["run", "build"]).unwrap();
+
+            assert_eq!(resolved.runtime_root, arbitrary_node);
+
+            let _ = fs::remove_dir_all(root);
+        });
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    fn create_fake_runtime(runtime_parent: &Path) {
+        let manifest = runtime_manifest().unwrap();
+        let target = current_node_archive_target(&manifest).unwrap();
+        let root = runtime_parent.join(NODE_RUNTIME_DIR_NAME).join(format!(
+            "node-{}-{}",
+            manifest.node_version, target.folder_suffix
+        ));
+        create_fake_node_files(&root);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    fn create_fake_arbitrary_node_dir(root: &Path) {
+        create_fake_node_files(root);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    fn create_fake_node_files(root: &Path) {
+        if cfg!(target_os = "windows") {
+            fs::create_dir_all(root).unwrap();
+            for file in ["node.exe", "npm.cmd", "npx.cmd", "corepack.cmd"] {
+                fs::write(root.join(file), b"").unwrap();
+            }
+        } else {
+            let bin = root.join("bin");
+            fs::create_dir_all(&bin).unwrap();
+            for file in ["node", "npm", "npx", "corepack"] {
+                fs::write(bin.join(file), b"").unwrap();
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    fn unique_test_root(name: &str) -> PathBuf {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        std::env::temp_dir().join(format!(
+            "ncb-node-runtime-{name}-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ))
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        old_value: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let old_value = env::var_os(key);
+            env::set_var(key, value);
+            Self { key, old_value }
+        }
+
+        fn set_os(key: &'static str, value: &std::ffi::OsStr) -> Self {
+            let old_value = env::var_os(key);
+            env::set_var(key, value);
+            Self { key, old_value }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.old_value {
+                env::set_var(self.key, value);
+            } else {
+                env::remove_var(self.key);
+            }
+        }
     }
 }

@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 
 const MAX_INPUT_BYTES: usize = 64 * 1024;
 const SETUP_SCHEMA_VERSION: u32 = 1;
+// TODO(PR7-follow-up): derive these names from the Tauri app identifier before
+// exposing upgrade/uninstall across dev, beta, prod, or forked installs.
 const SANDBOX_ACCOUNT_NAME: &str = "NCB_Sandbox";
 const SANDBOX_GROUP_NAME: &str = "NoCodeBuilderSandboxUsers";
 const CREDENTIAL_SERVICE_NAME: &str = "AI Web Builder";
@@ -669,6 +671,14 @@ fn validate_marker_matches_request(
     {
         return Err(
             "Windows sandbox setup progress marker paths do not match this app instance"
+                .to_string(),
+        );
+    }
+
+    if marker.sandbox_account != SANDBOX_ACCOUNT_NAME || marker.sandbox_group != SANDBOX_GROUP_NAME
+    {
+        return Err(
+            "Windows sandbox setup progress marker identity does not match this app instance"
                 .to_string(),
         );
     }
@@ -3255,6 +3265,40 @@ mod tests {
         assert!(response.ok);
         assert_eq!(response.state, "ready");
         assert!(response.message.contains("runner launch prerequisites"));
+
+        let _ = fs::remove_dir_all(sandbox_root);
+    }
+
+    #[test]
+    fn marker_with_different_account_identity_requires_repair() {
+        let _guard = elevation_override_lock().lock().unwrap();
+        let sandbox_root = unique_fixture_root("wrong-identity");
+        let request = setup_status_request(&sandbox_root, 12);
+        fs::create_dir_all(request.sandbox_root.join("state")).unwrap();
+        write_progress_marker(
+            &request.sandbox_root.join("state").join(SETUP_PROGRESS_FILE),
+            &SetupProgressMarker {
+                schema_version: SETUP_SCHEMA_VERSION,
+                policy_version: request.policy_version,
+                sandbox_root: request.sandbox_root.clone(),
+                node_runtime_root: request.node_runtime_root.clone(),
+                workspace_root: request.workspace_root.clone(),
+                sandbox_account: "NCB_Other_Sandbox".to_string(),
+                sandbox_group: SANDBOX_GROUP_NAME.to_string(),
+                directories_provisioned: true,
+                account_configured: true,
+                acls_configured: true,
+                network_filtering_configured: true,
+                updated_at: Utc::now().to_rfc3339(),
+            },
+        )
+        .unwrap();
+
+        let response = handle_setup_request(request).unwrap();
+
+        assert!(!response.ok);
+        assert_eq!(response.state, "repair-required");
+        assert!(response.message.contains("identity"));
 
         let _ = fs::remove_dir_all(sandbox_root);
     }

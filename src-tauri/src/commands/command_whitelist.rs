@@ -1,70 +1,22 @@
 use std::path::Path;
 
+use super::command_spec::{allowed_commands_for_error, spec_for_command};
 use super::types::AllowedCommand;
 
 pub fn parse_allowed_command(command: &str) -> Result<AllowedCommand, String> {
     let normalized = normalize_command(command);
+    let Some(spec) = spec_for_command(command) else {
+        return Err(format!(
+            "command: '{normalized}' is not allowed. Allowed commands: {}",
+            allowed_commands_for_error()
+        ));
+    };
 
-    match normalized.as_str() {
-        "npm install" => Ok(AllowedCommand {
-            label: "npm install",
-            package_manager: "npm",
-            args: &["install"],
-        }),
-        "npm run dev" => Ok(AllowedCommand {
-            label: "npm run dev",
-            package_manager: "npm",
-            args: &["run", "dev"],
-        }),
-        "npm run build" => Ok(AllowedCommand {
-            label: "npm run build",
-            package_manager: "npm",
-            args: &["run", "build"],
-        }),
-        "npm run lint" => Ok(AllowedCommand {
-            label: "npm run lint",
-            package_manager: "npm",
-            args: &["run", "lint"],
-        }),
-        "npm run test" => Ok(AllowedCommand {
-            label: "npm run test",
-            package_manager: "npm",
-            args: &["run", "test"],
-        }),
-        "npm test" => Ok(AllowedCommand {
-            label: "npm test",
-            package_manager: "npm",
-            args: &["test"],
-        }),
-        "pnpm install" => Ok(AllowedCommand {
-            label: "pnpm install",
-            package_manager: "pnpm",
-            args: &["install"],
-        }),
-        "pnpm dev" => Ok(AllowedCommand {
-            label: "pnpm dev",
-            package_manager: "pnpm",
-            args: &["dev"],
-        }),
-        "pnpm build" => Ok(AllowedCommand {
-            label: "pnpm build",
-            package_manager: "pnpm",
-            args: &["build"],
-        }),
-        "pnpm lint" => Ok(AllowedCommand {
-            label: "pnpm lint",
-            package_manager: "pnpm",
-            args: &["lint"],
-        }),
-        "pnpm test" => Ok(AllowedCommand {
-            label: "pnpm test",
-            package_manager: "pnpm",
-            args: &["test"],
-        }),
-        _ => Err(format!(
-            "command: '{normalized}' is not allowed. Allowed commands: npm install, npm run dev, npm run build, npm run lint, npm run test, npm test, pnpm install, pnpm dev, pnpm build, pnpm lint, pnpm test"
-        )),
-    }
+    Ok(AllowedCommand {
+        label: spec.label,
+        package_manager: spec.package_manager,
+        args: spec.app_args,
+    })
 }
 
 pub fn preferred_dev_command(project_dir: &Path) -> AllowedCommand {
@@ -90,6 +42,7 @@ fn normalize_command(command: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::command_spec::all_command_specs;
 
     #[test]
     fn allows_only_exact_whitelisted_commands() {
@@ -99,5 +52,16 @@ mod tests {
         assert!(parse_allowed_command("npm run build && whoami").is_err());
         assert!(parse_allowed_command("sh -c 'npm run build'").is_err());
         assert!(parse_allowed_command("powershell -Command npm install").is_err());
+    }
+
+    #[test]
+    fn parses_every_central_command_spec() {
+        for spec in all_command_specs() {
+            let allowed = parse_allowed_command(spec.label).unwrap();
+
+            assert_eq!(allowed.label, spec.label);
+            assert_eq!(allowed.package_manager, spec.package_manager);
+            assert_eq!(allowed.args, spec.app_args);
+        }
     }
 }

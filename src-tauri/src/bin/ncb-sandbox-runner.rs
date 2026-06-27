@@ -11,6 +11,9 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+#[path = "../commands/command_spec.rs"]
+mod command_spec;
+
 const MAX_INPUT_BYTES: usize = 128 * 1024;
 const RUNNER_SCHEMA_VERSION: u32 = 1;
 #[cfg(any(target_os = "windows", test))]
@@ -211,23 +214,11 @@ fn validate_allowed_command(
     args: &[String],
     executable: &Path,
 ) -> Result<(), String> {
-    let (package_manager, expected_args): (&str, &[&str]) = match command.trim() {
-        "npm install" => ("npm", &["install"]),
-        "npm run dev" => ("npm", &["run", "dev"]),
-        "npm run build" => ("npm", &["run", "build"]),
-        "npm run lint" => ("npm", &["run", "lint"]),
-        "npm run test" => ("npm", &["run", "test"]),
-        "npm test" => ("npm", &["test"]),
-        "pnpm install" => ("pnpm", &["pnpm", "install"]),
-        "pnpm dev" => ("pnpm", &["pnpm", "dev"]),
-        "pnpm build" => ("pnpm", &["pnpm", "build"]),
-        "pnpm lint" => ("pnpm", &["pnpm", "lint"]),
-        "pnpm test" => ("pnpm", &["pnpm", "test"]),
-        _ => return Err("runner command label is not allowlisted".to_string()),
-    };
+    let spec = command_spec::spec_for_label(command.trim())
+        .ok_or_else(|| "runner command label is not allowlisted".to_string())?;
 
-    validate_executable_matches_package_manager(package_manager, executable)?;
-    validate_args_match_label(args, expected_args)
+    validate_executable_matches_package_manager(spec.package_manager, executable)?;
+    validate_args_match_label(args, spec.runner_args)
 }
 
 fn validate_executable_matches_package_manager(
@@ -1553,6 +1544,45 @@ mod tests {
         request.args = vec!["pnpm".to_string(), "build".to_string()];
 
         assert!(validate_request(&request).is_ok());
+    }
+
+    #[test]
+    fn every_central_command_spec_has_runner_contract() {
+        for spec in command_spec::all_command_specs() {
+            let mut request = valid_request();
+            request.command_label = spec.label.to_string();
+            request.args = spec
+                .runner_args
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect();
+            request.executable =
+                fixture_root()
+                    .join("node")
+                    .join("bin")
+                    .join(if spec.package_manager == "pnpm" {
+                        if cfg!(target_os = "windows") {
+                            "corepack.cmd"
+                        } else {
+                            "corepack"
+                        }
+                    } else if cfg!(target_os = "windows") {
+                        "npm.cmd"
+                    } else {
+                        "npm"
+                    });
+
+            assert!(
+                validate_allowed_command(
+                    &request.command_label,
+                    &request.args,
+                    &request.executable
+                )
+                .is_ok(),
+                "runner rejected central command spec {}",
+                spec.label
+            );
+        }
     }
 
     #[test]

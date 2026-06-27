@@ -17,7 +17,7 @@ use super::{
     process::SandboxChild,
     types::{
         SandboxError, SandboxErrorKind, SandboxHealth, SandboxMetadata, SandboxNetworkPolicy,
-        SandboxRequest, SandboxStatus,
+        SandboxPurpose, SandboxRequest, SandboxStatus,
     },
     unsupported::UnsupportedBackend,
     windows::WindowsNativeBackend,
@@ -39,6 +39,7 @@ pub struct PreparedSandboxCommand {
     pub workspace: SandboxWorkspace,
     pub metadata: SandboxMetadata,
     pub policy: SandboxCommandPolicy,
+    pub managed_node_version: String,
     #[allow(dead_code)]
     network_proxy: Option<ManagedProxy>,
 }
@@ -95,14 +96,28 @@ impl SandboxManager {
         dev_server_workspace: bool,
     ) -> Result<PreparedSandboxCommand, SandboxError> {
         let health = self.health_check()?;
-        let mut policy = policy_for_allowed_command(allowed);
+        let mut policy = policy_for_allowed_command(allowed)?;
 
-        let resolved =
-            node_runtime::resolve_package_manager_command(allowed.package_manager, allowed.args)
-                .map_err(SandboxError::unavailable)?;
+        let resolved = node_runtime::resolve_package_manager_command_for_sandbox(
+            allowed.package_manager,
+            allowed.args,
+        )
+        .map_err(SandboxError::unavailable)?;
         validate_managed_runtime(&resolved)?;
 
-        let workspace = if dev_server_workspace {
+        if policy.purpose != SandboxPurpose::Install {
+            self.workspace_manager.ensure_dependency_layer_current(
+                project_id,
+                project_dir,
+                allowed.package_manager,
+                &resolved.runtime_version,
+            )?;
+        }
+
+        let workspace = if policy.purpose == SandboxPurpose::Install {
+            self.workspace_manager
+                .prepare_install(project_id, project_dir)?
+        } else if dev_server_workspace {
             self.workspace_manager
                 .prepare_dev_server(project_id, project_dir)?
         } else {
@@ -140,6 +155,7 @@ impl SandboxManager {
             workspace,
             metadata,
             policy,
+            managed_node_version: resolved.runtime_version,
             network_proxy,
         })
     }
@@ -303,15 +319,22 @@ fn readable_roots(resolved: &ResolvedCommand, workspace: &SandboxWorkspace) -> V
         resolved.runtime_root.clone(),
         resolved.runtime_bin.clone(),
         workspace.workspace_root.clone(),
+        workspace.dependency_node_modules(),
     ]
 }
 
 fn writable_roots(workspace: &SandboxWorkspace) -> Vec<PathBuf> {
-    vec![
+    let mut roots = vec![
         workspace.workspace_root.clone(),
         workspace.cache_root.clone(),
         workspace.tmp_root.clone(),
-    ]
+    ];
+
+    if workspace.kind == crate::sandbox::workspace::SandboxWorkspaceKind::Install {
+        push_unique_root(&mut roots, workspace.dependency_root.clone());
+    }
+
+    roots
 }
 
 fn denied_roots(project_dir: &Path) -> Vec<PathBuf> {

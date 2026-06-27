@@ -24,6 +24,8 @@ const SETUP_SCHEMA_VERSION: u32 = 1;
 const RUNNER_SCHEMA_VERSION: u32 = 1;
 const SETUP_SIDECAR_NAME: &str = "ncb-sandbox-setup";
 const RUNNER_SIDECAR_NAME: &str = "ncb-sandbox-runner";
+// TODO(PR7-follow-up): derive these names from the Tauri app identifier so
+// parallel dev, beta, prod, or fork installs do not share Windows credentials.
 const SANDBOX_ACCOUNT_NAME: &str = "NCB_Sandbox";
 const CREDENTIAL_SERVICE_NAME: &str = "AI Web Builder";
 const SANDBOX_ACCOUNT_PASSWORD_KEY: &str = "windows-sandbox:NCB_Sandbox:password";

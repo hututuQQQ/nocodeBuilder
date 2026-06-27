@@ -1,9 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    ffi::OsString,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, ffi::OsString, fs, path::PathBuf};
 
 use crate::commands::node_runtime::ResolvedCommand;
 
@@ -87,12 +82,8 @@ fn add_platform_system_environment(_environment: &mut BTreeMap<OsString, OsStrin
 
 fn sandbox_path_entries(resolved: &ResolvedCommand, workspace: &SandboxWorkspace) -> Vec<PathBuf> {
     let mut paths = resolved.path_prepend.clone();
-    paths.push(workspace_node_bin(&workspace.workspace_root));
+    paths.push(workspace.dependency_node_bin());
     paths
-}
-
-fn workspace_node_bin(workspace_root: &Path) -> PathBuf {
-    workspace_root.join("node_modules").join(".bin")
 }
 
 fn join_path_list(paths: Vec<PathBuf>) -> Result<OsString, SandboxError> {
@@ -105,6 +96,7 @@ fn join_path_list(paths: Vec<PathBuf>) -> Result<OsString, SandboxError> {
 mod tests {
     use super::*;
     use crate::sandbox::workspace::SandboxWorkspaceKind;
+    use std::path::Path;
 
     #[test]
     fn environment_uses_minimal_keys_without_host_secrets() {
@@ -157,6 +149,24 @@ mod tests {
     }
 
     #[test]
+    fn path_uses_dependency_layer_node_bin() {
+        let root = std::env::temp_dir().join("ncb-sandbox-dependency-env-test");
+        let workspace = test_workspace(&root, SandboxWorkspaceKind::Run);
+        let resolved = test_resolved_command(&root);
+
+        let env = build_sandbox_environment(&resolved, &workspace, &SandboxNetworkPolicy::Denied)
+            .expect("environment");
+        let path = env.get(&OsString::from("PATH")).expect("PATH").clone();
+        let paths = std::env::split_paths(&path).collect::<Vec<_>>();
+
+        assert!(paths.contains(&resolved.runtime_bin));
+        assert!(paths.contains(&workspace.dependency_node_bin()));
+        assert!(!paths.contains(&workspace.workspace_root.join("node_modules").join(".bin")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn proxy_environment_is_only_added_for_managed_proxy_policy() {
         crate::test_support::with_env_lock(|| {
             let root = std::env::temp_dir().join("ncb-sandbox-proxy-env-test");
@@ -198,9 +208,11 @@ mod tests {
             project_id: "p".to_string(),
             kind,
             workspace_root: root.join("workspace"),
+            dependency_root: root.join("dependency-layer"),
             cache_root: root.join("cache"),
             tmp_root: root.join("tmp"),
             source_manifest_path: root.join("state").join("source-manifest.json"),
+            dependency_fingerprint_path: root.join("state").join("dependency-fingerprint.json"),
         }
     }
 

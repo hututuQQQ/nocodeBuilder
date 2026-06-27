@@ -11,7 +11,9 @@ use crate::{projects::resolve_project_dir, sandbox::SandboxManager};
 
 use super::{
     command_whitelist::parse_allowed_command,
-    events::{emit_status, spawn_output_reader},
+    events::{
+        emit_status, output_event_budget, spawn_output_reader, DEFAULT_MAX_OUTPUT_LINE_BYTES,
+    },
     time::current_timestamp,
     types::{AllowedCommand, CommandResult},
 };
@@ -81,6 +83,7 @@ pub(crate) fn run_command_blocking(
     let stderr = prepared.child.take_stderr();
     let mut readers = Vec::new();
     let max_output_bytes = Some(prepared.policy.limits.max_output_bytes);
+    let event_budget = output_event_budget(prepared.policy.limits.max_output_bytes);
 
     if let Some(stdout) = stdout {
         readers.push(spawn_output_reader(
@@ -93,6 +96,8 @@ pub(crate) fn run_command_blocking(
             None,
             None,
             max_output_bytes,
+            Some(DEFAULT_MAX_OUTPUT_LINE_BYTES),
+            Some(event_budget.clone()),
             None,
         ));
     }
@@ -108,6 +113,8 @@ pub(crate) fn run_command_blocking(
             None,
             None,
             max_output_bytes,
+            Some(DEFAULT_MAX_OUTPUT_LINE_BYTES),
+            Some(event_budget.clone()),
             None,
         ));
     }
@@ -153,6 +160,17 @@ pub(crate) fn run_command_blocking(
                 success = false;
                 validation_message = Some(error.to_string());
             }
+        }
+    }
+
+    if success && (allowed.label == "npm install" || allowed.label == "pnpm install") {
+        if let Err(error) = prepared.workspace.mark_dependency_layer_current(
+            project_dir,
+            allowed.package_manager,
+            &prepared.managed_node_version,
+        ) {
+            success = false;
+            validation_message = Some(error.to_string());
         }
     }
 

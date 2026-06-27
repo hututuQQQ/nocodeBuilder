@@ -1,9 +1,13 @@
-use super::types::{SandboxNetworkPolicy, SandboxPurpose, SandboxResourceLimits};
-use crate::commands::types::AllowedCommand;
+use super::types::{SandboxError, SandboxNetworkPolicy, SandboxPurpose, SandboxResourceLimits};
+use crate::commands::{
+    command_spec::{
+        spec_for_label, spec_matches_app_command, CommandNetworkSpec, CommandPurposeSpec,
+        MANAGED_PROXY_ALLOWED_HOSTS,
+    },
+    types::AllowedCommand,
+};
 
 pub const SANDBOX_POLICY_VERSION: u32 = 1;
-
-const GIB: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct SandboxCommandPolicy {
@@ -12,80 +16,49 @@ pub struct SandboxCommandPolicy {
     pub limits: SandboxResourceLimits,
 }
 
-pub fn policy_for_allowed_command(allowed: AllowedCommand) -> SandboxCommandPolicy {
-    match allowed.label {
-        "npm install" | "pnpm install" => SandboxCommandPolicy {
-            purpose: SandboxPurpose::Install,
-            network: SandboxNetworkPolicy::ManagedProxy {
-                proxy_port: 0,
-                allowed_hosts: vec![
-                    "registry.npmjs.org".to_string(),
-                    "*.npmjs.org".to_string(),
-                    "github.com".to_string(),
-                    "api.github.com".to_string(),
-                    "objects.githubusercontent.com".to_string(),
-                    "github-releases.githubusercontent.com".to_string(),
-                    "nodejs.org".to_string(),
-                ],
-            },
-            limits: SandboxResourceLimits {
-                timeout_seconds: Some(10 * 60),
-                memory_bytes: 2 * GIB,
-                active_process_limit: 256,
-                max_output_bytes: 256 * 1024,
-            },
-        },
-        "npm run build" | "pnpm build" => SandboxCommandPolicy {
-            purpose: SandboxPurpose::Build,
-            network: SandboxNetworkPolicy::Denied,
-            limits: SandboxResourceLimits {
-                timeout_seconds: Some(5 * 60),
-                memory_bytes: 2 * GIB,
-                active_process_limit: 128,
-                max_output_bytes: 256 * 1024,
-            },
-        },
-        "npm run lint" | "pnpm lint" => SandboxCommandPolicy {
-            purpose: SandboxPurpose::Lint,
-            network: SandboxNetworkPolicy::Denied,
-            limits: SandboxResourceLimits {
-                timeout_seconds: Some(3 * 60),
-                memory_bytes: GIB,
-                active_process_limit: 64,
-                max_output_bytes: 128 * 1024,
-            },
-        },
-        "npm run test" | "npm test" | "pnpm test" => SandboxCommandPolicy {
-            purpose: SandboxPurpose::Test,
-            network: SandboxNetworkPolicy::Denied,
-            limits: SandboxResourceLimits {
-                timeout_seconds: Some(5 * 60),
-                memory_bytes: GIB + (GIB / 2),
-                active_process_limit: 128,
-                max_output_bytes: 256 * 1024,
-            },
-        },
-        "npm run dev" | "pnpm dev" => SandboxCommandPolicy {
-            purpose: SandboxPurpose::DevServer,
-            network: SandboxNetworkPolicy::LocalServer { port: 0 },
-            limits: SandboxResourceLimits {
-                timeout_seconds: None,
-                memory_bytes: 2 * GIB,
-                active_process_limit: 256,
-                max_output_bytes: 256 * 1024,
-            },
-        },
-        _ => SandboxCommandPolicy {
-            purpose: SandboxPurpose::Build,
-            network: SandboxNetworkPolicy::Denied,
-            limits: SandboxResourceLimits {
-                timeout_seconds: Some(60),
-                memory_bytes: GIB,
-                active_process_limit: 32,
-                max_output_bytes: 64 * 1024,
-            },
-        },
+pub fn policy_for_allowed_command(
+    allowed: AllowedCommand,
+) -> Result<SandboxCommandPolicy, SandboxError> {
+    let spec = spec_for_label(allowed.label).ok_or_else(|| {
+        SandboxError::policy_denied(format!(
+            "sandbox policy has no command spec for '{}'",
+            allowed.label
+        ))
+    })?;
+
+    if !spec_matches_app_command(spec, allowed.package_manager, allowed.args) {
+        return Err(SandboxError::policy_denied(format!(
+            "sandbox policy command spec does not match '{}'",
+            allowed.label
+        )));
     }
+
+    Ok(SandboxCommandPolicy {
+        purpose: match spec.purpose {
+            CommandPurposeSpec::Install => SandboxPurpose::Install,
+            CommandPurposeSpec::Build => SandboxPurpose::Build,
+            CommandPurposeSpec::Test => SandboxPurpose::Test,
+            CommandPurposeSpec::Lint => SandboxPurpose::Lint,
+            CommandPurposeSpec::DevServer => SandboxPurpose::DevServer,
+        },
+        network: match spec.network {
+            CommandNetworkSpec::Denied => SandboxNetworkPolicy::Denied,
+            CommandNetworkSpec::LocalServer => SandboxNetworkPolicy::LocalServer { port: 0 },
+            CommandNetworkSpec::ManagedProxy => SandboxNetworkPolicy::ManagedProxy {
+                proxy_port: 0,
+                allowed_hosts: MANAGED_PROXY_ALLOWED_HOSTS
+                    .iter()
+                    .map(|host| (*host).to_string())
+                    .collect(),
+            },
+        },
+        limits: SandboxResourceLimits {
+            timeout_seconds: spec.limits.timeout_seconds,
+            memory_bytes: spec.limits.memory_bytes,
+            active_process_limit: spec.limits.active_process_limit,
+            max_output_bytes: spec.limits.max_output_bytes,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -95,7 +68,8 @@ mod tests {
 
     #[test]
     fn install_requires_managed_proxy_policy() {
-        let policy = policy_for_allowed_command(parse_allowed_command("npm install").unwrap());
+        let policy = policy_for_allowed_command(parse_allowed_command("npm install").unwrap())
+            .expect("install policy");
         assert!(matches!(policy.purpose, SandboxPurpose::Install));
         assert!(matches!(
             policy.network,
@@ -105,8 +79,31 @@ mod tests {
 
     #[test]
     fn build_denies_network() {
-        let policy = policy_for_allowed_command(parse_allowed_command("npm run build").unwrap());
+        let policy = policy_for_allowed_command(parse_allowed_command("npm run build").unwrap())
+            .expect("build policy");
         assert!(matches!(policy.purpose, SandboxPurpose::Build));
         assert_eq!(policy.network, SandboxNetworkPolicy::Denied);
+    }
+
+    #[test]
+    fn unknown_command_has_no_policy_fallback() {
+        let error = policy_for_allowed_command(AllowedCommand {
+            label: "npm run unknown",
+            package_manager: "npm",
+            args: &["run", "unknown"],
+        })
+        .expect_err("unknown command should be denied");
+
+        assert!(error.message.contains("no command spec"));
+    }
+
+    #[test]
+    fn every_allowed_command_has_matching_policy() {
+        for spec in crate::commands::command_spec::all_command_specs() {
+            let policy = policy_for_allowed_command(parse_allowed_command(spec.label).unwrap())
+                .expect("command policy");
+
+            assert_eq!(policy.limits.max_output_bytes, spec.limits.max_output_bytes);
+        }
     }
 }

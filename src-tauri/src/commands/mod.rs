@@ -1,4 +1,5 @@
 mod command_runner;
+pub(crate) mod command_spec;
 pub(crate) mod command_whitelist;
 mod dev_server;
 mod events;
