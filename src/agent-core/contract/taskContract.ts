@@ -103,16 +103,28 @@ export function validateTaskContract(contract: TaskContract): TaskContract {
 function inferTaskType(objective: string): TaskType {
   const text = objective.toLowerCase();
 
+  if (hasExplicitReadOnlyIntent(objective)) {
+    return "answer";
+  }
+
   if (/(deploy|vercel|production|发布|部署)/i.test(objective)) {
     return "deployment";
   }
 
-  if (hasImplementationIntent(objective) && hasBackendFeatureIntent(objective)) {
+  if (isLocationLookupQuestion(objective, text)) {
+    return "answer";
+  }
+
+  if ((hasImplementationIntent(objective) || hasBugOrFailureIntent(objective)) && hasBackendFeatureIntent(objective)) {
     return "backend_feature";
   }
 
   if (isReadOnlyQuestion(objective, text)) {
     return "answer";
+  }
+
+  if (hasBugOrFailureIntent(objective)) {
+    return hasBackendFeatureIntent(objective) ? "backend_feature" : "component_edit";
   }
 
   if (/(database|supabase|crud|auth|login|orders|backend|api|server|server-side|multiplayer|multi-player|online|realtime|real-time|websocket|room|rooms|\u540e\u7aef|\u670d\u52a1\u7aef|\u6570\u636e\u5e93|\u63a5\u53e3|\u8054\u673a|\u591a\u4eba|\u5b9e\u65f6|\u623f\u95f4|数据库|登录|后台)/i.test(objective)) {
@@ -142,7 +154,22 @@ function inferTaskType(objective: string): TaskType {
   return "component_edit";
 }
 
+function isLocationLookupQuestion(objective: string, lowerObjective: string) {
+  return (
+    /(where\s+(is|are|can)|can'?t\s+find|cannot\s+find|location|entry)/i.test(lowerObjective) ||
+    /(\u54ea\u91cc|\u5728\u54ea|\u627e\u4e0d\u5230|\u6ca1\u6709\u627e\u5230|\u5165\u53e3)/u.test(objective)
+  ) && !hasImplementationIntent(objective);
+}
+
 function isReadOnlyQuestion(objective: string, lowerObjective: string) {
+  if (hasExplicitReadOnlyIntent(objective)) {
+    return true;
+  }
+
+  if (hasBugOrFailureIntent(objective)) {
+    return false;
+  }
+
   if (hasImplementationIntent(objective)) {
     return false;
   }
@@ -171,7 +198,23 @@ function hasImplementationIntent(objective: string) {
 }
 
 function hasBackendFeatureIntent(objective: string) {
-  return /(database|supabase|crud|auth|login|sign in|signup|orders|backend|api|server|server-side|multiplayer|multi-player|online|realtime|real-time|websocket|room|rooms|\u540e\u7aef|\u670d\u52a1\u7aef|\u6570\u636e\u5e93|\u63a5\u53e3|\u8054\u673a|\u591a\u4eba|\u5b9e\u65f6|\u623f\u95f4|\u767b\u5f55|\u6ce8\u518c|\u8ba4\u8bc1|\u540e\u53f0|鏁版嵁搴搢鐧诲綍|鍚庡彴)/i.test(objective);
+  if (/\b(register|registration)\b/i.test(objective)) {
+    return true;
+  }
+
+  return /(database|supabase|crud|auth|login|sign in|signup|orders|backend|api|server|server-side|multiplayer|multi-player|online|realtime|real-time|websocket|room|rooms|\u540e\u7aef|\u670d\u52a1\u7aef|\u6570\u636e\u5e93|\u63a5\u53e3|\u8054\u673a|\u591a\u4eba|\u5b9e\u65f6|\u623f\u95f4|\u767b\u5f55|\u6ce8\u518c|\u8ba4\u8bc1|\u540e\u53f0)/i.test(objective);
+}
+
+export function hasExplicitReadOnlyIntent(objective: string): boolean {
+  return /(only explain|explain only|no changes|do not change|don't change|do not modify|don't modify|just tell me|read.?only|\u53ea\u89e3\u91ca|\u4e0d\u8981\u6539|\u4e0d\u8981\u4fee\u6539|\u53ea\u5206\u6790|\u53ea\u544a\u8bc9|\u522b\u6539)/i.test(objective);
+}
+
+export function hasBugOrFailureIntent(objective: string): boolean {
+  return /(error|failed|failure|broken|bug|crash|exception|stack trace|not working|cannot(?!\s+find)|can't(?!\s+find)|build failed|runtime error|preview broken|white screen|null value|violates|constraint|foreign key|duplicate key|relation does not exist|column does not exist|rls|permission denied|\u6ce8\u518c\u4e0d\u4e86|\u767b\u5f55\u4e0d\u4e86|\u4e0d\u80fd\u7528|\u62a5\u9519|\u5931\u8d25|\u5d29\u6e83|\u767d\u5c4f|\u65e0\u6cd5|\u6709.*bug|\u4e0d\u751f\u6548)/i.test(objective);
+}
+
+export function hasRepairIntent(objective: string): boolean {
+  return hasBugOrFailureIntent(objective) || hasImplementationIntent(objective);
 }
 
 function budgetForTaskType(taskType: TaskType): TaskContract["budget"] {

@@ -146,6 +146,42 @@ export function buildAgentStepMessages(
   userRequest: string,
   policy: ProjectPolicy = DEFAULT_PROJECT_POLICY,
 ): LlmChatMessage[] {
+  const classificationMismatch =
+    context.workingState?.currentBlocker?.code === "TASK_CLASSIFICATION_MISMATCH";
+  const taskType = context.manifest.runtimeContract.taskType;
+  const isAnswerTask = taskType === "answer";
+  const canUseWriteTools = !isAnswerTask || classificationMismatch;
+  const hasBackendTask =
+    taskType === "backend_feature" ||
+    context.manifest.runtimeContract.permissions.databaseChange !== "deny";
+  const hasPreviewIntent =
+    /preview|dev server|run (the )?app|open (the )?app|browser|screenshot|预览|运行|打开/u.test(userRequest) ||
+    taskType === "full_site" ||
+    taskType === "add_page";
+  const singleToolCallTools = [
+    "write_files",
+    "edit_file",
+    "delete_files",
+    "run_command",
+    ...(hasBackendTask ? ["apply_supabase_schema"] : []),
+    ...(hasPreviewIntent
+      ? ["refresh_preview", "start_dev_server", "stop_dev_server"]
+      : []),
+  ];
+  const singleToolCallActions = [
+    "write",
+    "command",
+    ...(hasBackendTask ? ["schema"] : []),
+    ...(hasPreviewIntent ? ["preview", "dev-server"] : []),
+  ];
+  const combinedToolActions = [
+    "file edits",
+    "deletes",
+    "commands",
+    ...(hasBackendTask ? ["schema changes"] : []),
+    ...(hasPreviewIntent ? ["refreshes"] : []),
+  ];
+
   return [
     {
       role: "system",
@@ -158,22 +194,51 @@ export function buildAgentStepMessages(
         "Do not use old chat history, old observations, or old runContextSummary to override TaskManifest.",
         "If steering conflicts with TaskManifest, do not silently drift; classify it as a change request, scope issue, or plan issue.",
         "Use runContextSummary as the compressed history of earlier observations. Do not repeat completed work unless the latest failure requires it.",
+        "If workingState.currentBlocker.suggestedAction exists, treat it as the highest-priority next step unless it violates TaskManifest, policy, or user steering.",
+        "Do not repeat workingState.lastActionFingerprint after a structured REPEATED_ACTION or LOOP_EXHAUSTED blocker.",
         "When specContext is present, treat it as the active Spec task contract: satisfy the current task, linked requirements, acceptance criteria, expected files, allowed paths, and design decisions.",
         "Use budgetState.pressure to control convergence. normal means proceed normally; low means avoid broad exploration and prefer focused repair or verification; critical means do one minimal safe action, state a blocker, or return finish_candidate.",
         "You may return tool_calls with multiple calls only when every call is read-only, such as list_files, read_files, grep_files, or glob_files.",
         "When several known files or searches are needed before an edit, batch those read-only calls in one tool_calls response instead of spending one model turn per file.",
-        "Never include write_files, edit_file, delete_files, run_command, apply_supabase_schema, preview, or dev-server tools inside tool_calls. Return exactly one tool_call for any write, command, schema, preview, or dev-server action.",
-        "Do not combine file edits, deletes, commands, schema changes, or refresh with other tool calls.",
+        ...(canUseWriteTools
+          ? [
+              `Never include ${joinPromptList(singleToolCallTools)} inside tool_calls. Return exactly one tool_call for any ${joinPromptList(singleToolCallActions)} action.`,
+              `Do not combine ${joinPromptList(combinedToolActions)} with other tool calls.`,
+            ]
+          : [
+              "tool_calls batches may contain only the listed read-only context-gathering tools.",
+            ]),
         "Use the smallest useful action. Preserve existing code and content unless the user asked to replace it.",
         "If the user asks a question that can be answered from current context, return answer without changing files.",
         "If the user reports a bug, build error, runtime error, broken preview, failed command, or asks to fix/change project behavior, use tools to inspect diagnostics and relevant files before answering.",
-        "Before editing, deleting, or overwriting an existing file, inspect the relevant file with read_files in this run.",
-        "Avoid rereading an unchanged full file when the exact needed text is still visible in retained file.content observations. If exact edit_file old_string text is no longer visible there, reread only the smallest useful range with read_files offset/limit.",
+        ...(canUseWriteTools
+          ? [
+              "Before editing, deleting, or overwriting an existing file, inspect the relevant file with read_files in this run.",
+            ]
+          : []),
+        ...(canUseWriteTools
+          ? [
+              "Avoid rereading an unchanged full file when the exact needed text is still visible in retained file.content observations. If exact edit_file old_string text is no longer visible there, reread only the smallest useful range with read_files offset/limit.",
+            ]
+          : [
+              "Avoid rereading an unchanged full file when the exact needed text is still visible in retained file.content observations; use the smallest useful read_files offset/limit when more context is needed.",
+            ]),
         "Prefer grep_files or glob_files to locate code before reading large files.",
-        "Prefer edit_file for focused changes. Use write_files for new files or deliberate full-file rewrites.",
-        "read_files returns exact file text in each file.content and a line-numbered preview in numberedContent. Copy edit_file old_string from file.content only, never from numberedContent.",
-        "After edit_file, write_files, or delete_files, the host app will verify the project and report the result as an observation.",
-        "Do not start or refresh the preview unless the user explicitly asks to preview, run, or open the app.",
+        ...(canUseWriteTools
+          ? [
+              "Prefer edit_file for focused changes. Use write_files for new files or deliberate full-file rewrites.",
+              "When diagnostics identify exact file line ranges, or exact old_string is brittle after context compression, prefer read_files with offset/limit followed by replace_file_range.",
+              "read_files returns exact file text in each file.content and a line-numbered preview in numberedContent. Copy edit_file old_string from file.content only, never from numberedContent.",
+              "After edit_file, write_files, or delete_files, the host app will verify the project and report the result as an observation.",
+            ]
+          : [
+              "read_files returns exact file text in each file.content and a line-numbered preview in numberedContent.",
+            ]),
+        ...(hasPreviewIntent
+          ? [
+              "Use preview/dev-server tools only for explicit preview, run, open-app, or required full-page verification work.",
+            ]
+          : []),
         "If a verification observation fails, use the structured error output to repair the project with focused edits.",
         "When diagnostics include file:line:column or a code frame, target that exact location first and avoid broad rewrites unless the diagnostic proves the surrounding design is wrong.",
         "If observations include baseline_diagnostics, treat it as current workspace verification evidence. Repair allowed-path diagnostics before broad exploration.",
@@ -182,27 +247,58 @@ export function buildAgentStepMessages(
         "Treat steering as additional runtime guidance and constraints. Steering can narrow choices but never expands task permissions, allowed paths, database access, or deployment authority.",
         "Never include real API keys, secrets, tokens, or credentials in generated files.",
         "Never create .env, .env.local, or .env.example files, and never put real secrets in generated files.",
-        "If the user asks for backend, database, CRUD, auth, orders, admin, or persisted data, build a real full-stack implementation when backendContext.supabase.configured is true.",
-        "For Supabase-backed features, use Next.js App Router route handlers under app/api/**/route.ts or server-only modules under lib/**. Browser/client components must not read SUPABASE_SECRET_KEY directly.",
-        "Use the Supabase env variable names from backendContext. Reference process.env.NEXT_PUBLIC_SUPABASE_URL and process.env.SUPABASE_SECRET_KEY in server code; do not hard-code values.",
-        "If database tables or columns are needed and backendContext.supabase.status.dbUrlConfigured is true, use apply_supabase_schema before writing API code that depends on those tables.",
-        "apply_supabase_schema is non-destructive: it creates missing tables and adds missing columns only. Do not use it for deletes, renames, type changes, or data migrations.",
-        "For apply_supabase_schema column dataType, use only these canonical values: uuid, text, integer, bigint, numeric, boolean, date, timestamptz, jsonb. Do not use Postgres aliases like int2, int4, int8, smallint, timestamp, or bool.",
-        "For apply_supabase_schema column defaultValue, use only safe literals compatible with the column type: integer/bigint numbers like 0 or 9, numeric numbers like -1.5, boolean true/false, CURRENT_DATE, now(), gen_random_uuid(), '' only for empty text columns, or '{}'/'[]' jsonb casts. For nullable or non-text empty values, omit defaultValue instead of using ''. Do not use arbitrary SQL expressions.",
-        "If Supabase is not configured, make the app ready for backend wiring with clear server-side placeholders and avoid pretending mock data is persisted.",
+        ...(hasBackendTask
+          ? [
+              "If the user asks for backend, database, CRUD, auth, orders, admin, or persisted data, build a real full-stack implementation when backendContext.supabase.configured is true.",
+              "For Supabase-backed features, use Next.js App Router route handlers under app/api/**/route.ts or server-only modules under lib/**. Browser/client components must not read SUPABASE_SECRET_KEY directly.",
+              "Use the Supabase env variable names from backendContext. Reference process.env.NEXT_PUBLIC_SUPABASE_URL and process.env.SUPABASE_SECRET_KEY in server code; do not hard-code values.",
+              "If database tables or columns are needed and backendContext.supabase.status.dbUrlConfigured is true, use apply_supabase_schema before writing API code that depends on those tables.",
+              "apply_supabase_schema is non-destructive: it creates missing tables and adds missing columns only. Do not use it for deletes, renames, type changes, or data migrations.",
+              "For apply_supabase_schema column dataType, use only these canonical values: uuid, text, integer, bigint, numeric, boolean, date, timestamptz, jsonb. Do not use Postgres aliases like int2, int4, int8, smallint, timestamp, or bool.",
+              "For apply_supabase_schema column defaultValue, use only safe literals compatible with the column type: integer/bigint numbers like 0 or 9, numeric numbers like -1.5, boolean true/false, CURRENT_DATE, now(), gen_random_uuid(), '' only for empty text columns, or '{}'/'[]' jsonb casts. For nullable or non-text empty values, omit defaultValue instead of using ''. Do not use arbitrary SQL expressions.",
+              "If Supabase is not configured, make the app ready for backend wiring with clear server-side placeholders and avoid pretending mock data is persisted.",
+            ]
+          : []),
         "If the user explicitly asks for AI, chat, assistant, agent, or content generation features, use the Vercel AI SDK with the `ai` package and an appropriate provider package inside App Router route handlers.",
-        "If you modify package.json, keep pinned exact dependency versions. Do not use ^, ~, >=, latest, *, x ranges, or tag names.",
-        formatCorePackageVersionRule(policy),
-        "Never run npm install, pnpm install, npm add, pnpm add, or similar commands with package names. To add packages, edit package.json; the host automatically installs after package.json changes.",
-        `When using run_command, command must exactly equal one of: ${AGENT_COMMANDS.join(", ")}.`,
-        "For run_command, do not add shell pipes, redirects, output truncation, flags, package names, or operators like |, >, 2>&1, &&, or ;. For example, use npm run build, not npm run build 2>&1 | head -100.",
-        "Prefer native fetch for Supabase REST route handlers to avoid unnecessary dependencies. Add dependencies only when truly needed.",
+        ...(canUseWriteTools
+          ? [
+              "If you modify package.json, keep pinned exact dependency versions. Do not use ^, ~, >=, latest, *, x ranges, or tag names.",
+              formatCorePackageVersionRule(policy),
+              "Never run npm install, pnpm install, npm add, pnpm add, or similar commands with package names. To add packages, edit package.json; the host automatically installs after package.json changes.",
+              `When using run_command, command must exactly equal one of: ${AGENT_COMMANDS.join(", ")}.`,
+              "For run_command, do not add shell pipes, redirects, output truncation, flags, package names, or operators like |, >, 2>&1, &&, or ;. For example, use npm run build, not npm run build 2>&1 | head -100.",
+            ]
+          : []),
+        ...(hasBackendTask
+          ? [
+              "Prefer native fetch for Supabase REST route handlers to avoid unnecessary dependencies. Add dependencies only when truly needed.",
+            ]
+          : []),
         ...formatUserLanguageInstruction(
           "Answer messages, finish_candidate summaries, tool rationales/summaries, and newly created visible UI text",
         ),
         "",
         "Available tools:",
-        formatAgentToolListForPrompt(),
+        formatAgentToolListForPrompt({
+          includeTool: (tool) => {
+            if (!canUseWriteTools && !tool.isReadOnly) {
+              return false;
+            }
+
+            if (!hasBackendTask && tool.name === "apply_supabase_schema") {
+              return false;
+            }
+
+            if (
+              !hasPreviewIntent &&
+              ["start_dev_server", "stop_dev_server", "refresh_preview"].includes(tool.name)
+            ) {
+              return false;
+            }
+
+            return true;
+          },
+        }),
         "",
         ...formatAllowedPathsForPrompt("Allowed file paths:", policy),
         "",
@@ -210,9 +306,18 @@ export function buildAgentStepMessages(
         '{"type":"answer","message":"string"}',
         '{"type":"tool_call","tool":"read_files","rationale":"string","args":{"paths":["app/page.tsx"]}}',
         '{"type":"tool_calls","rationale":"string","calls":[{"type":"tool_call","tool":"grep_files","rationale":"string","args":{"query":"Header","paths":["app","components"]}},{"type":"tool_call","tool":"glob_files","rationale":"string","args":{"pattern":"components/**/*.tsx"}}]}',
-        '{"type":"tool_call","tool":"edit_file","rationale":"string","args":{"path":"app/page.tsx","old_string":"exact old text","new_string":"exact new text","summary":"string"}}',
-        '{"type":"tool_call","tool":"apply_supabase_schema","rationale":"string","args":{"summary":"Created backend tables","tables":[{"name":"orders","enableRls":true,"columns":[{"name":"id","dataType":"uuid","defaultValue":"gen_random_uuid()","nullable":false,"primaryKey":true,"unique":false}]}]}}',
-        '{"type":"finish_candidate","summary":"string","verification":"string"}',
+        ...(canUseWriteTools
+          ? [
+              '{"type":"tool_call","tool":"edit_file","rationale":"string","args":{"path":"app/page.tsx","old_string":"exact old text","new_string":"exact new text","summary":"string"}}',
+              '{"type":"tool_call","tool":"replace_file_range","rationale":"string","args":{"path":"app/page.tsx","startLine":120,"endLine":148,"newContent":"replacement text","summary":"string"}}',
+            ]
+          : []),
+        ...(hasBackendTask
+          ? [
+              '{"type":"tool_call","tool":"apply_supabase_schema","rationale":"string","args":{"summary":"Created backend tables","tables":[{"name":"orders","enableRls":true,"columns":[{"name":"id","dataType":"uuid","defaultValue":"gen_random_uuid()","nullable":false,"primaryKey":true,"unique":false}]}]}}',
+            ]
+          : []),
+        '{"type":"finish_candidate","summary":"string","verification":"string","evidence":{"readFiles":["app/page.tsx"],"changedFiles":["app/page.tsx"],"noOpReason":"string","acceptanceEvidence":[{"criterionId":"request-addressed","evidence":"string"}]}}',
       ].join("\n"),
     },
     {
@@ -234,6 +339,7 @@ export function buildAgentStepMessages(
           taskManifest: context.manifest,
           projectMemory: context.memory,
           runContextSummary: context.runContextSummary,
+          workingState: context.workingState ?? null,
           specContext: context.specContext ?? null,
           steering: context.steering,
           workingSummary: context.workingSummary,
@@ -251,14 +357,34 @@ export function buildAgentStepMessages(
           instructions: [
             "Return one next step only, or a tool_calls batch containing only read-only calls.",
             "Batch known read-only reads/searches together when that avoids multiple planning turns.",
-            "If using write_files, edit_file, delete_files, run_command, apply_supabase_schema, refresh_preview, start_dev_server, or stop_dev_server, return a single tool_call object, not tool_calls.",
+            ...(canUseWriteTools
+              ? [
+                  `If using ${joinPromptList(singleToolCallTools)}, return a single tool_call object, not tool_calls.`,
+                ]
+              : []),
             "Prefer answer only when the user is asking for explanation or status and not asking you to inspect or change the project.",
             "For bug, error, broken preview, or fix requests, do not return answer as the first step. Inspect files, search code, or run an allowed verification command first.",
             "Prefer grep_files or glob_files before reading when you need to locate code.",
-            "Prefer read_files before edit_file, write_files, or delete_files when file contents are not already known from this run.",
+            ...(canUseWriteTools
+              ? [
+                  "Prefer read_files before edit_file, write_files, or delete_files when file contents are not already known from this run.",
+                ]
+              : [
+                  "Use read_files when current context is insufficient to answer accurately.",
+                ]),
             "Avoid repeating full-file read_files for the same unchanged path; when exact text is missing, reread the smallest useful range with offset/limit.",
-            "If the exact old_string needed for edit_file is not present in retained file.content observations, read the target file again before editing.",
-            "Prefer edit_file over write_files for focused edits to existing files.",
+            ...(canUseWriteTools
+              ? [
+                  "If the exact old_string needed for edit_file is not present in retained file.content observations, read the target file again before editing.",
+                ]
+              : []),
+            "If a structured observation has error.suggestedAction, follow that action first unless it conflicts with TaskManifest.",
+            ...(canUseWriteTools
+              ? [
+                  "Use replace_file_range after reading the needed line range when a diagnostic gives file:line:column or old_string matching is fragile.",
+                  "Prefer edit_file over write_files for focused edits to existing files.",
+                ]
+              : []),
             "Use finish_candidate only after the request is handled or cannot proceed safely. The external verifier decides whether the run completes.",
             "When observations include tool baseline_diagnostics, repair the named allowed-path failure before more exploration.",
             "When the latest observation has tool model_validation, repair the rejected JSON/tool arguments directly on this response.",
@@ -293,6 +419,18 @@ function formatBudgetPressureInstructions(
   return [
     "Budget pressure is normal: continue with the smallest useful next step.",
   ];
+}
+
+function joinPromptList(items: string[]) {
+  if (items.length <= 1) {
+    return items[0] ?? "";
+  }
+
+  if (items.length === 2) {
+    return `${items[0]} or ${items[1]}`;
+  }
+
+  return `${items.slice(0, -1).join(", ")}, or ${items[items.length - 1]}`;
 }
 
 function truncateObservation(content: string) {

@@ -11,6 +11,46 @@ describe("agent model action validation", () => {
     expect(result.type).toBe("finish_candidate");
   });
 
+  it("normalizes finish_candidate evidence fields", () => {
+    const result = validateAgentStepResponse({
+      evidence: {
+        acceptanceEvidence: [
+          { criterionId: "criterion-1", evidence: "Verified in app/page.tsx." },
+        ],
+        changedFiles: ["app/page.tsx"],
+        noOpReason: "Existing implementation already satisfies the request.",
+        readFiles: ["app/page.tsx"],
+      },
+      summary: "Done",
+      type: "finish_candidate",
+    });
+
+    expect(result).toMatchObject({
+      evidence: {
+        acceptanceEvidence: [
+          { criterionId: "criterion-1", evidence: "Verified in app/page.tsx." },
+        ],
+        changedFiles: ["app/page.tsx"],
+        noOpReason: "Existing implementation already satisfies the request.",
+        readFiles: ["app/page.tsx"],
+      },
+      summary: "Done",
+      type: "finish_candidate",
+    });
+  });
+
+  it("rejects invalid finish_candidate evidence entries", () => {
+    expect(() =>
+      validateAgentStepResponse({
+        evidence: {
+          readFiles: ["app/page.tsx", false],
+        },
+        summary: "Done",
+        type: "finish_candidate",
+      }),
+    ).toThrow("finish_candidate.evidence.readFiles entries must be non-empty strings");
+  });
+
   it("normalizes common Postgres aliases in Supabase schema tool calls", () => {
     const result = validateAgentStepResponse({
       args: {

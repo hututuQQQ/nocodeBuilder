@@ -1,6 +1,7 @@
 import type {
   AgentReadSnapshot,
   AgentRun,
+  AgentFinishEvidence,
   PreviewDiagnostic,
   SiteSpec,
   TaskContract,
@@ -40,6 +41,7 @@ type CommandFailureDetail = {
   command: string;
   diagnostics: string[];
   exitCode: number | null;
+  relatedToChangedFiles: boolean;
   summary: string;
 };
 
@@ -84,6 +86,7 @@ export type VerificationInput = {
   changedFiles: string[];
   deletedFiles?: string[];
   externalEffects?: string[];
+  finishEvidence?: AgentFinishEvidence;
   noOpReason?: string;
   packageChanged: boolean;
   approvedPackageChangeKeys?: string[];
@@ -258,7 +261,7 @@ export class AgentVerifier {
     }
 
     if (diagnostics.length > 0) {
-      return failedCheck(
+      return commandFailureCheck(
         "static",
         "StaticVerifier",
         diagnostics[0] ?? "Static verification failed.",
@@ -268,6 +271,7 @@ export class AgentVerifier {
           diagnostics: diagnostics.slice(1),
         },
         artifactIds,
+        commandFailures,
       );
     }
 
@@ -319,26 +323,36 @@ export class AgentVerifier {
           installResult?.exitCode ?? "unknown"
         }.`;
         const diagnostics = extractDiagnostics(installResult?.output ?? "");
-        return failedCheck(
+
+        if (!installResult) {
+          return failedCheck(
+            "build",
+            "BuildVerifier",
+            summary,
+            true,
+            { commandFailures: [], diagnostics },
+            artifactIds,
+          );
+        }
+
+        const commandFailure = this.describeCommandFailure(
+          "install",
+          installResult,
+          summary,
+          diagnostics,
+          input,
+        );
+        return commandFailureCheck(
           "build",
           "BuildVerifier",
           summary,
           true,
           {
-            commandFailures: installResult
-              ? [
-                  this.describeCommandFailure(
-                    "install",
-                    installResult,
-                    summary,
-                    diagnostics,
-                    input,
-                  ),
-                ]
-              : [],
+            commandFailures: [commandFailure],
             diagnostics,
           },
           artifactIds,
+          [commandFailure],
         );
       }
     }
@@ -368,24 +382,25 @@ export class AgentVerifier {
       );
     }
 
-    return failedCheck(
+    const commandFailure = this.describeCommandFailure(
+      "build",
+      buildResult,
+      `${buildCommand} failed with exit code ${buildResult.exitCode ?? "unknown"}.`,
+      extractDiagnostics(buildResult.output),
+      input,
+    );
+
+    return commandFailureCheck(
       "build",
       "BuildVerifier",
       `${buildCommand} failed with exit code ${buildResult.exitCode ?? "unknown"}.`,
       true,
       {
-        commandFailures: [
-          this.describeCommandFailure(
-            "build",
-            buildResult,
-            `${buildCommand} failed with exit code ${buildResult.exitCode ?? "unknown"}.`,
-            extractDiagnostics(buildResult.output),
-            input,
-          ),
-        ],
+        commandFailures: [commandFailure],
         diagnostics: extractDiagnostics(buildResult.output),
       },
       artifactIds,
+      [commandFailure],
     );
   }
 
@@ -393,6 +408,15 @@ export class AgentVerifier {
     const previewUrl = input.previewUrl ?? null;
     const required = isPreviewRequired(input.run.contract);
     const initialDiagnostics = input.previewDiagnostics ?? [];
+
+    if (!required && !previewUrl) {
+      return skippedCheck(
+        "preview",
+        "PreviewVerifier",
+        "Preview was not required for this task and no running preview URL was available.",
+        false,
+      );
+    }
 
     if (!previewUrl && !this.ports.startPreview) {
       const summary = "No running preview URL or preview starter is available.";
@@ -794,6 +818,10 @@ export class AgentVerifier {
         : baselineStatus === "failed"
           ? "pre_existing"
           : "unknown_baseline";
+    const relatedToChangedFiles = diagnosticsOverlapChangedFiles(
+      diagnostics,
+      input,
+    );
 
     return {
       baselineStatus,
@@ -802,6 +830,7 @@ export class AgentVerifier {
       command: result.command,
       diagnostics,
       exitCode: result.exitCode,
+      relatedToChangedFiles,
       summary,
     };
   }
@@ -981,11 +1010,16 @@ function buildVerificationReport(
   checks: VerificationCheck[],
 ): VerificationReport {
   const status = summarizeStatus(checks);
-  const failedChecks = checks.filter((check) => check.status === "failed");
+  const failedChecks = checks.filter(
+    (check) => check.status === "failed" && check.severity !== "warning",
+  );
   const inconclusiveChecks = checks.filter(
     (check) =>
-      check.status === "inconclusive" ||
-      (check.required === true && check.status === "skipped"),
+      check.severity !== "warning" &&
+      (
+        check.status === "inconclusive" ||
+        (check.required === true && check.status === "skipped")
+      ),
   );
 
   return {
@@ -1008,6 +1042,17 @@ function verifyAcceptanceCriteria(
   siteSpec: SiteSpec | null,
 ): VerificationCheck[] {
   return contract.acceptanceCriteria.map((criterion) => {
+    const explicitEvidence = findAcceptanceEvidence(input, criterion.id);
+
+    if (explicitEvidence) {
+      return passedCheck(
+        `acceptance:${criterion.id}`,
+        `Acceptance: ${criterion.id}`,
+        `Finish evidence: ${explicitEvidence}`,
+        criterion.required,
+      );
+    }
+
     if (criterion.id === "verifier-passed") {
       const technicalStatus = summarizeStatus(technicalChecks);
 
@@ -1069,6 +1114,12 @@ function collectRequestAddressedEvidence(
   allowExistingWorkspaceEvidence: boolean,
 ) {
   const changedFiles = input.changedFiles.map(normalizeProjectPath);
+  const citedChangedFiles = new Set(
+    (input.finishEvidence?.changedFiles ?? []).map(normalizeProjectPath),
+  );
+  const changedEvidence = citedChangedFiles.size > 0
+    ? changedFiles.filter((path) => citedChangedFiles.has(path))
+    : changedFiles;
   const expectedFiles = getExpectedFiles(contract);
   if (expectedFiles.length > 0) {
     const evidencePaths = collectTaskEvidencePaths(contract, input);
@@ -1083,8 +1134,9 @@ function collectRequestAddressedEvidence(
     return "AnswerVerifier produced a non-empty answer for the read-only task.";
   }
 
-  if (input.noOpReason?.trim()) {
-    return `No-op conclusion supplied: ${input.noOpReason.trim()}`;
+  const noOpReason = input.finishEvidence?.noOpReason ?? input.noOpReason;
+  if (noOpReason?.trim()) {
+    return `No-op conclusion supplied: ${noOpReason.trim()}`;
   }
 
   const externalEffects = (input.externalEffects ?? [])
@@ -1094,13 +1146,13 @@ function collectRequestAddressedEvidence(
     return `External tool evidence: ${externalEffects.slice(-3).join(" ")}`;
   }
 
-  if (changedFiles.length === 0) {
+  if (changedEvidence.length === 0) {
     return allowExistingWorkspaceEvidence
       ? collectExistingWorkspaceEvidence(contract, input.readSnapshots ?? [], siteSpec)
       : null;
   }
 
-  const scopeEvidence = changedFiles.some((path) =>
+  const scopeEvidence = changedEvidence.some((path) =>
     contract.scope.allowedPaths.some((pattern) =>
       matchesProjectPathPattern(path, pattern),
     ),
@@ -1115,7 +1167,7 @@ function collectRequestAddressedEvidence(
     const componentSourcePaths = siteSpec
       ? collectComponentSourcePaths(siteSpec, componentIds)
       : new Set<string>();
-    const matchingChangedFile = changedFiles.find((path) => componentSourcePaths.has(path));
+    const matchingChangedFile = changedEvidence.find((path) => componentSourcePaths.has(path));
 
     return matchingChangedFile
       ? `Changed ${matchingChangedFile} for scoped component(s): ${componentIds.join(", ")}.`
@@ -1127,14 +1179,14 @@ function collectRequestAddressedEvidence(
     const pageSourcePaths = siteSpec
       ? collectPageSourcePaths(siteSpec, pages)
       : new Set<string>();
-    const matchingChangedFile = changedFiles.find((path) => pageSourcePaths.has(path));
+    const matchingChangedFile = changedEvidence.find((path) => pageSourcePaths.has(path));
 
     return matchingChangedFile
       ? `Changed ${matchingChangedFile} for scoped page(s): ${pages.join(", ")}.`
       : null;
   }
 
-  return `Changed ${changedFiles.length} task-scoped file(s).`;
+  return `Changed ${changedEvidence.length} task-scoped file(s).`;
 }
 
 function describeMissingRequestAddressedEvidence(
@@ -1174,7 +1226,7 @@ function collectTaskEvidencePaths(
 ) {
   return uniqueStrings([
     ...input.changedFiles.map(normalizeProjectPath),
-    ...(input.readSnapshots ?? []).map((snapshot) => normalizeProjectPath(snapshot.path)),
+    ...collectCitedReadEvidencePaths(input),
   ]).filter((path) =>
     path &&
     !isInvalidProjectPath(path) &&
@@ -1183,6 +1235,27 @@ function collectTaskEvidencePaths(
     ) &&
     !isPathForbidden(path, contract.scope.forbiddenPaths),
   );
+}
+
+function collectCitedReadEvidencePaths(input: VerificationInput) {
+  const actualReadPaths = (input.readSnapshots ?? [])
+    .map((snapshot) => normalizeProjectPath(snapshot.path));
+  const citedReadFiles = new Set(
+    (input.finishEvidence?.readFiles ?? []).map(normalizeProjectPath),
+  );
+
+  if (citedReadFiles.size === 0) {
+    return actualReadPaths;
+  }
+
+  return actualReadPaths.filter((path) => citedReadFiles.has(path));
+}
+
+function findAcceptanceEvidence(input: VerificationInput, criterionId: string) {
+  return input.finishEvidence?.acceptanceEvidence
+    ?.find((item) => item.criterionId === criterionId)
+    ?.evidence
+    .trim();
 }
 
 function findMissingExpectedFiles(expectedFiles: string[], evidencePaths: string[]) {
@@ -1361,12 +1434,13 @@ function toCssTokenName(value: string) {
 }
 
 function summarizeStatus(checks: VerificationCheck[]): VerificationStatus {
-  if (checks.some((check) => check.status === "failed")) {
+  if (checks.some((check) => check.status === "failed" && check.severity !== "warning")) {
     return "failed";
   }
 
   const requiredMissingEvidence = checks.filter(
     (check) =>
+      check.severity !== "warning" &&
       check.required === true &&
       (check.status === "inconclusive" || check.status === "skipped"),
   );
@@ -1386,6 +1460,63 @@ function collectNewlyIntroducedFailures(failedChecks: VerificationCheck[]) {
         (failure) =>
           `${failure.checkId}: ${failure.summary} (baseline ${failure.baselineStatus})`,
       ),
+  );
+}
+
+function commandFailureCheck(
+  id: string,
+  title: string,
+  summary: string,
+  required: boolean,
+  details: unknown,
+  artifactIds: string[],
+  commandFailures: CommandFailureDetail[],
+): VerificationCheck {
+  const blockingFailures = commandFailures.filter(isBlockingCommandFailure);
+
+  if (blockingFailures.length > 0) {
+    const classification = blockingFailures.some(
+      (failure) => failure.classification === "newly_introduced",
+    )
+      ? "newly_introduced"
+      : blockingFailures.some((failure) => failure.classification === "unknown_baseline")
+        ? "unknown_baseline"
+        : "pre_existing";
+
+    return failedCheck(
+      id,
+      title,
+      summary,
+      required,
+      details,
+      artifactIds,
+      {
+        classification,
+        relatedToChangedFiles: blockingFailures.some((failure) => failure.relatedToChangedFiles),
+        severity: "blocking",
+      },
+    );
+  }
+
+  return {
+    id,
+    title,
+    status: "inconclusive",
+    summary: `${summary} This appears to be a pre-existing unrelated failure.`,
+    required,
+    artifactIds,
+    details,
+    severity: "warning",
+    classification: "pre_existing",
+    relatedToChangedFiles: false,
+  };
+}
+
+function isBlockingCommandFailure(failure: CommandFailureDetail) {
+  return (
+    failure.classification === "newly_introduced" ||
+    failure.classification === "unknown_baseline" ||
+    failure.relatedToChangedFiles
   );
 }
 
@@ -1597,6 +1728,10 @@ function failedCheck(
   required = false,
   details?: unknown,
   artifactIds?: string[],
+  metadata: Pick<
+    VerificationCheck,
+    "classification" | "relatedToChangedFiles" | "severity"
+  > = {},
 ): VerificationCheck {
   return {
     id,
@@ -1606,6 +1741,7 @@ function failedCheck(
     summary,
     details,
     artifactIds,
+    ...metadata,
   };
 }
 
@@ -1646,9 +1782,7 @@ function unavailableEvidenceCheck(
 }
 
 function isPreviewRequired(contract: TaskContract) {
-  return ["full_site", "add_page", "component_edit", "style_edit", "copy_edit"].includes(
-    contract.taskType,
-  );
+  return ["full_site", "add_page"].includes(contract.taskType);
 }
 
 function extractDiagnostics(output: string) {
@@ -1691,6 +1825,60 @@ function extractDiagnostics(output: string) {
   }
 
   return uniqueStrings(diagnostics).slice(-40);
+}
+
+export function extractDiagnosticPaths(outputOrDiagnostics: string | string[]) {
+  const lines = Array.isArray(outputOrDiagnostics)
+    ? outputOrDiagnostics
+    : outputOrDiagnostics.split(/\r?\n/);
+  const paths = new Set<string>();
+  const pathPattern =
+    /(?:^|\s)(?:\.\/)?([A-Za-z]:[\\/])?([A-Za-z0-9_./@\\-]+\.[A-Za-z0-9]+)(?::\d+(?::\d+)?|\(\d+,\d+\))/g;
+
+  for (const line of lines) {
+    let match: RegExpExecArray | null = null;
+
+    while ((match = pathPattern.exec(line)) !== null) {
+      const rawPath = `${match[1] ?? ""}${match[2] ?? ""}`
+        .replace(/\\/g, "/")
+        .replace(/^[A-Za-z]:\//, "")
+        .replace(/^\.\//, "");
+      const projectPath = rawPath.replace(/^.*?(?=(app|components|lib|data|public|styles|pages|src|middleware|package\.json|tsconfig\.json|next\.config))/i, "");
+
+      if (projectPath && !isInvalidProjectPath(projectPath)) {
+        paths.add(normalizeProjectPath(projectPath));
+      }
+    }
+  }
+
+  return [...paths];
+}
+
+export function diagnosticsOverlapChangedFiles(
+  diagnostics: string[],
+  input: Pick<VerificationInput, "changedFiles" | "deletedFiles" | "run">,
+) {
+  const diagnosticPaths = extractDiagnosticPaths(diagnostics);
+
+  if (diagnosticPaths.length === 0) {
+    return false;
+  }
+
+  const relevantPaths = uniqueStrings([
+    ...input.changedFiles,
+    ...(input.deletedFiles ?? []),
+    ...(input.run.contract.source?.expectedFiles ?? []),
+  ].map(normalizeProjectPath));
+
+  return diagnosticPaths.some((diagnosticPath) =>
+    relevantPaths.some(
+      (path) =>
+        diagnosticPath === path ||
+        path === diagnosticPath ||
+        matchesProjectPathPattern(diagnosticPath, path) ||
+        matchesProjectPathPattern(path, diagnosticPath),
+    ),
+  );
 }
 
 function isDiagnosticAnchor(line: string) {

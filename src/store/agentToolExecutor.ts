@@ -12,7 +12,14 @@ import { validatePackageJsonContent } from "../agent/project/packageValidation";
 import { getAgentToolDefinition } from "../agent/project/toolRegistry";
 import { ensureSiteIndex, refreshSiteIndex } from "../adapters/siteIrAdapter";
 import { flattenNodes, findSiteNode } from "../agent-core/site-ir/siteIndex";
-import type { PageSpec, SiteNode, SiteSpec } from "../agent-core/types";
+import type {
+  AgentFailureCode,
+  AgentStructuredObservation,
+  SuggestedAgentAction,
+  PageSpec,
+  SiteNode,
+  SiteSpec,
+} from "../agent-core/types";
 import { agentRuntimeApi } from "../services/agentRuntime";
 import {
   CommandResult,
@@ -45,6 +52,7 @@ export const AGENT_TOOL_EXECUTOR_NAMES = new Set<string>([
   "grep_files",
   "list_files",
   "read_files",
+  "replace_file_range",
   "refresh_preview",
   "refresh_site_index",
   "resolve_node_source",
@@ -59,6 +67,7 @@ export type AgentReadFileState = {
   content: string;
   contentHash: string;
   path: string;
+  ranges: Array<{ endLine: number; startLine: number }>;
   readAt: string;
 };
 
@@ -164,12 +173,14 @@ export async function executeAgentTool(
       throw error;
     }
 
+    const failure = classifyToolError(step.tool, step.args, error);
     return {
       observation: createAgentObservation({
-        content: getProjectErrorMessage(error),
+        content: JSON.stringify(failure, null, 2),
         ok: false,
         step: observationStep,
-        summary: `${step.tool} failed: ${getProjectErrorMessage(error)}`,
+        structuredData: failure,
+        summary: failure.summary,
         tool: step.tool,
       }),
     };
@@ -187,6 +198,8 @@ async function executeAgentToolCore(
   switch (step.tool) {
       case "list_files": {
         const fileTree = await projectApi.listFiles(project.id);
+        const paths = getAllowedFilePaths(fileTree);
+        const summary = "Listed project files.";
         store.set({ fileTree });
 
         return {
@@ -194,7 +207,14 @@ async function executeAgentToolCore(
             content: formatProjectFileTree(fileTree),
             ok: true,
             step: observationStep,
-            summary: "Listed project files.",
+            structuredData: buildSearchStructuredObservation({
+              fingerprint: buildSearchFingerprint(step.tool, {}),
+              newPaths: paths,
+              resultCount: paths.length,
+              summary,
+              tool: step.tool,
+            }),
+            summary,
             tool: step.tool,
           }),
         };
@@ -203,14 +223,20 @@ async function executeAgentToolCore(
         const files = await Promise.all(
           step.args.paths.map(async (path) => {
             const content = await projectApi.readFile(project.id, path);
-            rememberReadFile(runState, path, content);
-
-            return formatReadFileResult(
+            const file = formatReadFileResult(
               path,
               content,
               step.args.offset,
               step.args.limit,
             );
+            rememberReadFile(runState, path, content, {
+              endLine: file.endLine,
+              startLine: file.startLine,
+              totalLines: file.totalLines,
+              truncated: file.truncated,
+            });
+
+            return file;
           }),
         );
 
@@ -219,6 +245,21 @@ async function executeAgentToolCore(
             content: JSON.stringify({ files }, null, 2),
             ok: true,
             step: observationStep,
+            structuredData: {
+              evidence: {
+                readFiles: files.map((file) => ({
+                  contentHash: file.contentHash,
+                  endLine: file.endLine,
+                  path: file.path,
+                  startLine: file.startLine,
+                })),
+              },
+              ok: true,
+              summary: `Read ${files.length} file(s): ${files
+                .map((file) => file.path)
+                .join(", ")}`,
+              tool: step.tool,
+            },
             summary: `Read ${files.length} file(s): ${files
               .map((file) => file.path)
               .join(", ")}`,
@@ -232,13 +273,22 @@ async function executeAgentToolCore(
           .filter((path) => matchesSearchPaths(path, step.args.paths))
           .slice(0, MAX_GREP_FILES);
         const results = await grepProjectFiles(project, files, step.args);
+        const paths = uniqueStrings(results.map((result) => result.path));
+        const summary = `Found ${results.length} match(es) for "${step.args.query}".`;
 
         return {
           observation: createAgentObservation({
             content: JSON.stringify({ results }, null, 2),
             ok: true,
             step: observationStep,
-            summary: `Found ${results.length} match(es) for "${step.args.query}".`,
+            structuredData: buildSearchStructuredObservation({
+              fingerprint: buildSearchFingerprint(step.tool, step.args),
+              newPaths: paths,
+              resultCount: results.length,
+              summary,
+              tool: step.tool,
+            }),
+            summary,
             tool: step.tool,
           }),
         };
@@ -249,13 +299,21 @@ async function executeAgentToolCore(
         const matches = getAllowedFilePaths(fileTree)
           .filter((path) => matcher(path))
           .slice(0, step.args.maxResults ?? 100);
+        const summary = `Matched ${matches.length} file(s) for ${step.args.pattern}.`;
 
         return {
           observation: createAgentObservation({
             content: JSON.stringify({ files: matches }, null, 2),
             ok: true,
             step: observationStep,
-            summary: `Matched ${matches.length} file(s) for ${step.args.pattern}.`,
+            structuredData: buildSearchStructuredObservation({
+              fingerprint: buildSearchFingerprint(step.tool, step.args),
+              newPaths: matches,
+              resultCount: matches.length,
+              summary,
+              tool: step.tool,
+            }),
+            summary,
             tool: step.tool,
           }),
         };
@@ -369,6 +427,51 @@ async function executeAgentToolCore(
             "Ran requested command.",
             commandRunLink,
           ),
+        };
+      }
+      case "replace_file_range": {
+        const currentContent = await requireFreshReadRange(
+          project,
+          runState,
+          step.args.path,
+          step.args.startLine,
+          step.args.endLine,
+        );
+        rememberPackageBaseline(runState, step.args.path, currentContent);
+        const nextContent = replaceFileLineRange(currentContent, step.args);
+
+        if (step.args.path === "package.json") {
+          validatePackageJsonContent(nextContent);
+        }
+
+        const changeRecord = await writeAgentFiles(
+          store,
+          project,
+          [{ path: step.args.path, content: nextContent }],
+          step.args.summary,
+        );
+        rememberReadFile(runState, step.args.path, nextContent);
+        ensureCurrentProject(store, project.id);
+
+        return {
+          changedFiles: changeRecord.files.map((file) => file.path),
+          didChangeFiles: true,
+          didChangePackage: step.args.path === "package.json",
+          observation: createAgentObservation({
+            content: formatChangeRecordMessage(step.args.summary, changeRecord),
+            ok: true,
+            step: observationStep,
+            structuredData: {
+              evidence: {
+                changedFiles: changeRecord.files.map((file) => file.path),
+              },
+              ok: true,
+              summary: `Replaced lines ${step.args.startLine}-${step.args.endLine} in ${step.args.path}.`,
+              tool: step.tool,
+            },
+            summary: `Replaced lines ${step.args.startLine}-${step.args.endLine} in ${step.args.path}.`,
+            tool: step.tool,
+          }),
         };
       }
       case "apply_supabase_schema": {
@@ -790,11 +893,31 @@ function rememberReadFile(
   runState: AgentRunState,
   path: string,
   content: string,
+  range?: {
+    endLine: number;
+    startLine: number;
+    totalLines: number;
+    truncated: boolean;
+  },
 ) {
+  const existing = runState.readFiles.get(path);
+  const totalLines = splitContentIntoLines(content).length;
+  const ranges = range
+    ? mergeReadRanges(
+        existing?.contentHash === hashText(content) ? existing.ranges : [],
+        [
+          range.truncated
+            ? { endLine: range.endLine, startLine: range.startLine }
+            : { endLine: totalLines, startLine: 1 },
+        ],
+      )
+    : [{ endLine: totalLines, startLine: 1 }];
+
   runState.readFiles.set(path, {
     content,
     contentHash: hashText(content),
     path,
+    ranges,
     readAt: new Date().toISOString(),
   });
 }
@@ -836,6 +959,25 @@ async function requireFreshReadState(
   return currentContent;
 }
 
+async function requireFreshReadRange(
+  project: ProjectInfo,
+  runState: AgentRunState,
+  path: string,
+  startLine: number,
+  endLine: number,
+) {
+  const currentContent = await requireFreshReadState(project, runState, path);
+  const snapshot = runState.readFiles.get(path);
+
+  if (!snapshot || !isRangeCovered(snapshot.ranges, startLine, endLine)) {
+    throw new Error(
+      `${path} lines ${startLine}-${endLine} must be read with read_files in this agent run before replace_file_range can edit them.`,
+    );
+  }
+
+  return currentContent;
+}
+
 async function requireFreshReadForExistingFile(
   project: ProjectInfo,
   runState: AgentRunState,
@@ -868,6 +1010,88 @@ async function requireFreshReadForExistingFile(
       `${path} changed after it was read. Read the file again before overwriting.`,
     );
   }
+}
+
+function mergeReadRanges(
+  current: Array<{ endLine: number; startLine: number }>,
+  next: Array<{ endLine: number; startLine: number }>,
+) {
+  const sorted = [...current, ...next]
+    .filter((range) => range.startLine > 0 && range.endLine >= range.startLine)
+    .sort((left, right) => left.startLine - right.startLine);
+  const merged: Array<{ endLine: number; startLine: number }> = [];
+
+  for (const range of sorted) {
+    const previous = merged[merged.length - 1];
+
+    if (!previous || range.startLine > previous.endLine + 1) {
+      merged.push({ ...range });
+      continue;
+    }
+
+    previous.endLine = Math.max(previous.endLine, range.endLine);
+  }
+
+  return merged;
+}
+
+function isRangeCovered(
+  ranges: Array<{ endLine: number; startLine: number }>,
+  startLine: number,
+  endLine: number,
+) {
+  return ranges.some(
+    (range) => range.startLine <= startLine && range.endLine >= endLine,
+  );
+}
+
+function replaceFileLineRange(
+  content: string,
+  args: Extract<AgentToolCallStep, { tool: "replace_file_range" }>["args"],
+) {
+  const lines = splitContentIntoLines(content);
+
+  if (
+    args.startLine < 1 ||
+    args.endLine < args.startLine ||
+    args.endLine > lines.length
+  ) {
+    throw new Error(
+      `replace_file_range line range ${args.startLine}-${args.endLine} is outside the file's ${lines.length} line(s).`,
+    );
+  }
+
+  const before = lines
+    .slice(0, args.startLine - 1)
+    .map((line) => `${line.text}${line.lineEnding}`)
+    .join("");
+  const replacedSegment = lines
+    .slice(args.startLine - 1, args.endLine)
+    .map((line) => `${line.text}${line.lineEnding}`)
+    .join("");
+  const after = lines
+    .slice(args.endLine)
+    .map((line) => `${line.text}${line.lineEnding}`)
+    .join("");
+  let replacement = adaptReplacementLineEndings(
+    args.newContent,
+    replacedSegment,
+    content,
+  );
+
+  if (after && !/(?:\r\n|\r|\n)$/.test(replacement)) {
+    replacement += detectDominantLineEnding(replacedSegment) ??
+      detectDominantLineEnding(content) ??
+      "\n";
+  }
+
+  const nextContent = `${before}${replacement}${after}`;
+
+  if (nextContent === content) {
+    throw new Error("replace_file_range produced identical file content.");
+  }
+
+  return nextContent;
 }
 
 function formatReadFileResult(
@@ -1337,9 +1561,32 @@ export async function runAgentCommandObservation(
   ensureCurrentProject(store, project.id);
 
   if (!result) {
+    const structuredData: AgentStructuredObservation = {
+      ok: false,
+      tool: "run_command",
+      summary: `${reason} ${command} did not return a result.`,
+      error: {
+        code: "COMMAND_FAILED",
+        message: `${command} did not return a result.`,
+        retryable: true,
+        suggestedAction: {
+          type: "tool_call",
+          tool: "run_command",
+          args: { command },
+          rationale: "Retry the allowed command once if the missing result was transient.",
+        },
+      },
+      evidence: {
+        command,
+        commandSuccess: false,
+      },
+    };
+
     return createAgentObservation({
+      content: JSON.stringify(structuredData, null, 2),
       ok: false,
       step: observationStep,
+      structuredData,
       summary: `${reason} ${command} did not return a result.`,
       tool: "run_command",
     });
@@ -1347,13 +1594,44 @@ export async function runAgentCommandObservation(
 
   const exitCode = result.exitCode ?? "unknown";
 
+  const diagnostics = extractCommandDiagnostics(result.output);
+  const structuredData: AgentStructuredObservation = result.success
+    ? {
+        evidence: {
+          command,
+          commandSuccess: true,
+        },
+        ok: true,
+        summary: `${reason} ${command} succeeded.`,
+        tool: "run_command",
+      }
+    : {
+        evidence: {
+          command,
+          commandSuccess: false,
+        },
+        error: {
+          code: "COMMAND_FAILED",
+          diagnostics,
+          message: `${command} failed with exit code ${exitCode}.`,
+          retryable: true,
+        },
+        ok: false,
+        summary: `${reason} ${command} failed with exit code ${exitCode}.`,
+        tool: "run_command",
+      };
+
   return createAgentObservation({
-    content: formatCommandObservation(result),
+    content: result.success
+      ? formatCommandObservation(result)
+      : JSON.stringify({
+          ...structuredData,
+          output: formatCommandObservation(result),
+        }, null, 2),
     ok: result.success,
     step: observationStep,
-    summary: result.success
-      ? `${reason} ${command} succeeded.`
-      : `${reason} ${command} failed with exit code ${exitCode}.`,
+    structuredData,
+    summary: structuredData.summary,
     tool: "run_command",
   });
 }
@@ -1420,6 +1698,188 @@ function createAgentObservation(observation: AgentObservation): AgentObservation
       ? truncateToolOutput(observation.content)
       : observation.content,
   };
+}
+
+function buildSearchStructuredObservation({
+  fingerprint,
+  newPaths,
+  resultCount,
+  summary,
+  tool,
+}: {
+  fingerprint: string;
+  newPaths: string[];
+  resultCount: number;
+  summary: string;
+  tool: "list_files" | "grep_files" | "glob_files";
+}): AgentStructuredObservation {
+  return {
+    evidence: {
+      searches: [
+        {
+          fingerprint,
+          newPaths: uniqueStrings(newPaths),
+          resultCount,
+          summary,
+          tool,
+        },
+      ],
+    },
+    ok: true,
+    summary,
+    tool,
+  };
+}
+
+function buildSearchFingerprint(tool: string, args: unknown) {
+  return `${tool}:${stableJson(args)}`;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(",")}]`;
+  }
+
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
+  }
+
+  return JSON.stringify(value);
+}
+
+function uniqueStrings(values: string[]) {
+  return Array.from(new Set(values));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function classifyToolError(
+  tool: string,
+  args: unknown,
+  error: unknown,
+): AgentStructuredObservation {
+  const message = getProjectErrorMessage(error);
+  const lowerMessage = message.toLowerCase();
+  const relatedFiles = collectToolRelatedFiles(args);
+  const code: AgentFailureCode =
+    /old_string.*not found/i.test(message)
+      ? "OLD_STRING_NOT_FOUND"
+      : /old_string and new_string are identical|produced identical file content/i.test(message)
+        ? "IDENTICAL_EDIT"
+        : /changed after it was read|read the file again before/i.test(message)
+          ? "STALE_READ"
+          : /must be read with read_files|already exists and must be read/i.test(message)
+            ? "MUST_READ_BEFORE_WRITE"
+            : /package\.json|invalid package|could not parse/i.test(message)
+              ? "PACKAGE_INVALID"
+              : "UNKNOWN_RUNTIME_FAILURE";
+  const retryable = code !== "PACKAGE_INVALID" && code !== "UNKNOWN_RUNTIME_FAILURE";
+  const suggestedAction = buildSuggestedActionForToolFailure(
+    code,
+    tool,
+    relatedFiles,
+    message,
+  );
+  const summary = `${tool} failed: ${code}`;
+
+  return {
+    ok: false,
+    tool,
+    summary,
+    error: {
+      code,
+      fingerprint: buildFailureFingerprint(code, tool, relatedFiles, lowerMessage),
+      message,
+      retryable,
+      relatedFiles,
+      suggestedAction,
+    },
+  };
+}
+
+function buildSuggestedActionForToolFailure(
+  code: AgentFailureCode,
+  tool: string,
+  relatedFiles: string[],
+  message: string,
+): SuggestedAgentAction | undefined {
+  if (
+    relatedFiles.length > 0 &&
+    (
+      code === "MUST_READ_BEFORE_WRITE" ||
+      code === "STALE_READ" ||
+      code === "OLD_STRING_NOT_FOUND"
+    )
+  ) {
+    return {
+      type: "tool_call",
+      tool: "read_files",
+      args: { paths: relatedFiles },
+      rationale: `Refresh file evidence before retrying ${tool}.`,
+    };
+  }
+
+  if (code === "IDENTICAL_EDIT") {
+    return {
+      type: "finish_candidate",
+      summary: "The requested file content already appears to match the target state.",
+      verification: message,
+    };
+  }
+
+  return undefined;
+}
+
+function collectToolRelatedFiles(args: unknown): string[] {
+  if (typeof args !== "object" || args === null) {
+    return [];
+  }
+
+  const record = args as Record<string, unknown>;
+  const paths = new Set<string>();
+
+  if (typeof record.path === "string") {
+    paths.add(record.path);
+  }
+
+  if (Array.isArray(record.paths)) {
+    for (const path of record.paths) {
+      if (typeof path === "string") {
+        paths.add(path);
+      }
+    }
+  }
+
+  if (Array.isArray(record.files)) {
+    for (const file of record.files) {
+      if (
+        typeof file === "object" &&
+        file !== null &&
+        typeof (file as { path?: unknown }).path === "string"
+      ) {
+        paths.add((file as { path: string }).path);
+      }
+    }
+  }
+
+  return [...paths];
+}
+
+function buildFailureFingerprint(
+  code: AgentFailureCode,
+  tool: string,
+  relatedFiles: string[],
+  message: string,
+) {
+  return `${code}:${tool}:${relatedFiles.sort().join(",")}:${message
+    .replace(/\d+/g, "n")
+    .replace(/\s+/g, " ")
+    .slice(0, 240)}`;
 }
 
 function isActiveProjectChangeError(error: unknown) {

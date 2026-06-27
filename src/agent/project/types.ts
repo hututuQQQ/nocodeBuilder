@@ -1,6 +1,9 @@
 import type { ProjectFileInput } from "../../services/projects";
 import type {
   AgentBudgetState,
+  AgentFinishEvidence,
+  AgentStructuredObservation,
+  AgentWorkingState,
   RunContextSummary,
 } from "../../agent-core/types";
 import type { TaskManifest } from "../../agent-core/manifest/taskManifest";
@@ -64,6 +67,18 @@ export type AgentToolCallStep =
         old_string: string;
         path: string;
         replace_all?: boolean;
+        summary: string;
+      };
+    }
+  | {
+      type: "tool_call";
+      tool: "replace_file_range";
+      rationale: string;
+      args: {
+        endLine: number;
+        newContent: string;
+        path: string;
+        startLine: number;
         summary: string;
       };
     }
@@ -176,6 +191,7 @@ export type AgentStepResponse =
       type: "finish_candidate";
       summary: string;
       verification?: string;
+      evidence?: AgentFinishEvidence;
     };
 
 export type AgentCommand =
@@ -193,6 +209,7 @@ export type AgentObservation = {
   content?: string;
   ok: boolean;
   step: number;
+  structuredData?: AgentStructuredObservation;
   summary: string;
   tool: string;
 };
@@ -284,6 +301,7 @@ export type AgentStepContext = {
   specContext?: CompactSpecContext;
   steering: string[];
   taskLedger: TaskLedger | null;
+  workingState?: AgentWorkingState;
   workingSummary: WorkingSummary | null;
 };
 

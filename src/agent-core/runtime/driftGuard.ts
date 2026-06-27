@@ -58,14 +58,6 @@ export function checkRunDrift(input: {
     };
   }
 
-  if (isFinishCandidateWithoutAcceptanceEvidence(input)) {
-    return {
-      ok: false,
-      reason: "finish_candidate lacks evidence for linked acceptance criteria.",
-      suggestedAction: "block_plan",
-    };
-  }
-
   if (actionObviouslyDriftsFromTask(input.manifest, input.action)) {
     return {
       ok: false,
@@ -96,7 +88,10 @@ function collectMutatedPaths(action: HeadlessModelAction): string[] {
     return [];
   }
 
-  if (action.tool === "edit_file" && isRecord(action.args)) {
+  if (
+    (action.tool === "edit_file" || action.tool === "replace_file_range") &&
+    isRecord(action.args)
+  ) {
     return readPath(action.args.path);
   }
 
@@ -125,52 +120,6 @@ function isPathAllowedByManifest(path: string, manifest: TaskManifest) {
     manifest.runtimeContract.compiledAllowedPaths.some((pattern) =>
       matchesProjectPathPattern(normalized, pattern),
     )
-  );
-}
-
-function isFinishCandidateWithoutAcceptanceEvidence(input: {
-  manifest: TaskManifest;
-  action: HeadlessModelAction;
-  recentObservations: string[];
-  changedFiles: string[];
-}) {
-  if (
-    input.action.type !== "finish_candidate" ||
-    input.manifest.mode !== "spec" ||
-    !input.manifest.spec
-  ) {
-    return false;
-  }
-
-  const requiredCriteria = input.manifest.spec.linkedAcceptanceCriteria.filter(
-    (criterion) => criterion.required,
-  );
-
-  if (requiredCriteria.length === 0) {
-    return false;
-  }
-
-  const changedTaskFiles = input.changedFiles
-    .map(normalizeProjectPath)
-    .filter((path) => isPathAllowedByManifest(path, input.manifest));
-
-  if (changedTaskFiles.length > 0) {
-    return false;
-  }
-
-  const evidenceText = normalizeText([
-    input.action.summary,
-    input.action.verification ?? "",
-    ...input.recentObservations,
-  ].join("\n"));
-
-  if (!evidenceText.trim()) {
-    return true;
-  }
-
-  return !requiredCriteria.every((criterion) =>
-    evidenceText.includes(normalizeText(criterion.id)) ||
-    hasMeaningfulWordOverlap(evidenceText, criterion.description, 2),
   );
 }
 

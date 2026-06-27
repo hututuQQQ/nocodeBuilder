@@ -44,8 +44,12 @@ export function getAgentToolDefinition(name: AgentToolName) {
   return AGENT_TOOL_DEFINITIONS.find((tool) => tool.name === name);
 }
 
-export function formatAgentToolListForPrompt() {
-  return AGENT_TOOL_DEFINITIONS.map(
+export function formatAgentToolListForPrompt(options: {
+  includeTool?: (tool: AgentToolDefinition) => boolean;
+} = {}) {
+  return AGENT_TOOL_DEFINITIONS
+    .filter((tool) => options.includeTool?.(tool) ?? true)
+    .map(
     (tool) => {
       const description =
         tool.name === "run_command"

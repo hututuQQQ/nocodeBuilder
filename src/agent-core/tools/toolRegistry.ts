@@ -6,6 +6,7 @@ export type CoreToolName =
   | "grep_files"
   | "glob_files"
   | "edit_file"
+  | "replace_file_range"
   | "write_files"
   | "delete_files"
   | "run_command"
@@ -57,6 +58,23 @@ const INPUT_SCHEMAS: Record<CoreToolName, RuntimeSchema> = {
       requiredString(record, "new_string", { allowEmpty: true });
       optionalBoolean(record, "replace_all");
       optionalString(record, "summary");
+    },
+  ),
+  replace_file_range: objectSchema(
+    'Range edit input: {"path":"app/page.tsx","startLine":120,"endLine":148,"newContent":"replacement text","summary":"string"}',
+    (record) => {
+      requiredString(record, "path");
+      requiredPositiveInteger(record, "startLine");
+      requiredPositiveInteger(record, "endLine");
+      requiredString(record, "newContent", { allowEmpty: true });
+      optionalString(record, "summary");
+      if (
+        typeof record.startLine === "number" &&
+        typeof record.endLine === "number" &&
+        record.endLine < record.startLine
+      ) {
+        throw new Error("endLine must be greater than or equal to startLine.");
+      }
     },
   ),
   glob_files: objectSchema(
@@ -144,6 +162,7 @@ const OUTPUT_SCHEMAS: Record<CoreToolName, RuntimeSchema> = {
   apply_supabase_schema: toolResultOutputSchema,
   delete_files: toolResultOutputSchema,
   edit_file: toolResultOutputSchema,
+  replace_file_range: toolResultOutputSchema,
   find_site_node: outputSchema("Site node search result with matching nodes."),
   get_page_spec: outputSchema("PageSpec object with nodes."),
   get_site_spec: outputSchema("SiteSpec V1 object."),
@@ -189,6 +208,15 @@ const TOOL_METADATA: Array<
   legacyTool(
     "edit_file",
     "Make a focused text replacement in a previously read file. old_string must match file.content exactly and be unique unless replace_all is true.",
+    false,
+    false,
+    "workspace_write",
+    true,
+    "conditional",
+  ),
+  legacyTool(
+    "replace_file_range",
+    "Replace a 1-based inclusive line range in a previously read file. Prefer this when diagnostics identify line numbers or exact old_string is brittle.",
     false,
     false,
     "workspace_write",
@@ -426,6 +454,14 @@ function optionalInteger(record: JsonRecord, field: string) {
 
   if (typeof record[field] !== "number" || !Number.isInteger(record[field])) {
     throw new Error(`${field} must be an integer when provided.`);
+  }
+}
+
+function requiredPositiveInteger(record: JsonRecord, field: string) {
+  const value = record[field];
+
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new Error(`${field} must be a positive integer.`);
   }
 }
 

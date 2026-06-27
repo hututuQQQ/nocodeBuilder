@@ -494,9 +494,15 @@ async function diagnoseCurrentSpecBlock(
         .getLatestVerificationReport(spec.projectId, latestRun.id)
         .catch(() => null)
     : null;
+  const latestCheckpoint = latestRun?.id
+    ? await agentRuntimeApi
+        .getLatestCheckpoint(spec.projectId, latestRun.id)
+        .catch(() => null)
+    : null;
   const diagnosis = diagnoseSpecBlock({
     spec,
     revision,
+    latestCheckpoint,
     latestRun,
     latestVerificationReport,
     projectError: store.get().projectError,
@@ -525,7 +531,7 @@ async function applyBlockedSpecRecovery(
 ) {
   const plan = diagnosis.recommendedPlan;
 
-  if (plan.action === "retry_verification") {
+  if (plan.action === "ignore_preexisting") {
     appendSpecAssistantMessage(store, retryNote, {
       en: "I'll retry final verification with your note in the conversation context.",
       zhHans: "我会结合你的说明重试最终验证。",
@@ -534,7 +540,7 @@ async function applyBlockedSpecRecovery(
     return;
   }
 
-  if (plan.action === "retry_task" || plan.action === "expand_scope_and_retry") {
+  if (plan.action === "retry_with_suggested_action" || plan.action === "expand_scope") {
     const taskTitle = getSpecRecoveryTaskTitle(store, plan.taskId);
     appendSpecAssistantMessage(store, retryNote, {
       en: `I'll retry ${taskTitle} with your note in the conversation context.`,
@@ -571,7 +577,7 @@ async function applyBlockedSpecRecovery(
     return;
   }
 
-  if (plan.action === "continue_in_chat") {
+  if (plan.action === "cancel") {
     appendSpecAssistantMessage(store, retryNote, {
       en: plan.reason,
       zhHans: plan.reason,
@@ -580,10 +586,23 @@ async function applyBlockedSpecRecovery(
     return;
   }
 
-  appendSpecAssistantMessage(store, retryNote, {
-    en: plan.question,
-    zhHans: plan.question,
-  });
+  if (plan.action === "manual_approval" || plan.action === "accept_noop") {
+    appendSpecAssistantMessage(store, retryNote, {
+      en: plan.reason,
+      zhHans: plan.reason,
+    });
+    return;
+  }
+
+  if (plan.action === "convert_to_repair_task") {
+    const taskTitle = getSpecRecoveryTaskTitle(store, plan.taskId);
+    appendSpecAssistantMessage(store, retryNote, {
+      en: `I'll retry ${taskTitle} as a repair task with your note in the conversation context.`,
+      zhHans: `我会把 ${taskTitle} 作为修复任务重试，并带上你的说明。`,
+    });
+    await store.get().retrySpecTask(plan.taskId, retryNote);
+    return;
+  }
 }
 
 function getSpecRecoveryTaskTitle(store: StoreAccess, taskId: string) {
@@ -624,10 +643,11 @@ async function getSpecRouterConfig(): Promise<AiProviderConfig> {
 
 function isActionableRecovery(diagnosis: SpecBlockDiagnosis) {
   return [
-    "retry_task",
-    "expand_scope_and_retry",
-    "retry_verification",
+    "retry_with_suggested_action",
+    "expand_scope",
+    "ignore_preexisting",
     "revise_spec",
+    "convert_to_repair_task",
   ].includes(diagnosis.recommendedPlan.action);
 }
 
