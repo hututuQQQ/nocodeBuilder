@@ -159,6 +159,64 @@ describe("project runtime requests", () => {
     expect(repairMessage.content).toContain("do not add shell pipes");
   });
 
+  it("accepts SQL seed files allowed by the runtime contract", async () => {
+    const writeSeed = {
+      args: {
+        files: [
+          {
+            content: "insert into posts(title) values ('Hello');",
+            path: "data/seed.sql",
+          },
+        ],
+        summary: "Add seed data.",
+      },
+      rationale: "Create Supabase seed data.",
+      tool: "write_files",
+      type: "tool_call",
+    };
+    mocks.chatJson.mockResolvedValueOnce(writeSeed);
+
+    const step = await requestAgentStep({
+      config: createConfig(),
+      context: createAgentStepContext({
+        allowedPaths: ["app/**", "data/**"],
+      }),
+      userRequest: "Create seed data",
+    });
+
+    expect(step).toMatchObject(writeSeed);
+    expect(mocks.chatJson).toHaveBeenCalledTimes(1);
+  });
+
+  it("validates agent paths against expanded runtime contract scope", async () => {
+    const writeScript = {
+      args: {
+        files: [
+          {
+            content: "export const seed = true;",
+            path: "scripts/seed.ts",
+          },
+        ],
+        summary: "Add seed helper.",
+      },
+      rationale: "Create the scoped helper.",
+      tool: "write_files",
+      type: "tool_call",
+    };
+    mocks.chatJson.mockResolvedValueOnce(writeScript);
+
+    const step = await requestAgentStep({
+      config: createConfig(),
+      context: createAgentStepContext({
+        allowedPaths: ["app/**", "scripts/**"],
+      }),
+      userRequest: "Create seed helper",
+    });
+
+    expect(step).toMatchObject(writeScript);
+    expect(mocks.chatJson).toHaveBeenCalledTimes(1);
+  });
+
   it("throws a typed validation error when forbidden command repair is exhausted", async () => {
     const invalidCommand = {
       type: "tool_call",
@@ -202,7 +260,9 @@ function createConfig(): AiProviderConfig {
   };
 }
 
-function createAgentStepContext(): AgentStepContext {
+function createAgentStepContext(options: {
+  allowedPaths?: string[];
+} = {}): AgentStepContext {
   return {
     backend: null,
     budgetState: {
@@ -240,7 +300,7 @@ function createAgentStepContext(): AgentStepContext {
           productionDeployment: "ask",
         },
         scope: {
-          allowedPaths: ["app/**"],
+          allowedPaths: options.allowedPaths ?? ["app/**"],
           forbiddenPaths: [".env*"],
         },
         taskType: "component_edit",

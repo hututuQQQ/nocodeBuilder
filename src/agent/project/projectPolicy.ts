@@ -64,6 +64,7 @@ export const NEXTJS_APP_ROUTER_PROJECT_POLICY = {
     ".md",
     ".mjs",
     ".svg",
+    ".sql",
     ".ts",
     ".tsx",
     ".txt",
@@ -104,6 +105,61 @@ export const NEXTJS_APP_ROUTER_PROJECT_POLICY = {
 
 export const DEFAULT_PROJECT_POLICY: ProjectPolicy =
   NEXTJS_APP_ROUTER_PROJECT_POLICY;
+
+export function extendProjectPolicyWithAllowedPaths(
+  policy: ProjectPolicy,
+  allowedPaths: readonly string[],
+): ProjectPolicy {
+  const rootAllowedFiles = new Set(policy.rootAllowedFiles);
+  const allowedDirectories = new Set(policy.allowedDirectories);
+  const allowedTextExtensions = new Set(policy.allowedTextExtensions);
+
+  for (const rawPath of allowedPaths) {
+    const path = rawPath.trim().replace(/\\/g, "/").replace(/^\.?\//, "");
+
+    if (!path || path.includes("\0")) {
+      continue;
+    }
+
+    if (path.endsWith("/**")) {
+      const directory = path.slice(0, -3).replace(/\/+$/, "");
+
+      if (directory && !directory.includes("*")) {
+        allowedDirectories.add(directory);
+      }
+
+      continue;
+    }
+
+    if (path.endsWith("/*")) {
+      const directory = path.slice(0, -2).replace(/\/+$/, "");
+
+      if (directory && !directory.includes("*")) {
+        allowedDirectories.add(directory);
+      }
+
+      continue;
+    }
+
+    if (path.includes("*")) {
+      continue;
+    }
+
+    rootAllowedFiles.add(path);
+    const extension = fileExtension(path);
+
+    if (extension) {
+      allowedTextExtensions.add(extension);
+    }
+  }
+
+  return {
+    ...policy,
+    allowedDirectories: Array.from(allowedDirectories),
+    allowedTextExtensions: Array.from(allowedTextExtensions),
+    rootAllowedFiles: Array.from(rootAllowedFiles),
+  };
+}
 
 export function getPinnedPackageVersions(
   policy: ProjectPolicy = DEFAULT_PROJECT_POLICY,
@@ -165,4 +221,11 @@ function formatPackageList(packages: Readonly<Record<string, string>>) {
   return Object.entries(packages)
     .map(([name, version]) => `${name} ${version}`)
     .join(", ");
+}
+
+function fileExtension(path: string) {
+  const fileName = path.split("/").pop() ?? "";
+  const dot = fileName.lastIndexOf(".");
+
+  return dot > 0 ? fileName.slice(dot) : "";
 }
