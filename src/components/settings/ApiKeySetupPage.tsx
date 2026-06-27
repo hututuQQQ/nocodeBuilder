@@ -1,9 +1,11 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { CheckCircle2, KeyRound, PlugZap, Save, X } from "lucide-react";
+import { CheckCircle2, PlugZap, Save, X } from "lucide-react";
 import {
   ChatCompletionClient,
   LlmClientError,
 } from "../../agent/llm/ChatCompletionClient";
+import appIcon from "../../assets/nocodebuilder-icon.png";
+import { useI18n } from "../../i18n";
 import {
   AI_PROVIDER_IDS,
   DEFAULT_AI_PROVIDER,
@@ -15,6 +17,7 @@ import {
   AiProviderConfigInput,
   AiProviderState,
 } from "../../services/keyStore";
+import { LocaleSelect } from "./LocaleSelect";
 
 type ApiKeySetupPageProps = {
   aiState: AiProviderState | null;
@@ -46,6 +49,7 @@ export function ApiKeySetupPage({
   onCancel,
   onSave,
 }: ApiKeySetupPageProps) {
+  const { t } = useI18n();
   const [providerId, setProviderId] = useState<AiProviderId>(
     aiState?.activeProvider ?? DEFAULT_AI_PROVIDER,
   );
@@ -145,21 +149,21 @@ export function ApiKeySetupPage({
 
   function validateConfig() {
     if (!hasStoredApiKey && !draft.apiKey.trim()) {
-      return `Enter a ${provider.label} API key.`;
+      return t("settings.enterApiKey", { provider: provider.label });
     }
 
     if (!draft.baseUrl.trim()) {
-      return `Enter a ${provider.label} Base URL.`;
+      return t("settings.enterBaseUrl", { provider: provider.label });
     }
 
     if (draft.models.length === 0) {
-      return `Choose at least one ${provider.label} model.`;
+      return t("settings.chooseModel", { provider: provider.label });
     }
 
     try {
       new URL(draft.baseUrl.trim());
     } catch {
-      return "Base URL must be a valid URL.";
+      return t("settings.invalidBaseUrl");
     }
 
     return null;
@@ -189,6 +193,7 @@ export function ApiKeySetupPage({
             baseUrl: draft.baseUrl.trim(),
             model,
             provider: providerId,
+            t,
           }),
         ),
       );
@@ -208,12 +213,15 @@ export function ApiKeySetupPage({
       }));
       setNotice({
         tone: "success",
-        message: `${provider.label} connection test passed for ${draft.models.join(", ")}. You can save this configuration.`,
+        message: t("settings.connectionPassed", {
+          models: draft.models.join(", "),
+          provider: provider.label,
+        }),
       });
     } catch (testError) {
       setNotice({
         tone: "error",
-        message: getConnectionErrorMessage(testError),
+        message: getConnectionErrorMessage(testError, t),
       });
     } finally {
       setIsTesting(false);
@@ -230,8 +238,7 @@ export function ApiKeySetupPage({
     if (saveProviderIds.length === 0) {
       setNotice({
         tone: "error",
-        message:
-          "Run a real connection test for DeepSeek or GLM before saving.",
+        message: t("settings.saveRequiresTest"),
       });
       return;
     }
@@ -259,7 +266,7 @@ export function ApiKeySetupPage({
     } catch {
       setNotice({
         tone: "error",
-        message: "Failed to save configuration. Try again later.",
+        message: t("settings.saveFailed"),
       });
     } finally {
       setIsSaving(false);
@@ -269,40 +276,45 @@ export function ApiKeySetupPage({
   return (
     <main className="grid min-h-dvh w-dvw place-items-center overflow-y-auto bg-[#0b0b0d] px-4 py-6 text-zinc-100 sm:px-6">
       <form
-        className="w-full max-w-[620px] rounded-md border border-zinc-800 bg-[#101012] shadow-2xl shadow-black/30"
+        className="w-full max-w-[660px] rounded-lg border border-zinc-800 bg-[#101012] shadow-2xl shadow-black/30"
         onSubmit={handleSubmit}
       >
         <div className="flex items-start justify-between gap-4 border-b border-zinc-800 px-6 py-5">
           <div className="flex items-center gap-3">
-            <div className="grid size-10 place-items-center rounded-md border border-teal-400/30 bg-teal-400/10 text-teal-200">
-              <KeyRound size={19} aria-hidden="true" />
-            </div>
+            <img
+              alt=""
+              className="size-11 rounded-lg border border-teal-400/20 bg-zinc-950 object-cover shadow-lg shadow-black/30"
+              src={appIcon}
+            />
             <div>
               <h1 className="text-lg font-semibold text-zinc-50">
-                AI Web Builder
+                {t("app.name")}
               </h1>
               <p className="mt-1 text-sm text-zinc-500">
-                Configure an AI provider before using the builder.
+                {t("settings.configureProvider")}
               </p>
             </div>
           </div>
 
-          {mode === "settings" && onCancel ? (
-            <button
-              aria-label="Close settings"
-              className="grid size-9 shrink-0 place-items-center rounded-md border border-zinc-800 bg-zinc-900 text-zinc-400 transition hover:border-zinc-700 hover:bg-zinc-800 hover:text-zinc-200"
-              onClick={onCancel}
-              type="button"
-            >
-              <X size={16} aria-hidden="true" />
-            </button>
-          ) : null}
+          <div className="flex shrink-0 items-center gap-2">
+            <LocaleSelect />
+            {mode === "settings" && onCancel ? (
+              <button
+                aria-label={t("settings.close")}
+                className="grid size-9 shrink-0 place-items-center rounded-md border border-zinc-800 bg-zinc-900 text-zinc-400 transition hover:border-zinc-700 hover:bg-zinc-800 hover:text-zinc-200"
+                onClick={onCancel}
+                type="button"
+              >
+                <X size={16} aria-hidden="true" />
+              </button>
+            ) : null}
+          </div>
         </div>
 
         <div className="space-y-5 px-6 py-6">
           <fieldset>
             <legend className="mb-2 block text-sm font-medium text-zinc-300">
-              Provider
+              {t("settings.provider")}
             </legend>
             <div className="grid grid-cols-2 gap-2 rounded-md border border-zinc-800 bg-zinc-950 p-1">
               {AI_PROVIDER_IDS.map((optionProviderId) => {
@@ -325,7 +337,9 @@ export function ApiKeySetupPage({
                   >
                     <span>{optionProvider.label}</span>
                     <span className="mt-0.5 text-[11px] font-normal text-zinc-600">
-                      {isConfigured ? "Configured" : optionProvider.defaultModel}
+                      {isConfigured
+                        ? t("common.configured")
+                        : optionProvider.defaultModel}
                     </span>
                   </button>
                 );
@@ -335,7 +349,7 @@ export function ApiKeySetupPage({
 
           <label className="block">
             <span className="mb-2 block text-sm font-medium text-zinc-300">
-              API Key
+              {t("settings.apiKey")}
             </span>
             <input
               className="h-11 w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/10"
@@ -349,7 +363,7 @@ export function ApiKeySetupPage({
               }}
               placeholder={
                 hasStoredApiKey
-                  ? "Stored in Windows Credential Manager"
+                  ? t("settings.storedCredential")
                   : provider.apiKeyPlaceholder
               }
               type="password"
@@ -359,7 +373,7 @@ export function ApiKeySetupPage({
 
           <fieldset>
             <legend className="mb-2 block text-sm font-medium text-zinc-300">
-              Models
+              {t("settings.models")}
             </legend>
             <div
               className="grid gap-2 rounded-md border border-zinc-800 bg-zinc-950 p-1"
@@ -400,7 +414,7 @@ export function ApiKeySetupPage({
 
           <label className="block">
             <span className="mb-2 block text-sm font-medium text-zinc-300">
-              Base URL
+              {t("settings.baseUrl")}
             </span>
             <input
               className="h-11 w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/10"
@@ -429,7 +443,7 @@ export function ApiKeySetupPage({
           >
             {notice
               ? notice.message
-              : "Connection test results and errors appear here."}
+              : t("settings.noticePlaceholder")}
           </div>
         </div>
 
@@ -441,7 +455,7 @@ export function ApiKeySetupPage({
             type="button"
           >
             <PlugZap size={16} aria-hidden="true" />
-            {isTesting ? "Testing..." : "Test Connection"}
+            {isTesting ? t("settings.testing") : t("settings.testConnection")}
           </button>
           <button
             className="flex h-10 items-center justify-center gap-2 rounded-md border border-teal-400/30 bg-teal-400/10 px-4 text-sm font-medium text-teal-100 transition hover:border-teal-300/60 hover:bg-teal-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
@@ -453,7 +467,7 @@ export function ApiKeySetupPage({
             ) : (
               <Save size={16} aria-hidden="true" />
             )}
-            Save and Continue
+            {t("settings.saveContinue")}
           </button>
         </div>
       </form>
@@ -481,11 +495,13 @@ async function testModelConnection({
   baseUrl,
   model,
   provider,
+  t,
 }: {
   apiKey?: string;
   baseUrl: string;
   model: string;
   provider: AiProviderId;
+  t: ReturnType<typeof useI18n>["t"];
 }): Promise<{ ok: true } | { ok: false; message: string }> {
   const providerDefinition = getAiProviderDefinition(provider);
 
@@ -501,7 +517,10 @@ async function testModelConnection({
     if (!isConnected) {
       return {
         ok: false,
-        message: `${providerDefinition.label} model ${model} responded with an unexpected value.`,
+        message: t("settings.connectionUnexpected", {
+          model,
+          provider: providerDefinition.label,
+        }),
       };
     }
 
@@ -509,7 +528,11 @@ async function testModelConnection({
   } catch (error) {
     return {
       ok: false,
-      message: `${providerDefinition.label} model ${model} failed: ${getConnectionErrorMessage(error)}`,
+      message: t("settings.connectionFailed", {
+        message: getConnectionErrorMessage(error, t),
+        model,
+        provider: providerDefinition.label,
+      }),
     };
   }
 }
@@ -557,7 +580,10 @@ function createProviderDraft(
   };
 }
 
-function getConnectionErrorMessage(error: unknown) {
+function getConnectionErrorMessage(
+  error: unknown,
+  t: ReturnType<typeof useI18n>["t"],
+) {
   if (error instanceof LlmClientError) {
     return error.message;
   }
@@ -566,5 +592,5 @@ function getConnectionErrorMessage(error: unknown) {
     return error.message;
   }
 
-  return "Connection test failed. Try again later.";
+  return t("settings.connectionGenericFailed");
 }

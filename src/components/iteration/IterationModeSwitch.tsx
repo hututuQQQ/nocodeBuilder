@@ -1,13 +1,16 @@
 import { FormEvent, useState } from "react";
 import { FileText, Loader2, MessageSquare, X } from "lucide-react";
+import { useI18n } from "../../i18n";
 import { useAppStore } from "../../store/appStore";
 import {
   getIterationModeSwitchControlState,
-  getSwitchToChatDialogDescription,
   isCancellableSpecExecutionStatus,
+  isSpecExecutionStatus,
+  isTerminalSpecStatus,
 } from "./iterationModeSwitchState";
 
 export function IterationModeSwitch() {
+  const { t } = useI18n();
   const [dialog, setDialog] = useState<"to-spec" | "to-chat" | null>(null);
   const [brief, setBrief] = useState("");
   const currentConversation = useAppStore((state) => state.currentConversation);
@@ -29,8 +32,9 @@ export function IterationModeSwitch() {
     currentSpec?.status ?? null,
   );
   const switchingVerifyingSpec = currentSpec?.status === "verifying";
-  const switchToChatDescription = getSwitchToChatDialogDescription(
+  const switchToChatDescription = getLocalizedSwitchToChatDescription(
     currentSpec?.status ?? null,
+    t,
   );
 
   if (!currentConversation) {
@@ -41,7 +45,7 @@ export function IterationModeSwitch() {
     return (
       <span className="inline-flex h-8 items-center gap-2 rounded-md border border-zinc-800 px-2.5 text-xs font-medium text-zinc-400">
         <FileText size={13} aria-hidden="true" />
-        Spec · Locked
+        {t("sidebar.initialBuildLocked")}
       </span>
     );
   }
@@ -89,7 +93,7 @@ export function IterationModeSwitch() {
           type="button"
         >
           <MessageSquare size={13} aria-hidden="true" />
-          Chat
+          {t("sidebar.chat")}
         </button>
         <button
           className={`flex items-center gap-1.5 border-l border-zinc-800 px-2.5 text-xs font-medium transition disabled:cursor-not-allowed ${
@@ -106,7 +110,7 @@ export function IterationModeSwitch() {
           ) : (
             <FileText size={13} aria-hidden="true" />
           )}
-          Spec
+          {t("sidebar.spec")}
         </button>
       </div>
 
@@ -117,18 +121,18 @@ export function IterationModeSwitch() {
             onSubmit={submitSwitchToSpec}
           >
             <DialogTitle onClose={() => setDialog(null)}>
-              Switch to Spec Coding
+              {t("iteration.switchToSpec")}
             </DialogTitle>
             <p className="mt-2 text-xs leading-5 text-zinc-500">
-              The builder will generate requirements, design, and tasks from the current project state. Project files will not change before approval.
+              {t("iteration.switchToSpecDescription")}
             </p>
             <label className="mt-4 block text-xs font-medium text-zinc-400">
-              Brief
+              {t("sidebar.brief")}
               <textarea
                 autoFocus
                 className="mt-2 h-28 min-h-28 w-full resize-none rounded-md border border-zinc-800 bg-zinc-900 px-3 py-3 text-sm leading-5 text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-blue-400/60 focus:ring-2 focus:ring-blue-400/10"
                 onChange={(event) => setBrief(event.currentTarget.value)}
-                placeholder="Describe the next feature or change"
+                placeholder={t("sidebar.describeNext")}
                 value={brief}
               />
             </label>
@@ -138,7 +142,7 @@ export function IterationModeSwitch() {
                 onClick={() => setDialog(null)}
                 type="button"
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 className="flex h-9 items-center gap-2 rounded-md border border-blue-400/30 bg-blue-400/10 px-3 text-sm font-medium text-blue-100 transition hover:border-blue-300/60 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
@@ -150,7 +154,7 @@ export function IterationModeSwitch() {
                 ) : (
                   <FileText size={15} aria-hidden="true" />
                 )}
-                Generate Spec
+                {t("iteration.generateSpec")}
               </button>
             </div>
           </form>
@@ -162,10 +166,10 @@ export function IterationModeSwitch() {
           <div className="w-full max-w-[420px] rounded-md border border-zinc-800 bg-zinc-950 p-4 shadow-2xl">
             <DialogTitle onClose={() => setDialog(null)}>
               {switchingVerifyingSpec
-                ? "Cancel verification and switch to Chat"
+                ? t("iteration.cancelVerificationSwitch")
                 : switchingExecutingSpec
-                  ? "Cancel Spec and switch to Chat"
-                  : "Switch to Chat"}
+                  ? t("iteration.cancelSpecSwitch")
+                  : t("iteration.switchToChat")}
             </DialogTitle>
             <p className="mt-2 text-xs leading-5 text-zinc-500">
               {switchToChatDescription}
@@ -176,7 +180,7 @@ export function IterationModeSwitch() {
                 onClick={() => setDialog(null)}
                 type="button"
               >
-                Back
+                {t("common.back")}
               </button>
               <button
                 className="flex h-9 items-center gap-2 rounded-md border border-teal-400/30 bg-teal-400/10 px-3 text-sm font-medium text-teal-100 transition hover:border-teal-300/60 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
@@ -190,10 +194,10 @@ export function IterationModeSwitch() {
                   <MessageSquare size={15} aria-hidden="true" />
                 )}
                 {switchingVerifyingSpec
-                  ? "Cancel verification and switch"
+                  ? t("iteration.cancelVerificationAndSwitch")
                   : switchingExecutingSpec
-                    ? "Cancel execution and switch"
-                    : "Switch to Chat"}
+                    ? t("iteration.cancelExecutionAndSwitch")
+                    : t("iteration.switchToChat")}
               </button>
             </div>
           </div>
@@ -210,11 +214,13 @@ function DialogTitle({
   children: string;
   onClose: () => void;
 }) {
+  const { t } = useI18n();
+
   return (
     <div className="flex items-center justify-between gap-3">
       <h2 className="text-sm font-semibold text-zinc-100">{children}</h2>
       <button
-        aria-label="Close"
+        aria-label={t("common.close")}
         className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200"
         onClick={onClose}
         type="button"
@@ -223,4 +229,23 @@ function DialogTitle({
       </button>
     </div>
   );
+}
+
+function getLocalizedSwitchToChatDescription(
+  specStatus: string | null,
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  if (specStatus === "verifying") {
+    return t("iteration.switchToChatDescVerifying");
+  }
+
+  if (isSpecExecutionStatus(specStatus)) {
+    return t("iteration.switchToChatDescExecuting");
+  }
+
+  if (isTerminalSpecStatus(specStatus)) {
+    return t("iteration.switchToChatDescTerminal");
+  }
+
+  return t("iteration.switchToChatDescReview");
 }

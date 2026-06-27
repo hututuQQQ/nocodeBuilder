@@ -19,6 +19,7 @@ import { useAppStore } from "../../store/appStore";
 import type { ChatActivity, ChatMessage } from "../../store/chatMessages";
 import { formatElapsedTime } from "../../store/commandLogs";
 import type { ConfiguredModelOption } from "../../App";
+import { useI18n } from "../../i18n";
 import {
   getAiProviderDefinition,
   type AiProviderId,
@@ -41,6 +42,7 @@ export function ChatPanel({
   isSavingModel,
   onChangeModel,
 }: ChatPanelProps) {
+  const { t } = useI18n();
   const [draft, setDraft] = useState("");
   const [modelError, setModelError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
@@ -172,7 +174,7 @@ export function ChatPanel({
       await onChangeModel(selection);
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "Failed to save model.";
+        error instanceof Error ? error.message : t("model.saveFailed");
       setModelError(message);
     }
   }
@@ -183,18 +185,18 @@ export function ChatPanel({
         <div className="min-w-0">
           <h2 className="truncate text-sm font-semibold text-zinc-100">
             {currentProject
-              ? currentConversation?.title ?? "Chat"
-              : "No project selected"}
+              ? currentConversation?.title ?? t("chat.defaultTitle")
+              : t("chat.noProjectSelected")}
           </h2>
           <p className="truncate text-xs text-zinc-500">
             {currentProject
-              ? `${currentProject.name}${isArchived ? " / archived" : ""}`
-              : "Create or select a project to start a chat"}
+              ? `${currentProject.name}${isArchived ? ` / ${t("chat.archived")}` : ""}`
+              : t("chat.createOrSelect")}
           </p>
         </div>
         <div className="flex min-w-0 flex-col items-end gap-1">
           <label className="sr-only" htmlFor="chat-model-select">
-            {provider.label} model
+            {t("chat.modelLabel", { provider: provider.label })}
           </label>
           <div className="flex items-center gap-2">
             <IterationModeSwitch />
@@ -254,7 +256,7 @@ export function ChatPanel({
           <section className="rounded-md border border-zinc-800 bg-zinc-950/70 p-3">
             <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">
               <FileText size={14} aria-hidden="true" />
-              Spec History
+              {t("chat.specHistory")}
             </div>
             <div className="mt-2 space-y-1">
               {historicalSpecs.map((spec) => (
@@ -289,18 +291,18 @@ export function ChatPanel({
         {!currentProject ? (
           <div className="grid h-full place-items-center">
             <div className="max-w-[320px] rounded-md border border-dashed border-zinc-800 bg-zinc-900/30 px-4 py-6 text-center text-sm leading-6 text-zinc-500">
-              Create or select a project to start a project-scoped chat.
+              {t("chat.noProjectEmpty")}
             </div>
           </div>
         ) : isLoadingConversations && !currentConversation ? (
           <div className="flex h-full items-center justify-center gap-2 text-sm text-zinc-500">
             <Loader2 size={16} className="animate-spin" aria-hidden="true" />
-            Loading chats
+            {t("chat.loadingChats")}
           </div>
         ) : chatMessages.length === 0 ? (
           <div className="grid h-full place-items-center">
             <div className="max-w-[320px] rounded-md border border-dashed border-zinc-800 bg-zinc-900/30 px-4 py-6 text-center text-sm leading-6 text-zinc-500">
-              This chat is empty.
+              {t("chat.empty")}
             </div>
           </div>
         ) : (
@@ -326,12 +328,12 @@ export function ChatPanel({
           onChange={(event) => setDraft(event.currentTarget.value)}
           placeholder={
             !currentProject
-              ? "Select a project first"
+              ? t("chat.selectProjectFirst")
               : isArchived
-                ? "Restore this chat to continue"
+                ? t("chat.restoreToContinue")
                 : canSteerActiveRun
-                  ? "Add steering for the current run..."
-                  : "Tell the builder what to change..."
+                  ? t("chat.addSteering")
+                  : t("chat.tellBuilder")
           }
           value={draft}
         />
@@ -345,7 +347,11 @@ export function ChatPanel({
           ) : (
             <SendHorizontal size={16} aria-hidden="true" />
           )}
-          {isBusy && canSteerActiveRun ? "Steer" : isBusy ? "Writing" : "Send"}
+          {isBusy && canSteerActiveRun
+            ? t("common.steer")
+            : isBusy
+              ? t("common.writing")
+              : t("common.send")}
         </button>
       </form>
     </main>
@@ -403,6 +409,7 @@ function SpecHistoryPreview({
     }>;
   };
 }) {
+  const { t } = useI18n();
   const revision =
     spec.revisions.find((item) => item.id === spec.currentRevisionId) ??
     spec.revisions[0];
@@ -419,7 +426,7 @@ function SpecHistoryPreview({
       <div className="mt-3 grid gap-3 lg:grid-cols-2">
         <div>
           <h3 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
-            Criteria
+            {t("chat.criteria")}
           </h3>
           <div className="mt-2 space-y-1">
             {revision.requirements.acceptanceCriteria.map((criterion) => (
@@ -427,7 +434,7 @@ function SpecHistoryPreview({
                 className="rounded border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] leading-4 text-zinc-400"
                 key={criterion.id}
               >
-                {criterion.required ? "Required · " : ""}
+                {criterion.required ? `${t("common.required")} · ` : ""}
                 {criterion.description}
               </div>
             ))}
@@ -435,7 +442,7 @@ function SpecHistoryPreview({
         </div>
         <div>
           <h3 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
-            Tasks
+            {t("chat.tasks")}
           </h3>
           <div className="mt-2 space-y-1">
             {revision.tasks.map((task) => (
@@ -461,10 +468,12 @@ function SpecHistoryPreview({
 }
 
 function UserMessage({ message }: { message: ChatMessage }) {
+  const { t } = useI18n();
+
   return (
     <article className="ml-auto max-w-[86%] whitespace-pre-wrap rounded-md border border-teal-400/30 bg-teal-400/10 px-4 py-3 text-sm leading-6 text-teal-50">
       <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-teal-200/70">
-        user
+        {t("chat.user")}
       </div>
       {message.content}
     </article>
@@ -478,6 +487,7 @@ function AssistantMessage({
   message: ChatMessage;
   now: number;
 }) {
+  const { t } = useI18n();
   const hasContent = message.content.trim().length > 0;
   const [isExpanded, setIsExpanded] = useState(!message.activitiesCollapsed);
   const shouldCollapseContent = shouldCollapseAssistantContent(message);
@@ -486,7 +496,11 @@ function AssistantMessage({
   );
   const isContentCollapsed = shouldCollapseContent && !isContentExpanded;
   const displayedContent = isContentCollapsed
-    ? formatCollapsedAssistantContent(message.content, Boolean(message.isStreaming))
+    ? formatCollapsedAssistantContent(
+        message.content,
+        Boolean(message.isStreaming),
+        t,
+      )
     : message.content;
   const activities = message.activities ?? [];
   const shouldShowActivitySummary =
@@ -508,7 +522,7 @@ function AssistantMessage({
     <article className="max-w-[92%] text-sm leading-6 text-zinc-300">
       <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500">
         <Bot size={14} aria-hidden="true" />
-        assistant
+        {t("chat.assistant")}
       </div>
       {shouldShowActivitySummary ? (
         <button
@@ -522,7 +536,10 @@ function AssistantMessage({
             <ChevronRight size={14} aria-hidden="true" />
           )}
           <span className="truncate">
-            Process: {message.activitySummary ?? summarizeChatActivities(activities)}
+            {t("chat.process", {
+              summary:
+                message.activitySummary ?? summarizeChatActivities(activities, t),
+            })}
           </span>
         </button>
       ) : null}
@@ -550,7 +567,7 @@ function AssistantMessage({
       ) : message.isStreaming && !message.activities?.length ? (
         <div className="mt-3 flex items-center gap-2 rounded-md border border-blue-400/30 bg-blue-400/10 px-4 py-3 text-blue-100">
           <Loader2 size={15} className="animate-spin" aria-hidden="true" />
-          Working
+          {t("chat.working")}
         </div>
       ) : null}
       {hasContent && shouldCollapseContent ? (
@@ -568,8 +585,8 @@ function AssistantMessage({
           )}
           <span className="truncate">
             {isContentExpanded
-              ? "Collapse generated output"
-              : summarizeAssistantContent(message.content)}
+              ? t("chat.collapseOutput")
+              : summarizeAssistantContent(message.content, t)}
           </span>
         </button>
       ) : null}
@@ -595,18 +612,26 @@ function shouldCollapseAssistantContent(message: ChatMessage) {
   );
 }
 
-function summarizeAssistantContent(content: string) {
+function summarizeAssistantContent(
+  content: string,
+  t: ReturnType<typeof useI18n>["t"],
+) {
   const lineCount = countContentLines(content);
   const charCount = content.length.toLocaleString();
 
-  return `Generated output: ${lineCount.toLocaleString()} line${
-    lineCount === 1 ? "" : "s"
-  }, ${charCount} chars`;
+  return t("chat.generatedOutput", {
+    chars: charCount,
+    lines: lineCount.toLocaleString(),
+  });
 }
 
-function formatCollapsedAssistantContent(content: string, isStreaming: boolean) {
+function formatCollapsedAssistantContent(
+  content: string,
+  isStreaming: boolean,
+  t: ReturnType<typeof useI18n>["t"],
+) {
   if (!isStreaming) {
-    return trimCollapsedContentHead(content);
+    return trimCollapsedContentHead(content, t);
   }
 
   const latest = trimCollapsedContentTail(content);
@@ -616,19 +641,22 @@ function formatCollapsedAssistantContent(content: string, isStreaming: boolean) 
   }
 
   return [
-    "[Streaming latest output]",
+    t("chat.streamingLatest"),
     latest,
   ].join("\n");
 }
 
-function trimCollapsedContentHead(content: string) {
+function trimCollapsedContentHead(
+  content: string,
+  t: ReturnType<typeof useI18n>["t"],
+) {
   const maxChars = 2_400;
 
   if (content.length <= maxChars) {
     return content;
   }
 
-  return `${content.slice(0, maxChars)}\n\n[Output continues. Expand to view all.]`;
+  return `${content.slice(0, maxChars)}\n\n${t("chat.outputContinues")}`;
 }
 
 function trimCollapsedContentTail(content: string) {
@@ -645,17 +673,22 @@ function countContentLines(content: string) {
   return Math.max(1, content.split(/\r?\n/).length);
 }
 
-function summarizeChatActivities(activities: ChatActivity[]) {
+function summarizeChatActivities(
+  activities: ChatActivity[],
+  t: ReturnType<typeof useI18n>["t"],
+) {
   const visibleActivities = activities.filter(
     (activity) => activity.kind !== "thinking",
   );
   const failedCount = visibleActivities.filter(
     (activity) => activity.status === "failed",
   ).length;
-  const parts = [`${visibleActivities.length} step(s)`];
+  const parts = [
+    t("chat.stepsSummary", { count: visibleActivities.length }),
+  ];
 
   if (failedCount > 0) {
-    parts.push(`${failedCount} failed`);
+    parts.push(t("chat.failedSummary", { count: failedCount }));
   }
 
   return parts.join(", ");
@@ -668,6 +701,7 @@ function ActivityRow({
   activity: ChatActivity;
   now: number;
 }) {
+  const { t } = useI18n();
   const elapsedMs = getActivityElapsedMs(activity, now);
   const elapsedText = formatElapsedTime(elapsedMs);
   const preview = activity.outputPreview ?? [];
@@ -691,7 +725,7 @@ function ActivityRow({
             </span>
             <span className={`ml-auto flex shrink-0 items-center gap-1 text-xs ${statusTone}`}>
               <ActivityStatusIcon status={activity.status} />
-              {formatActivityStatus(activity.status)}
+              {formatActivityStatus(activity.status, t)}
             </span>
           </div>
           <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500">
@@ -715,12 +749,11 @@ function ActivityRow({
           {preview.length > 0 ? (
             <details className="mt-2 text-xs text-zinc-500">
               <summary className="cursor-pointer select-none text-zinc-400 outline-none">
-                Output preview
                 {activity.outputLineCount
-                  ? ` (${activity.outputLineCount.toLocaleString()} line${
-                      activity.outputLineCount === 1 ? "" : "s"
-                    })`
-                  : ""}
+                  ? t("chat.outputPreviewLines", {
+                      count: activity.outputLineCount.toLocaleString(),
+                    })
+                  : t("chat.outputPreview")}
               </summary>
               <pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap rounded border border-zinc-800 bg-[#08080a] p-2 font-mono text-[11px] leading-5 text-zinc-400">
                 {preview.join("\n")}
@@ -777,20 +810,23 @@ function ActivityStatusIcon({
   return <CircleDashed size={13} className="animate-spin" aria-hidden="true" />;
 }
 
-function formatActivityStatus(status: ChatActivity["status"]) {
+function formatActivityStatus(
+  status: ChatActivity["status"],
+  t: ReturnType<typeof useI18n>["t"],
+) {
   if (status === "failed") {
-    return "Failed";
+    return t("common.failed");
   }
 
   if (status === "succeeded") {
-    return "Done";
+    return t("common.done");
   }
 
   if (status === "pending") {
-    return "Queued";
+    return t("common.queued");
   }
 
-  return "Running";
+  return t("common.running");
 }
 
 function getActivityElapsedMs(activity: ChatActivity, now: number) {

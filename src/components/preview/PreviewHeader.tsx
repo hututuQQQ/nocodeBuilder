@@ -9,6 +9,7 @@ import {
   Square,
   X,
 } from "lucide-react";
+import { useI18n } from "../../i18n";
 import { PreviewTab } from "./previewPanelTypes";
 
 type PreviewHeaderProps = {
@@ -56,6 +57,8 @@ export function PreviewHeader({
   onStopPreview,
   selectedSiteNodeId,
 }: PreviewHeaderProps) {
+  const { t } = useI18n();
+
   return (
     <header className="flex h-12 shrink-0 items-center justify-between border-b border-zinc-800 px-4">
       <div className="flex min-w-0 items-center gap-2">
@@ -72,7 +75,9 @@ export function PreviewHeader({
             aria-hidden="true"
           />
         )}
-        <h2 className="text-sm font-semibold text-zinc-100">Preview</h2>
+        <h2 className="text-sm font-semibold text-zinc-100">
+          {t("workspace.preview")}
+        </h2>
         <div className="flex min-w-0 rounded-md border border-zinc-800 bg-zinc-950 p-0.5">
           <button
             className={`h-7 rounded px-2 text-xs transition ${
@@ -83,7 +88,7 @@ export function PreviewHeader({
             onClick={() => onSelectTab("local")}
             type="button"
           >
-            Local
+            {t("preview.local")}
           </button>
           {hasDeploymentPreview ? (
             <div
@@ -101,10 +106,10 @@ export function PreviewHeader({
                 Vercel
               </button>
               <button
-                aria-label="Close Vercel preview tab"
+                aria-label={t("preview.closeVercelTab")}
                 className="grid h-full w-6 place-items-center rounded-r text-zinc-500 transition hover:bg-zinc-700 hover:text-zinc-100"
                 onClick={onCloseDeploymentTab}
-                title="Close Vercel preview tab"
+                title={t("preview.closeVercelTab")}
                 type="button"
               >
                 <X size={12} aria-hidden="true" />
@@ -119,10 +124,10 @@ export function PreviewHeader({
           <span className="flex max-w-44 min-w-0 items-center rounded border border-teal-400/30 bg-teal-400/10 pl-2 text-xs text-teal-100">
             <span className="truncate">{selectedSiteNodeId}</span>
             <button
-              aria-label="Clear selected preview node"
+              aria-label={t("preview.clearNode")}
               className="grid size-6 shrink-0 place-items-center text-teal-200/70 transition hover:text-teal-50"
               onClick={onClearSelectedSiteNode}
-              title="Clear selected preview node"
+              title={t("preview.clearNode")}
               type="button"
             >
               <X size={12} aria-hidden="true" />
@@ -132,11 +137,11 @@ export function PreviewHeader({
       </div>
       <div className="flex items-center gap-2">
         <button
-          aria-label="Deploy to Vercel"
+          aria-label={t("preview.deployToVercel")}
           className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-blue-400/40 hover:text-blue-200 disabled:cursor-not-allowed disabled:text-zinc-700"
           disabled={!canDeploy}
           onClick={onDeployClick}
-          title="Deploy to Vercel"
+          title={t("preview.deployToVercel")}
           type="button"
         >
           {isDeploying ? (
@@ -146,50 +151,50 @@ export function PreviewHeader({
           )}
         </button>
         <button
-          aria-label="Configure Vercel"
+          aria-label={t("preview.vercelSettings")}
           className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200"
           onClick={onOpenVercelDialog}
-          title="Vercel settings"
+          title={t("preview.vercelSettings")}
           type="button"
         >
           <KeyRound size={14} aria-hidden="true" />
         </button>
         <button
-          aria-label="Start dev server"
+          aria-label={t("preview.start")}
           className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-emerald-400/40 hover:text-emerald-200 disabled:cursor-not-allowed disabled:text-zinc-700"
           disabled={!canStartPreview}
           onClick={onStartPreview}
-          title="Start"
+          title={t("preview.start")}
           type="button"
         >
           <Play size={14} aria-hidden="true" />
         </button>
         <button
-          aria-label="Refresh preview"
+          aria-label={t("preview.refresh")}
           className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200 disabled:cursor-not-allowed disabled:text-zinc-700"
           disabled={!canUsePreview}
           onClick={onRefresh}
-          title="Refresh"
+          title={t("preview.refresh")}
           type="button"
         >
           <RefreshCcw size={14} aria-hidden="true" />
         </button>
         <button
-          aria-label="Open preview in browser"
+          aria-label={t("preview.openBrowser")}
           className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200 disabled:cursor-not-allowed disabled:text-zinc-700"
           disabled={!canUsePreview}
           onClick={onOpenBrowser}
-          title="Open in browser"
+          title={t("preview.openBrowser")}
           type="button"
         >
           <ExternalLink size={14} aria-hidden="true" />
         </button>
         <button
-          aria-label="Stop dev server"
+          aria-label={t("preview.stop")}
           className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-red-400/40 hover:text-red-200 disabled:cursor-not-allowed disabled:text-zinc-700"
           disabled={!canStopPreview}
           onClick={onStopPreview}
-          title="Stop"
+          title={t("preview.stop")}
           type="button"
         >
           <Square size={13} aria-hidden="true" />

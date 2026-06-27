@@ -1,5 +1,6 @@
 import Editor from "@monaco-editor/react";
 import { Loader2 } from "lucide-react";
+import { useI18n } from "../../i18n";
 import "./monacoSetup";
 
 type CodeViewerProps = {
@@ -9,6 +10,7 @@ type CodeViewerProps = {
 };
 
 export function CodeViewer({ content, isLoading, path }: CodeViewerProps) {
+  const { t } = useI18n();
   const language = getMonacoLanguage(path);
   const languageLabel = getLanguageLabel(language, path);
 
@@ -19,7 +21,7 @@ export function CodeViewer({ content, isLoading, path }: CodeViewerProps) {
         language={language}
         loading={
           <div className="grid h-full place-items-center text-xs text-zinc-600">
-            Loading editor
+            {t("files.loadingEditor")}
           </div>
         }
         options={{
@@ -60,7 +62,7 @@ export function CodeViewer({ content, isLoading, path }: CodeViewerProps) {
       {isLoading ? (
         <div className="absolute right-3 top-3 flex items-center gap-2 rounded border border-zinc-800 bg-zinc-950/90 px-2 py-1 text-xs text-zinc-500 shadow-lg shadow-black/30">
           <Loader2 size={12} className="animate-spin" aria-hidden="true" />
-          Loading
+          {t("files.loading")}
         </div>
       ) : languageLabel ? (
         <div className="pointer-events-none absolute right-3 top-3 rounded border border-zinc-800 bg-zinc-950/90 px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-zinc-500 shadow-lg shadow-black/30">

@@ -10,7 +10,35 @@ import {
 import { validateGeneratedSpecRevisionPayload } from "../spec-core/validators";
 import type { GeneratedSpecRevisionPayload } from "../spec-core/types";
 
-const SPEC_VALIDATION_RETRY_LIMIT = 1;
+const SPEC_VALIDATION_REPAIR_ATTEMPT_LIMIT = 2;
+const INVALID_SPEC_RESPONSE_PREVIEW_CHAR_LIMIT = 4_000;
+
+export class SpecValidationError extends Error {
+  readonly attempts: number;
+  readonly invalidResponsePreview: string;
+  readonly validationError: string;
+
+  constructor({
+    attempts,
+    invalidResponse,
+    validationError,
+  }: {
+    attempts: number;
+    invalidResponse: unknown;
+    validationError: string;
+  }) {
+    super(
+      `Spec validation repair exhausted after ${attempts} attempt(s): ${validationError}`,
+    );
+    this.name = "SpecValidationError";
+    this.attempts = attempts;
+    this.invalidResponsePreview = compactPromptText(
+      stringifyForPrompt(invalidResponse),
+      INVALID_SPEC_RESPONSE_PREVIEW_CHAR_LIMIT,
+    );
+    this.validationError = validationError;
+  }
+}
 
 export async function requestInitialSpec({
   backendContext,
@@ -160,7 +188,11 @@ async function requestValidatedSpecPayload({
   let currentMessages = messages;
   let lastResponse: unknown = null;
 
-  for (let attempt = 0; attempt <= SPEC_VALIDATION_RETRY_LIMIT; attempt += 1) {
+  for (
+    let attempt = 0;
+    attempt <= SPEC_VALIDATION_REPAIR_ATTEMPT_LIMIT;
+    attempt += 1
+  ) {
     lastResponse = await client.chatJson<unknown>(currentMessages, {
       onDelta,
       signal,
@@ -169,8 +201,12 @@ async function requestValidatedSpecPayload({
     try {
       return validateGeneratedSpecRevisionPayload(lastResponse);
     } catch (error) {
-      if (attempt >= SPEC_VALIDATION_RETRY_LIMIT) {
-        throw error;
+      if (attempt >= SPEC_VALIDATION_REPAIR_ATTEMPT_LIMIT) {
+        throw new SpecValidationError({
+          attempts: attempt + 1,
+          invalidResponse: lastResponse,
+          validationError: formatValidationError(error),
+        });
       }
 
       currentMessages = buildSpecValidationRepairMessages(
@@ -227,4 +263,14 @@ function stringifyForPrompt(value: unknown) {
   } catch {
     return String(value);
   }
+}
+
+function compactPromptText(value: string, maxLength: number) {
+  const compacted = value.replace(/\s+/g, " ").trim();
+
+  if (compacted.length <= maxLength) {
+    return compacted;
+  }
+
+  return `${compacted.slice(0, maxLength)}...`;
 }

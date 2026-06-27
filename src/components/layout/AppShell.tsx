@@ -7,6 +7,7 @@ import { ProjectSidebar } from "../project/ProjectSidebar";
 import { initializeCommandEvents, useAppStore } from "../../store/appStore";
 import type { ConfiguredModelOption } from "../../App";
 import type { AiProviderId } from "../../services/aiProviders";
+import { useI18n } from "../../i18n";
 
 type AppShellProps = {
   activeProvider: AiProviderId;
@@ -40,6 +41,7 @@ export function AppShell({
   onChangeModel,
   onOpenSettings,
 }: AppShellProps) {
+  const { t } = useI18n();
   const loadProjects = useAppStore((state) => state.loadProjects);
   const currentConversation = useAppStore((state) => state.currentConversation);
   const [dragMode, setDragMode] = useState<DragMode>(null);
@@ -160,7 +162,7 @@ export function AppShell({
     >
       <ProjectSidebar onOpenSettings={onOpenSettings} />
       <ResizeHandle
-        ariaLabel="Resize project panel"
+        ariaLabel={t("workspace.resizeProjectPanel")}
         dragging={dragMode === "sidebar"}
         onPointerDown={startDrag("sidebar")}
         orientation="vertical"
@@ -183,7 +185,7 @@ export function AppShell({
         />
       )}
       <ResizeHandle
-        ariaLabel="Resize preview workspace"
+        ariaLabel={t("workspace.resizePreviewWorkspace")}
         dragging={dragMode === "right"}
         onPointerDown={startDrag("right")}
         orientation="vertical"
@@ -197,7 +199,7 @@ export function AppShell({
       >
         <WorkspacePanel />
         <ResizeHandle
-          ariaLabel="Resize preview and files panels"
+          ariaLabel={t("workspace.resizePreviewFiles")}
           dragging={dragMode === "preview"}
           onPointerDown={startDrag("preview")}
           orientation="horizontal"

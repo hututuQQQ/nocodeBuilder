@@ -1,7 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { AiProviderId } from "./aiProviders";
 
-export type AppStorageKey = "ai-provider-config" | "project-memory";
+export type AppStorageKey =
+  | "ai-provider-config"
+  | "project-memory"
+  | "ui-locale";
 
 export function readAppStorageValue<T>(key: AppStorageKey) {
   return invoke<T | null>("read_app_storage", { key });

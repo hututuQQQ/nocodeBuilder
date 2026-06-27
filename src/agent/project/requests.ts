@@ -12,6 +12,7 @@ import {
 } from "./prompts";
 import {
   DEFAULT_PROJECT_POLICY,
+  extendProjectPolicyWithAllowedPaths,
   type ProjectPolicy,
 } from "./projectPolicy";
 import type {
@@ -123,13 +124,17 @@ export async function requestAgentStep({
   userRequest: string;
 }) {
   const client = createProjectChatClient(config);
-  const messages = buildAgentStepMessages(context, userRequest, policy);
+  const runtimePolicy = extendProjectPolicyWithAllowedPaths(
+    policy,
+    context.manifest.runtimeContract.compiledAllowedPaths,
+  );
+  const messages = buildAgentStepMessages(context, userRequest, runtimePolicy);
 
   return requestValidatedAgentStep({
     client,
     messages,
     onDelta,
-    policy,
+    policy: runtimePolicy,
     signal,
   });
 }

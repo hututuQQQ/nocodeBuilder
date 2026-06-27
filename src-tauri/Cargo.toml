@@ -1,7 +1,7 @@
 [package]
 name = "ai-web-builder"
 version = "0.1.0"
-description = "AI Web Builder desktop MVP"
+description = "nocodeBuilder desktop app"
 authors = ["you"]
 edition = "2021"
 

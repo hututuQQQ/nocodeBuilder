@@ -19,12 +19,14 @@ import type {
   AgentRun,
   VerificationReport,
 } from "../../agent-core/types";
+import { useI18n } from "../../i18n";
 import {
   agentRuntimeApi,
   type AgentArtifactContent,
 } from "../../services/agentRuntime";
 
 export function AgentRunPanel() {
+  const { t } = useI18n();
   const [steering, setSteering] = useState("");
   const currentRun = useAppStore((state) => state.currentAgentRun);
   const currentProject = useAppStore((state) => state.currentProject);
@@ -80,7 +82,7 @@ export function AgentRunPanel() {
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
             <h3 className="truncate text-sm font-semibold text-zinc-100">
-              Agent Run
+              {t("agent.run")}
             </h3>
             <span className="rounded border border-zinc-800 px-2 py-0.5 text-xs text-zinc-400">
               {formatRunStatus(currentRun)}
@@ -92,31 +94,35 @@ export function AgentRunPanel() {
         </div>
         <div className="flex shrink-0 items-center gap-1">
           <button
-            aria-label="Pause run"
+            aria-label={t("agent.pause")}
             className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-amber-400/40 hover:text-amber-200 disabled:cursor-not-allowed disabled:text-zinc-700"
             disabled={!canPause}
             onClick={() => void pauseCurrentAgentRun()}
-            title="Pause"
+            title={t("agent.pause")}
             type="button"
           >
             <Pause size={14} aria-hidden="true" />
           </button>
           <button
-            aria-label="Resume run"
+            aria-label={t("agent.resume")}
             className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-emerald-400/40 hover:text-emerald-200 disabled:cursor-not-allowed disabled:text-zinc-700"
             disabled={!canResume}
             onClick={() => void recoverCurrentAgentRun()}
-            title={currentRun.status === "paused" ? "Resume" : "Recover"}
+            title={
+              currentRun.status === "paused"
+                ? t("agent.resume")
+                : t("agent.recover")
+            }
             type="button"
           >
             <Play size={14} aria-hidden="true" />
           </button>
           <button
-            aria-label="Cancel run"
+            aria-label={t("agent.cancel")}
             className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-red-400/40 hover:text-red-200 disabled:cursor-not-allowed disabled:text-zinc-700"
             disabled={!canCancel}
             onClick={() => void cancelCurrentAgentRun()}
-            title="Cancel"
+            title={t("agent.cancel")}
             type="button"
           >
             <XCircle size={14} aria-hidden="true" />
@@ -145,14 +151,14 @@ export function AgentRunPanel() {
           <input
             className="h-9 min-w-0 flex-1 rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/10"
             onChange={(event) => setSteering(event.currentTarget.value)}
-            placeholder="Steering"
+            placeholder={t("agent.steering")}
             value={steering}
           />
           <button
-            aria-label="Send steering"
+            aria-label={t("agent.sendSteering")}
             className="grid size-9 shrink-0 place-items-center rounded-md border border-teal-400/30 bg-teal-400/10 text-teal-100 transition hover:border-teal-300/60 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-700"
             disabled={!steering.trim()}
-            title="Send steering"
+            title={t("agent.sendSteering")}
             type="submit"
           >
             <SendHorizontal size={14} aria-hidden="true" />
@@ -172,6 +178,8 @@ function ApprovalCard({
   onApprove: () => void;
   onDeny: () => void;
 }) {
+  const { t } = useI18n();
+
   return (
     <div className="mt-3 rounded border border-amber-400/30 bg-amber-400/5 p-2">
       <div className="flex min-w-0 items-start gap-2">
@@ -198,19 +206,19 @@ function ApprovalCard({
         </div>
         <div className="flex shrink-0 gap-1">
           <button
-            aria-label="Approve"
+            aria-label={t("agent.approve")}
             className="grid size-8 place-items-center rounded border border-emerald-400/30 bg-emerald-400/10 text-emerald-100 transition hover:border-emerald-300/60"
             onClick={onApprove}
-            title="Approve"
+            title={t("agent.approve")}
             type="button"
           >
             <Check size={14} aria-hidden="true" />
           </button>
           <button
-            aria-label="Deny"
+            aria-label={t("agent.deny")}
             className="grid size-8 place-items-center rounded border border-red-400/30 bg-red-400/10 text-red-100 transition hover:border-red-300/60"
             onClick={onDeny}
-            title="Deny"
+            title={t("agent.deny")}
             type="button"
           >
             <XCircle size={14} aria-hidden="true" />
@@ -222,13 +230,14 @@ function ApprovalCard({
 }
 
 function RunTimeline({ events }: { events: AgentEvent[] }) {
+  const { t } = useI18n();
   const visibleEvents = events.slice(-8);
 
   return (
     <div className="min-w-0">
       <div className="mb-2 flex items-center gap-2 text-xs font-medium text-zinc-300">
         <RotateCcw size={13} aria-hidden="true" />
-        Timeline
+        {t("agent.timeline")}
       </div>
       <div className="space-y-1">
         {visibleEvents.length > 0 ? (
@@ -243,7 +252,7 @@ function RunTimeline({ events }: { events: AgentEvent[] }) {
           ))
         ) : (
           <p className="rounded border border-dashed border-zinc-900 px-2 py-2 text-xs text-zinc-600">
-            No events yet.
+            {t("agent.noEvents")}
           </p>
         )}
       </div>
@@ -258,13 +267,14 @@ function VerificationSummary({
   projectId: string | null;
   report: VerificationReport | null;
 }) {
+  const { t } = useI18n();
   const [artifact, setArtifact] = useState<AgentArtifactContent | null>(null);
   const [artifactError, setArtifactError] = useState<string | null>(null);
   const [loadingArtifactId, setLoadingArtifactId] = useState<string | null>(null);
 
   async function openArtifact(artifactId: string) {
     if (!projectId) {
-      setArtifactError("No project is selected.");
+      setArtifactError(t("agent.noProjectSelected"));
       return;
     }
 
@@ -275,14 +285,16 @@ function VerificationSummary({
       const nextArtifact = await agentRuntimeApi.readArtifact(projectId, artifactId);
       if (!nextArtifact) {
         setArtifact(null);
-        setArtifactError("Artifact was not found.");
+        setArtifactError(t("agent.artifactNotFound"));
         return;
       }
 
       setArtifact(nextArtifact);
     } catch (error) {
       setArtifact(null);
-      setArtifactError(error instanceof Error ? error.message : "Artifact could not be read.");
+      setArtifactError(
+        error instanceof Error ? error.message : t("agent.artifactReadFailed"),
+      );
     } finally {
       setLoadingArtifactId(null);
     }
@@ -292,7 +304,7 @@ function VerificationSummary({
     <div className="min-w-0">
       <div className="mb-2 flex items-center gap-2 text-xs font-medium text-zinc-300">
         <ShieldCheck size={13} aria-hidden="true" />
-        Verification
+        {t("agent.verification")}
       </div>
       {report ? (
         <div className="space-y-1">
@@ -312,7 +324,7 @@ function VerificationSummary({
             <div className="rounded border border-zinc-900 bg-zinc-950 p-2">
               <div className="mb-2 flex items-center gap-2 text-[11px] font-medium text-zinc-400">
                 <FileText size={12} aria-hidden="true" />
-                Artifacts
+                {t("agent.artifacts")}
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {report.artifactIds.slice(0, 6).map((artifactId, index) => (
@@ -325,8 +337,8 @@ function VerificationSummary({
                     type="button"
                   >
                     {loadingArtifactId === artifactId
-                      ? "Loading"
-                      : `Artifact ${index + 1}`}
+                      ? t("common.loading")
+                      : t("agent.artifact", { index: index + 1 })}
                   </button>
                 ))}
               </div>
@@ -340,7 +352,7 @@ function VerificationSummary({
                     <span className="shrink-0">{formatBytes(artifact.sizeBytes)}</span>
                   </div>
                   <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-zinc-950 p-2 text-[11px] leading-4 text-zinc-300">
-                    {summarizeArtifactContent(artifact.content)}
+                    {summarizeArtifactContent(artifact.content, t)}
                   </pre>
                 </div>
               ) : null}
@@ -349,22 +361,25 @@ function VerificationSummary({
         </div>
       ) : (
         <p className="rounded border border-dashed border-zinc-900 px-2 py-2 text-xs text-zinc-600">
-          No report yet.
+          {t("agent.noReport")}
         </p>
       )}
     </div>
   );
 }
 
-function summarizeArtifactContent(content: string) {
+function summarizeArtifactContent(
+  content: string,
+  t: ReturnType<typeof useI18n>["t"],
+) {
   const maxLength = 2400;
   if (content.length <= maxLength) {
     return content;
   }
 
-  return `${content.slice(0, maxLength)}\n... truncated ${
-    content.length - maxLength
-  } character(s)`;
+  return `${content.slice(0, maxLength)}\n${t("agent.truncatedChars", {
+    count: content.length - maxLength,
+  })}`;
 }
 
 function formatBytes(sizeBytes: number) {

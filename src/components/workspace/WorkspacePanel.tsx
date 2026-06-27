@@ -1,11 +1,13 @@
 import { useState } from "react";
 import { Database, MonitorPlay } from "lucide-react";
+import { useI18n } from "../../i18n";
 import { DatabasePanel } from "../database/DatabasePanel";
 import { PreviewPanel } from "../preview/PreviewPanel";
 
 type WorkspaceTab = "preview" | "database";
 
 export function WorkspacePanel() {
+  const { t } = useI18n();
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("preview");
 
   return (
@@ -21,7 +23,7 @@ export function WorkspacePanel() {
           type="button"
         >
           <MonitorPlay size={13} aria-hidden="true" />
-          Preview
+          {t("workspace.preview")}
         </button>
         <button
           className={`flex h-7 items-center gap-2 rounded px-2 text-xs font-medium transition ${
@@ -33,7 +35,7 @@ export function WorkspacePanel() {
           type="button"
         >
           <Database size={13} aria-hidden="true" />
-          Database
+          {t("workspace.database")}
         </button>
       </header>
       <div className="min-h-0 min-w-0 overflow-hidden">

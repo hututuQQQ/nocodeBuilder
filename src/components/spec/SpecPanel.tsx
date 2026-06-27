@@ -14,6 +14,7 @@ import {
   XCircle,
 } from "lucide-react";
 import type { ConfiguredModelOption } from "../../App";
+import { useI18n } from "../../i18n";
 import {
   getAiProviderDefinition,
   type AiProviderId,
@@ -50,6 +51,7 @@ export function SpecPanel({
   isSavingModel,
   onChangeModel,
 }: SpecPanelProps) {
+  const { t } = useI18n();
   const [feedback, setFeedback] = useState("");
   const [chatDraft, setChatDraft] = useState("");
   const [modelError, setModelError] = useState<string | null>(null);
@@ -133,7 +135,7 @@ export function SpecPanel({
     try {
       await onChangeModel(selection);
     } catch (error) {
-      setModelError(error instanceof Error ? error.message : "Failed to save model.");
+      setModelError(error instanceof Error ? error.message : t("model.saveFailed"));
     }
   }
 
@@ -183,12 +185,12 @@ export function SpecPanel({
       <header className="flex min-h-14 shrink-0 items-center justify-between gap-4 border-b border-zinc-800 px-5 py-2">
         <div className="min-w-0">
           <h2 className="truncate text-sm font-semibold text-zinc-100">
-            {currentConversation?.title ?? "Spec"}
+            {currentConversation?.title ?? t("sidebar.spec")}
           </h2>
           <p className="truncate text-xs text-zinc-500">
             {currentProject
-              ? `${currentProject.name} / ${currentSpec?.status ?? "loading"}`
-              : "No project selected"}
+              ? `${currentProject.name} / ${currentSpec?.status ?? t("spec.statusLoading")}`
+              : t("chat.noProjectSelected")}
           </p>
         </div>
         <div className="flex min-w-0 flex-col items-end gap-1">
@@ -238,7 +240,7 @@ export function SpecPanel({
         {isLoadingSpec && !currentSpec ? (
           <div className="flex h-full items-center justify-center gap-2 text-sm text-zinc-500">
             <Loader2 size={16} className="animate-spin" aria-hidden="true" />
-            Loading Spec
+            {t("spec.loading")}
           </div>
         ) : !currentSpec || !revision ? (
           <EmptySpec />
@@ -313,10 +315,13 @@ function SpecSummary({
   revision: SpecRevision;
   spec: DevelopmentSpec;
 }) {
+  const { t } = useI18n();
   const retryableTask =
     spec.status === "blocked" ? findFirstRetryableSpecTask(revision.tasks) : null;
   const retryLabel =
-    spec.kind === "initial_build" ? "Retry initial build" : "Retry task";
+    spec.kind === "initial_build"
+      ? t("spec.retryInitialBuild")
+      : t("spec.retryTask");
 
   return (
     <section className="rounded-md border border-zinc-800 bg-zinc-950/70 p-4">
@@ -331,7 +336,7 @@ function SpecSummary({
             </h3>
             <StatusBadge status={spec.status} />
             <span className="rounded border border-zinc-800 px-2 py-0.5 text-xs text-zinc-500">
-              Revision {revision.version}
+              {t("spec.revision", { version: revision.version })}
             </span>
           </div>
           <p className="mt-1 line-clamp-2 text-xs leading-5 text-zinc-500">
@@ -344,11 +349,11 @@ function SpecSummary({
               </p>
               {retryableTask ? (
                 <button
-                  aria-label={`Retry ${retryableTask.title}`}
+                  aria-label={`${retryLabel}: ${retryableTask.title}`}
                   className="flex h-8 shrink-0 items-center gap-2 rounded-md border border-blue-400/30 bg-blue-400/10 px-3 text-xs font-medium text-blue-100 transition hover:border-blue-300/60 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
                   disabled={busy}
                   onClick={() => onRetryTask(retryableTask.id)}
-                  title={`Retry ${retryableTask.title}`}
+                  title={`${retryLabel}: ${retryableTask.title}`}
                   type="button"
                 >
                   {busy ? (
@@ -368,12 +373,13 @@ function SpecSummary({
 }
 
 function SpecStepper({ status }: { status: string }) {
+  const { t } = useI18n();
   const steps = [
-    { id: "requirements", label: "Requirements" },
-    { id: "design", label: "Design" },
-    { id: "tasks", label: "Tasks" },
-    { id: "build", label: "Build" },
-    { id: "verify", label: "Verify" },
+    { id: "requirements", label: t("spec.step.requirements") },
+    { id: "design", label: t("spec.step.design") },
+    { id: "tasks", label: t("spec.step.tasks") },
+    { id: "build", label: t("spec.step.build") },
+    { id: "verify", label: t("spec.step.verify") },
   ];
   const activeIndex = stepIndexForStatus(status);
 
@@ -403,31 +409,33 @@ function SpecStepper({ status }: { status: string }) {
 }
 
 function RequirementsView({ revision }: { revision: SpecRevision }) {
+  const { t } = useI18n();
+
   return (
     <section className="rounded-md border border-zinc-800 bg-zinc-950/70 p-4">
-      <SectionHeader icon={<ShieldCheck size={15} aria-hidden="true" />} title="Requirements" />
+      <SectionHeader icon={<ShieldCheck size={15} aria-hidden="true" />} title={t("spec.requirements")} />
       <div className="mt-3 grid gap-3 lg:grid-cols-2">
         <ListBlock
-          title="User stories"
+          title={t("spec.userStories")}
           items={revision.requirements.userStories.map((story) => story.description)}
         />
         <ListBlock
-          title="Acceptance criteria"
+          title={t("spec.acceptanceCriteria")}
           items={revision.requirements.acceptanceCriteria.map(
             (criterion) =>
-              `${criterion.required ? "Required" : "Optional"} · ${criterion.description}`,
+              `${criterion.required ? t("common.required") : t("common.optional")} 璺?${criterion.description}`,
           )}
         />
-        <ListBlock title="Constraints" items={revision.requirements.constraints} />
+        <ListBlock title={t("spec.constraints")} items={revision.requirements.constraints} />
         <ListBlock
-          title="Out of scope"
+          title={t("spec.outOfScope")}
           items={revision.requirements.outOfScope}
         />
       </div>
       {revision.requirements.unresolvedQuestions.length > 0 ? (
         <ListBlock
           className="mt-3"
-          title="Unresolved questions"
+          title={t("spec.unresolvedQuestions")}
           items={revision.requirements.unresolvedQuestions}
         />
       ) : null}
@@ -436,31 +444,33 @@ function RequirementsView({ revision }: { revision: SpecRevision }) {
 }
 
 function DesignView({ revision }: { revision: SpecRevision }) {
+  const { t } = useI18n();
+
   return (
     <section className="rounded-md border border-zinc-800 bg-zinc-950/70 p-4">
-      <SectionHeader icon={<FileText size={15} aria-hidden="true" />} title="Design" />
+      <SectionHeader icon={<FileText size={15} aria-hidden="true" />} title={t("spec.design")} />
       <p className="mt-3 text-sm leading-6 text-zinc-300">
         {revision.design.summary}
       </p>
       <div className="mt-3 grid gap-3 lg:grid-cols-2">
         <ListBlock
-          title="Pages"
-          items={revision.design.pages.map((page) => `${page.route} · ${page.purpose}`)}
+          title={t("spec.pages")}
+          items={revision.design.pages.map((page) => `${page.route} 璺?${page.purpose}`)}
         />
         <ListBlock
-          title="Components"
+          title={t("spec.components")}
           items={revision.design.components.map(
-            (component) => `${component.name} · ${component.responsibility}`,
+            (component) => `${component.name} 璺?${component.responsibility}`,
           )}
         />
-        <ListBlock title="Data model" items={revision.design.dataModel} />
-        <ListBlock title="Integrations" items={revision.design.integrations} />
+        <ListBlock title={t("spec.dataModel")} items={revision.design.dataModel} />
+        <ListBlock title={t("spec.integrations")} items={revision.design.integrations} />
         <ListBlock
-          title="Technical decisions"
+          title={t("spec.technicalDecisions")}
           items={revision.design.technicalDecisions}
         />
         <ListBlock
-          title="Verification"
+          title={t("spec.verification")}
           items={revision.design.verificationStrategy}
         />
       </div>
@@ -479,9 +489,11 @@ function SpecTaskList({
   onRetry: (taskId: string) => void;
   tasks: SpecTask[];
 }) {
+  const { t } = useI18n();
+
   return (
     <section className="rounded-md border border-zinc-800 bg-zinc-950/70 p-4">
-      <SectionHeader icon={<CheckCircle2 size={15} aria-hidden="true" />} title="Tasks" />
+      <SectionHeader icon={<CheckCircle2 size={15} aria-hidden="true" />} title={t("spec.step.tasks")} />
       <div className="mt-3 space-y-2">
         {tasks.map((task) => {
           const displayStatus = getSpecTaskDisplayStatus(task, agentRuns);
@@ -507,13 +519,13 @@ function SpecTaskList({
                         {task.runId.slice(0, 16)}
                       </span>
                     ) : null}
-                    {formatSpecTaskAutoRetryLabel(task) ? (
+                    {formatSpecTaskAutoRetryLabel(task, t) ? (
                       <span
                         className="inline-flex items-center gap-1 rounded border border-blue-400/30 bg-blue-400/10 px-2 py-0.5 text-[11px] text-blue-100"
-                        title="Automatic retry is in progress"
+                        title={formatSpecTaskAutoRetryLabel(task, t) ?? undefined}
                       >
                         <RefreshCcw size={11} aria-hidden="true" />
-                        {formatSpecTaskAutoRetryLabel(task)}
+                        {formatSpecTaskAutoRetryLabel(task, t)}
                       </span>
                     ) : null}
                   </div>
@@ -521,11 +533,13 @@ function SpecTaskList({
                     {task.objective}
                   </p>
                   <p className="mt-2 truncate text-[11px] text-zinc-600">
-                    Paths: {task.allowedPaths.join(", ")}
+                    {t("spec.paths", { paths: task.allowedPaths.join(", ") })}
                   </p>
                   {task.dependencyIds.length > 0 ? (
                     <p className="mt-1 truncate text-[11px] text-zinc-600">
-                      Dependencies: {task.dependencyIds.join(", ")}
+                      {t("spec.dependencies", {
+                        dependencies: task.dependencyIds.join(", "),
+                      })}
                     </p>
                   ) : null}
                   {task.error ? (
@@ -540,11 +554,11 @@ function SpecTaskList({
                 </div>
                 {canShowSpecTaskRetry(task, tasks) ? (
                   <button
-                    aria-label={`Retry ${task.title}`}
+                    aria-label={`${t("spec.retryTask")}: ${task.title}`}
                     className="grid size-8 shrink-0 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-blue-400/40 hover:text-blue-100 disabled:cursor-not-allowed disabled:text-zinc-700"
                     disabled={disabled}
                     onClick={() => onRetry(task.id)}
-                    title="Retry"
+                    title={t("spec.retryTask")}
                     type="button"
                   >
                     <RefreshCcw size={14} aria-hidden="true" />
@@ -574,18 +588,20 @@ function ReviewActions({
   onSubmitRevision: (event: FormEvent<HTMLFormElement>) => void;
   spec: DevelopmentSpec;
 }) {
+  const { t } = useI18n();
+
   if (spec.status !== "review") {
     return null;
   }
 
   return (
     <section className="rounded-md border border-zinc-800 bg-zinc-950/70 p-4">
-      <SectionHeader icon={<SendHorizontal size={15} aria-hidden="true" />} title="Review" />
+      <SectionHeader icon={<SendHorizontal size={15} aria-hidden="true" />} title={t("spec.review")} />
       <form className="mt-3 flex flex-col gap-3" onSubmit={onSubmitRevision}>
         <textarea
           className="h-24 min-h-24 w-full resize-none rounded-md border border-zinc-800 bg-zinc-900 px-3 py-3 text-sm leading-5 text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-blue-400/60 focus:ring-2 focus:ring-blue-400/10"
           onChange={(event) => onChangeFeedback(event.currentTarget.value)}
-          placeholder="Revision feedback"
+          placeholder={t("spec.revisionFeedback")}
           value={feedback}
         />
         <div className="flex justify-end gap-2">
@@ -595,7 +611,7 @@ function ReviewActions({
             type="submit"
           >
             {busy ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : null}
-            Request revision
+            {t("spec.requestRevision")}
           </button>
           <button
             className="flex h-9 items-center gap-2 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 text-sm font-medium text-emerald-100 transition hover:border-emerald-300/60 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
@@ -608,7 +624,7 @@ function ReviewActions({
             ) : (
               <CheckCircle2 size={15} aria-hidden="true" />
             )}
-            Approve and start build
+            {t("spec.approveStartBuild")}
           </button>
         </div>
       </form>
@@ -637,6 +653,7 @@ function SpecChat({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   specStatus: DevelopmentSpec["status"];
 }) {
+  const { t } = useI18n();
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -647,7 +664,7 @@ function SpecChat({
     <section className="rounded-md border border-zinc-800 bg-zinc-950/70 p-4">
       <SectionHeader
         icon={<MessageSquareText size={15} aria-hidden="true" />}
-        title="Chat"
+        title={t("sidebar.chat")}
       />
       <div
         className="mt-3 max-h-72 space-y-3 overflow-y-auto rounded-md border border-zinc-800 bg-zinc-900/40 p-3"
@@ -655,7 +672,7 @@ function SpecChat({
       >
         {messages.length === 0 ? (
           <p className="py-6 text-center text-xs text-zinc-600">
-            No messages yet.
+            {t("spec.noMessages")}
           </p>
         ) : (
           messages.map((message) => (
@@ -669,7 +686,7 @@ function SpecChat({
           disabled={!canUse}
           onChange={(event) => onChangeDraft(event.currentTarget.value)}
           onKeyDown={onKeyDown}
-          placeholder={getSpecChatPlaceholder(specStatus, canSteerActiveRun)}
+          placeholder={getSpecChatPlaceholder(specStatus, canSteerActiveRun, t)}
           value={draft}
         />
         <button
@@ -682,7 +699,7 @@ function SpecChat({
           ) : (
             <Loader2 size={15} className="animate-spin" aria-hidden="true" />
           )}
-          {canSteerActiveRun ? "Steer" : "Send"}
+          {canSteerActiveRun ? t("common.steer") : t("common.send")}
         </button>
       </form>
     </section>
@@ -700,6 +717,7 @@ function scrollSpecChatContainerToBottom(container: HTMLDivElement | null) {
 }
 
 function SpecChatMessage({ message }: { message: ChatMessage }) {
+  const { t } = useI18n();
   const isUser = message.role === "user";
 
   return (
@@ -720,9 +738,9 @@ function SpecChatMessage({ message }: { message: ChatMessage }) {
         ) : (
           <Bot size={12} aria-hidden="true" />
         )}
-        {message.role}
+        {isUser ? t("chat.user") : t("chat.assistant")}
       </div>
-      {message.content || (message.isStreaming ? "Working" : "")}
+      {message.content || (message.isStreaming ? t("chat.working") : "")}
     </article>
   );
 }
@@ -842,8 +860,9 @@ export function shouldShowSpecApprovalNotice({
 export function formatApprovalExpiryLabel(
   _expiresAt: string,
   _now = Date.now(),
+  t?: ReturnType<typeof useI18n>["t"],
 ) {
-  return "No timeout";
+  return t ? t("spec.noTimeout") : "No timeout";
 }
 
 function isApprovalPendingAt(
@@ -866,20 +885,21 @@ function isApprovalPendingAt(
 function getSpecChatPlaceholder(
   status: DevelopmentSpec["status"],
   canSteerActiveRun: boolean,
+  t: ReturnType<typeof useI18n>["t"],
 ) {
   if (canSteerActiveRun) {
-    return "Add steering for the running task...";
+    return t("spec.addSteering");
   }
 
   if (status === "blocked") {
-    return "Ask about the blocked Spec...";
+    return t("spec.askBlocked");
   }
 
   if (status === "review") {
-    return "Ask about this Spec...";
+    return t("spec.askSpec");
   }
 
-  return "Message about this Spec...";
+  return t("spec.messageSpec");
 }
 
 function BuildView({
@@ -893,6 +913,7 @@ function BuildView({
   spec: DevelopmentSpec;
   tasks: SpecTask[];
 }) {
+  const { t } = useI18n();
   const passedTasks = tasks.filter((task) => task.status === "passed").length;
 
   if (!["approved", "building", "verifying", "blocked", "completed", "failed", "cancelled"].includes(spec.status)) {
@@ -910,13 +931,13 @@ function BuildView({
 
   return (
     <section className="min-w-0 overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/70 p-4">
-      <SectionHeader icon={<RefreshCcw size={15} aria-hidden="true" />} title="Build and verify" />
+      <SectionHeader icon={<RefreshCcw size={15} aria-hidden="true" />} title={t("spec.buildAndVerify")} />
       <div className="mt-3 grid min-w-0 gap-3 lg:grid-cols-[220px_minmax(0,1fr)]">
         <div className="min-w-0 rounded-md border border-zinc-800 bg-zinc-900/40 p-3">
           <div className="text-2xl font-semibold text-zinc-100">
             {passedTasks}/{tasks.length}
           </div>
-          <p className="mt-1 text-xs text-zinc-500">Tasks passed</p>
+          <p className="mt-1 text-xs text-zinc-500">{t("spec.tasksPassed")}</p>
           {spec.finalVerification ? (
             <div className={`mt-3 rounded border px-2 py-1.5 text-xs ${
               spec.finalVerification.success
@@ -925,8 +946,8 @@ function BuildView({
             }`}>
               <p className="font-medium">
                 {spec.finalVerification.success
-                  ? "Final verification passed"
-                  : "Final verification failed"}
+                  ? t("spec.finalVerificationPassed")
+                  : t("spec.finalVerificationFailed")}
               </p>
               <p className="mt-1 break-words text-[11px] opacity-80">
                 {spec.finalVerification.command}
@@ -946,14 +967,14 @@ function BuildView({
               type="button"
             >
               <RefreshCcw size={14} aria-hidden="true" />
-              Reverify
+              {t("spec.reverify")}
             </button>
           ) : null}
         </div>
         <div className="min-w-0 space-y-3">
           <div className="min-w-0 overflow-hidden rounded-md border border-zinc-800 bg-zinc-900/40 p-3">
             <h3 className="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">
-              Acceptance criteria
+              {t("spec.acceptanceCriteria")}
             </h3>
             <div className="mt-3 space-y-2">
               {acceptanceResults.map((result) => (
@@ -974,10 +995,10 @@ function BuildView({
                     <StatusPill status={result.status} />
                   </div>
                   <p className="mt-1 break-all text-[11px] leading-4 text-zinc-500">
-                    {formatAcceptanceEvidenceLabels(result).tasks}
+                    {formatAcceptanceEvidenceLabels(result, t).tasks}
                   </p>
                   <p className="mt-1 break-all text-[11px] leading-4 text-zinc-500">
-                    {formatAcceptanceEvidenceLabels(result).runs}
+                    {formatAcceptanceEvidenceLabels(result, t).runs}
                   </p>
                   {result.summary ? (
                     <p className="mt-2 whitespace-pre-wrap break-words rounded border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-[11px] leading-4 text-zinc-400">
@@ -999,30 +1020,48 @@ export function getAcceptanceStatusSymbol(
   status: "passed" | "failed" | "pending",
 ) {
   if (status === "passed") {
-    return "✓";
+    return "+";
   }
 
   if (status === "failed") {
-    return "✕";
+    return "x";
   }
 
-  return "○";
+  return "o";
 }
-
 export function formatAcceptanceEvidenceLabels(
   result: Pick<SpecAcceptanceResult, "runIds" | "taskIds">,
+  t: ReturnType<typeof useI18n>["t"] = (key, params) => {
+    if (key === "spec.runsEvidence" && params) {
+      return `Runs: ${params.runs}`;
+    }
+    if (key === "spec.tasksEvidence" && params) {
+      return `Tasks: ${params.tasks}`;
+    }
+    if (key === "spec.noneEvidence") {
+      return "none";
+    }
+    return String(key);
+  },
 ) {
+  const runs = result.runIds.join(", ") || t("spec.noneEvidence");
+  const tasks = result.taskIds.join(", ") || t("spec.noneEvidence");
+
   return {
-    runs: `Runs: ${result.runIds.join(", ") || "none"}`,
-    tasks: `Tasks: ${result.taskIds.join(", ") || "none"}`,
+    runs: t("spec.runsEvidence", { runs }),
+    tasks: t("spec.tasksEvidence", { tasks }),
   };
 }
 
 export function formatSpecTaskAutoRetryLabel(
   task: Pick<SpecTask, "autoRetryCount">,
+  t: ReturnType<typeof useI18n>["t"] = (key, params) =>
+    key === "spec.autoRetry" && params
+      ? `Auto retry ${params.count}`
+      : String(key),
 ) {
   const count = task.autoRetryCount ?? 0;
-  return count > 0 ? `Auto retry ${count}` : null;
+  return count > 0 ? t("spec.autoRetry", { count }) : null;
 }
 
 export function canShowSpecTaskRetry(
@@ -1060,13 +1099,15 @@ function SpecHistory({
   activeSpecId: string;
   specs: DevelopmentSpec[];
 }) {
+  const { t } = useI18n();
+
   if (specs.length <= 1) {
     return null;
   }
 
   return (
     <section className="rounded-md border border-zinc-800 bg-zinc-950/70 p-4">
-      <SectionHeader icon={<History size={15} aria-hidden="true" />} title="Spec history" />
+      <SectionHeader icon={<History size={15} aria-hidden="true" />} title={t("spec.history")} />
       <div className="mt-3 space-y-1">
         {specs.map((spec) => (
           <div
@@ -1080,7 +1121,7 @@ function SpecHistory({
               {spec.status}
             </span>
             {spec.id === activeSpecId ? (
-              <span className="shrink-0 text-blue-200">active</span>
+              <span className="shrink-0 text-blue-200">{t("spec.active")}</span>
             ) : null}
           </div>
         ))}
@@ -1090,10 +1131,12 @@ function SpecHistory({
 }
 
 function EmptySpec() {
+  const { t } = useI18n();
+
   return (
     <div className="grid h-full place-items-center">
       <div className="max-w-[320px] rounded-md border border-dashed border-zinc-800 bg-zinc-900/30 px-4 py-6 text-center text-sm leading-6 text-zinc-500">
-        No Spec is active.
+        {t("spec.empty")}
       </div>
     </div>
   );
@@ -1123,6 +1166,8 @@ function ListBlock({
   items: string[];
   title: string;
 }) {
+  const { t } = useI18n();
+
   return (
     <div className={className}>
       <h4 className="mb-2 text-xs font-medium text-zinc-300">{title}</h4>
@@ -1136,7 +1181,7 @@ function ListBlock({
         </ul>
       ) : (
         <p className="rounded border border-dashed border-zinc-900 px-2 py-2 text-xs text-zinc-600">
-          None
+          {t("common.none")}
         </p>
       )}
     </div>
@@ -1175,6 +1220,8 @@ function SpecApprovalNotice({
   onApprove: () => void;
   onDeny: () => void;
 }) {
+  const { t } = useI18n();
+
   return (
     <section
       aria-live="assertive"
@@ -1188,13 +1235,13 @@ function SpecApprovalNotice({
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <h3 className="text-sm font-semibold text-amber-50">
-                Approval required
+                {t("spec.approvalRequired")}
               </h3>
               <span className="rounded border border-amber-300/30 bg-amber-300/10 px-2 py-0.5 text-[11px] text-amber-100">
                 {approval.toolName}
               </span>
               <span className="rounded border border-amber-300/20 px-2 py-0.5 text-[11px] text-amber-200/80">
-                {formatApprovalExpiryLabel(approval.expiresAt)}
+                {formatApprovalExpiryLabel(approval.expiresAt, Date.now(), t)}
               </span>
             </div>
             <p className="mt-1 break-words text-xs leading-5 text-zinc-300">
@@ -1209,22 +1256,22 @@ function SpecApprovalNotice({
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
           <button
-            aria-label={`Approve ${approval.toolName}`}
+            aria-label={`${t("common.approve")} ${approval.toolName}`}
             className="flex h-9 min-w-28 items-center justify-center gap-2 rounded-md border border-emerald-400/40 bg-emerald-400/10 px-3 text-sm font-medium text-emerald-100 transition hover:border-emerald-300/70 hover:bg-emerald-400/15"
             onClick={onApprove}
             type="button"
           >
             <CheckCircle2 size={15} aria-hidden="true" />
-            Approve
+            {t("common.approve")}
           </button>
           <button
-            aria-label={`Deny ${approval.toolName}`}
+            aria-label={`${t("agent.deny")} ${approval.toolName}`}
             className="flex h-9 min-w-24 items-center justify-center gap-2 rounded-md border border-red-400/40 bg-red-400/10 px-3 text-sm font-medium text-red-100 transition hover:border-red-300/70 hover:bg-red-400/15"
             onClick={onDeny}
             type="button"
           >
             <XCircle size={15} aria-hidden="true" />
-            Deny
+            {t("agent.deny")}
           </button>
         </div>
       </div>
