@@ -4,7 +4,9 @@ import type { AiProviderConfig } from "../services/keyStore";
 import {
   requestFeatureSpec,
   requestInitialSpec,
+  requestSpecRevision,
   requestSpecChatAnswer,
+  SpecValidationError,
 } from "./requests";
 
 const mocks = vi.hoisted(() => ({
@@ -64,6 +66,72 @@ describe("Spec runtime requests", () => {
     );
     expect(repairMessage?.content).toContain(
       "Every task.acceptanceCriteriaIds array must contain at least one existing acceptance criterion id.",
+    );
+  });
+
+  it("keeps repairing a generated Spec payload through a short validation loop", async () => {
+    mocks.chatJson
+      .mockResolvedValueOnce(
+        createGeneratedPayload({
+          taskPatch: { acceptanceCriteriaIds: [] },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createGeneratedPayload({
+          taskPatch: { acceptanceCriteriaIds: ["criterion-missing"] },
+        }),
+      )
+      .mockResolvedValueOnce(createGeneratedPayload());
+
+    const payload = await requestInitialSpec({
+      config: createConfig(),
+      projectBrief: "Build a dashboard",
+      projectName: "Dashboard",
+    });
+
+    expect(payload.tasks[0].acceptanceCriteriaIds).toEqual(["criterion-1"]);
+    expect(mocks.chatJson).toHaveBeenCalledTimes(3);
+
+    const secondRepairMessages = mocks.chatJson.mock.calls[2][0] as ChatMessage[];
+    const secondRepairMessage =
+      secondRepairMessages[secondRepairMessages.length - 1];
+
+    expect(secondRepairMessage?.content).toContain(
+      "Task task-1 references unknown acceptance criterion criterion-missing.",
+    );
+    expect(secondRepairMessage?.content).toContain(
+      "Return the complete replacement Spec JSON only.",
+    );
+  });
+
+  it("throws a typed Spec validation error when repair attempts are exhausted", async () => {
+    mocks.chatJson.mockResolvedValue(
+      createGeneratedPayload({
+        taskPatch: { acceptanceCriteriaIds: [] },
+      }),
+    );
+
+    let capturedError: unknown = null;
+
+    try {
+      await requestSpecRevision({
+        config: createConfig(),
+        currentRevision: createGeneratedPayload(),
+        feedback: "Try again",
+      });
+    } catch (error) {
+      capturedError = error;
+    }
+
+    expect(capturedError).toBeInstanceOf(SpecValidationError);
+    expect(capturedError).toMatchObject({
+      attempts: 3,
+      name: "SpecValidationError",
+      validationError: "task.acceptanceCriteriaIds must not be empty.",
+    });
+    expect(mocks.chatJson).toHaveBeenCalledTimes(3);
+    expect((capturedError as SpecValidationError).invalidResponsePreview).toContain(
+      "acceptanceCriteriaIds",
     );
   });
 
