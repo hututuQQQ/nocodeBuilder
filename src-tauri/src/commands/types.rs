@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::sandbox::SandboxMetadata;
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandResult {
@@ -10,6 +12,8 @@ pub struct CommandResult {
     pub output: String,
     pub started_at: String,
     pub finished_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SandboxMetadata>,
 }
 
 #[derive(Debug, Serialize)]

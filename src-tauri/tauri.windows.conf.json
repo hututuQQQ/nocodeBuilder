@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "resources": {
+      "binaries/ncb-sandbox-setup.exe": "sandbox-sidecars/ncb-sandbox-setup.exe",
+      "binaries/ncb-sandbox-runner.exe": "sandbox-sidecars/ncb-sandbox-runner.exe"
+    }
+  }
+}

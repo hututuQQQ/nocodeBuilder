@@ -131,7 +131,46 @@ export type CommandResult = {
   output: string;
   startedAt: string;
   finishedAt: string;
+  sandbox?: SandboxMetadata;
 };
+
+export type SandboxBackend = "macos-seatbelt" | "windows-native";
+
+export type SandboxNetworkMode = "denied" | "managed-proxy" | "local-server";
+
+export type SandboxMetadata = {
+  backend: SandboxBackend;
+  policyVersion: number;
+  networkMode: SandboxNetworkMode;
+  workspacePath?: string;
+  terminationReason?:
+    | "exit"
+    | "timeout"
+    | "memory-limit"
+    | "process-limit"
+    | "cancelled"
+    | "sandbox-error";
+};
+
+export type SandboxStatus =
+  | {
+      state: "ready";
+      backend: SandboxBackend;
+      policyVersion: number;
+      managedNodeVersion: string;
+    }
+  | {
+      state: "setup-required";
+      reason: string;
+    }
+  | {
+      state: "repair-required";
+      reason: string;
+    }
+  | {
+      state: "unsupported";
+      reason: string;
+    };
 
 export type DevServerInfo = {
   projectId: string;
@@ -302,6 +341,22 @@ export const projectApi = {
 
   runCommand(projectId: string, command: string) {
     return invoke<CommandResult>("run_command", { projectId, command });
+  },
+
+  getSandboxStatus() {
+    return invoke<SandboxStatus>("get_sandbox_status");
+  },
+
+  initializeWindowsSandbox() {
+    return invoke<SandboxStatus>("initialize_windows_sandbox");
+  },
+
+  repairSandbox() {
+    return invoke<SandboxStatus>("repair_sandbox");
+  },
+
+  resetProjectSandbox(projectId: string) {
+    return invoke<void>("reset_project_sandbox", { projectId });
   },
 
   startDevServer(projectId: string) {

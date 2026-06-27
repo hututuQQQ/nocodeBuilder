@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.aiwebbuilder.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run prepare:sidecars -- --debug && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && npm run prepare:sidecars -- --release",
     "frontendDist": "../dist"
   },
   "app": {

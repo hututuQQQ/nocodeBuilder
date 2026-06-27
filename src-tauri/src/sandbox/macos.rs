@@ -1,0 +1,511 @@
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+use super::{
+    process::SandboxChild,
+    types::{
+        SandboxBackendKind, SandboxError, SandboxHealth, SandboxNetworkPolicy, SandboxRequest,
+    },
+};
+use crate::sandbox::policy::SANDBOX_POLICY_VERSION;
+
+const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+const SYSTEM_READ_ROOTS: &[&str] = &[
+    "/Library/Apple",
+    "/Library/Filesystems/NetFSPlugins",
+    "/Library/Preferences",
+    "/Library/Preferences/Logging",
+    "/Library/Apple/System/Library",
+    "/Library/Apple/usr/lib",
+    "/System/Library",
+    "/System/Library/CoreServices",
+    "/System/Volumes/Preboot/Cryptexes/OS",
+    "/System/Cryptexes/OS",
+    "/etc",
+    "/private/etc",
+    "/private/var/db/DarwinDirectory",
+    "/private/var/db/timezone",
+    "/sbin",
+    "/usr/lib",
+    "/usr/libexec",
+    "/usr/sbin",
+    "/usr/share",
+    "/bin",
+    "/usr/bin",
+];
+
+#[derive(Clone, Debug, Default)]
+pub struct MacosSeatbeltBackend;
+
+impl MacosSeatbeltBackend {
+    pub fn health_check(&self) -> Result<SandboxHealth, SandboxError> {
+        if !std::path::Path::new(SANDBOX_EXEC).is_file() {
+            return Err(SandboxError::unavailable(format!(
+                "{SANDBOX_EXEC} is not available; refusing host execution fallback"
+            )));
+        }
+
+        Ok(SandboxHealth {
+            backend: SandboxBackendKind::MacosSeatbelt,
+            policy_version: SANDBOX_POLICY_VERSION,
+        })
+    }
+
+    pub fn spawn(&self, request: SandboxRequest) -> Result<SandboxChild, SandboxError> {
+        self.health_check()?;
+        validate_request(&request)?;
+
+        let profile = build_profile(&request);
+        let mut command = Command::new(SANDBOX_EXEC);
+        command.arg("-p").arg(profile).arg("--");
+        command.arg(&request.executable);
+        command.args(request.args.iter().map(OsString::as_os_str));
+        command.current_dir(&request.working_dir).env_clear();
+
+        for (key, value) in &request.environment {
+            command.env(key, value);
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+            configure_process_limits(&mut command, request.limits);
+        }
+
+        SandboxChild::new(command, SandboxBackendKind::MacosSeatbelt, request.limits)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn configure_process_limits(command: &mut Command, limits: super::types::SandboxResourceLimits) {
+    use std::{io, os::unix::process::CommandExt};
+
+    // The closure only calls async-signal-safe setrlimit before exec.
+    unsafe {
+        command.pre_exec(move || {
+            if let Some(timeout_seconds) = limits.timeout_seconds {
+                set_resource_limit(
+                    libc::RLIMIT_CPU,
+                    timeout_seconds,
+                    timeout_seconds.saturating_add(5),
+                )?;
+            }
+
+            set_resource_limit(libc::RLIMIT_FSIZE, 512 * 1024 * 1024, 512 * 1024 * 1024)?;
+            set_resource_limit(libc::RLIMIT_NOFILE, 256, 256)?;
+
+            Ok(())
+        });
+    }
+
+    fn set_resource_limit(resource: libc::c_int, soft: u64, hard: u64) -> io::Result<()> {
+        let limit = libc::rlimit {
+            rlim_cur: soft as libc::rlim_t,
+            rlim_max: hard as libc::rlim_t,
+        };
+        let result = unsafe { libc::setrlimit(resource, &limit) };
+
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+}
+
+fn validate_request(request: &SandboxRequest) -> Result<(), SandboxError> {
+    if !request.executable.is_absolute() {
+        return Err(SandboxError::policy_denied(
+            "macOS sandbox executable must be an absolute managed path",
+        ));
+    }
+
+    if !request.working_dir.is_absolute() {
+        return Err(SandboxError::policy_denied(
+            "macOS sandbox working directory must be absolute",
+        ));
+    }
+
+    Ok(())
+}
+
+fn build_profile(request: &SandboxRequest) -> String {
+    let mut lines = vec![
+        "(version 1)".to_string(),
+        "(deny default)".to_string(),
+        "(allow process-exec)".to_string(),
+        "(allow process-fork)".to_string(),
+        "(allow signal (target same-sandbox))".to_string(),
+        "(allow process-info* (target same-sandbox))".to_string(),
+        "(allow sysctl-read)".to_string(),
+        "(allow file-read-metadata)".to_string(),
+        "(allow system-mac-syscall (mac-policy-name \"vnguard\"))".to_string(),
+        "(allow system-mac-syscall (require-all (mac-policy-name \"Sandbox\") (mac-syscall-number 67)))"
+            .to_string(),
+        "(allow iokit-open (iokit-registry-entry-class \"RootDomainUserClient\"))".to_string(),
+        "(allow ipc-posix-sem)".to_string(),
+        "(allow ipc-posix-shm-read* (ipc-posix-name-prefix \"apple.cfprefs.\"))".to_string(),
+        "(allow user-preference-read)".to_string(),
+        "(allow mach-lookup (global-name \"com.apple.analyticsd\") (global-name \"com.apple.analyticsd.messagetracer\") (global-name \"com.apple.appsleep\") (global-name \"com.apple.bsd.dirhelper\") (global-name \"com.apple.cfprefsd.agent\") (global-name \"com.apple.cfprefsd.daemon\") (global-name \"com.apple.diagnosticd\") (global-name \"com.apple.logd\") (global-name \"com.apple.logd.events\") (global-name \"com.apple.PowerManagement.control\") (global-name \"com.apple.runningboard\") (global-name \"com.apple.secinitd\") (global-name \"com.apple.system.DirectoryService.libinfo_v1\") (global-name \"com.apple.system.logger\") (global-name \"com.apple.system.notification_center\") (global-name \"com.apple.system.opendirectoryd.libinfo\") (global-name \"com.apple.system.opendirectoryd.membership\") (global-name \"com.apple.trustd\") (global-name \"com.apple.trustd.agent\") (global-name \"com.apple.xpc.activity.unmanaged\") (local-name \"com.apple.cfprefsd.agent\"))"
+            .to_string(),
+        "(allow file-read* file-test-existence (literal \"/\"))".to_string(),
+        "(allow file-read-metadata file-test-existence (literal \"/etc\") (literal \"/tmp\") (literal \"/var\") (literal \"/private/etc/localtime\"))"
+            .to_string(),
+        "(allow file-read-metadata file-test-existence (path-ancestors \"/System/Volumes/Data/private\"))"
+            .to_string(),
+        "(allow file-read-metadata (subpath \"/var\") (subpath \"/private/var\"))".to_string(),
+        "(allow system-fsctl (fsctl-command FSIOC_CAS_BSDFLAGS))".to_string(),
+        "(allow file-read* file-test-existence file-write-data (literal \"/dev/null\"))"
+            .to_string(),
+        "(allow file-read* file-test-existence (literal \"/dev/random\") (literal \"/dev/urandom\") (literal \"/private/etc/passwd\") (literal \"/private/etc/master.passwd\") (literal \"/private/etc/localtime\"))"
+            .to_string(),
+        "(allow file-read* file-test-existence file-write-data file-ioctl (literal \"/dev/dtracehelper\"))"
+            .to_string(),
+        "(allow file-read-data file-test-existence file-write-data (subpath \"/dev/fd\"))"
+            .to_string(),
+    ];
+
+    for root in SYSTEM_READ_ROOTS {
+        let root = Path::new(root);
+        lines.push(read_rule(root, false));
+        lines.push(executable_map_rule(root));
+    }
+
+    for root in &request.readable_roots {
+        lines.push(read_rule(root, false));
+        lines.push(executable_map_rule(root));
+    }
+
+    for root in &request.writable_roots {
+        lines.push(read_rule(root, false));
+        lines.push(write_rule(root));
+    }
+
+    match &request.network {
+        SandboxNetworkPolicy::Denied => {}
+        SandboxNetworkPolicy::LocalServer { port } => {
+            lines.push(format!(
+                "(allow network-bind (local tcp \"127.0.0.1:{}\"))",
+                port
+            ));
+            lines.push(format!(
+                "(allow network-inbound (local tcp \"127.0.0.1:{}\"))",
+                port
+            ));
+        }
+        SandboxNetworkPolicy::ManagedProxy { proxy_port, .. } => {
+            lines.push(format!(
+                "(allow network-outbound (remote tcp \"127.0.0.1:{}\"))",
+                proxy_port
+            ));
+        }
+    }
+
+    let allowed_roots = request
+        .readable_roots
+        .iter()
+        .chain(request.writable_roots.iter())
+        .collect::<Vec<_>>();
+    for root in &request.denied_roots {
+        if allowed_roots
+            .iter()
+            .any(|allowed_root| path_is_same_or_child(allowed_root, root))
+        {
+            continue;
+        }
+        lines.push(format!("(deny file* (subpath \"{}\"))", sbpl_path(root)));
+    }
+
+    lines.join("\n")
+}
+
+fn read_rule(path: &Path, literal: bool) -> String {
+    if literal {
+        format!(
+            "(allow file-read* file-test-existence (literal \"{}\"))",
+            sbpl_path(path)
+        )
+    } else {
+        format!(
+            "(allow file-read* file-test-existence (subpath \"{}\"))",
+            sbpl_path(path)
+        )
+    }
+}
+
+fn write_rule(path: &Path) -> String {
+    format!(
+        "(allow file-write* file-test-existence (subpath \"{}\"))",
+        sbpl_path(path)
+    )
+}
+
+fn executable_map_rule(path: &Path) -> String {
+    format!(
+        "(allow file-map-executable (subpath \"{}\"))",
+        sbpl_path(path)
+    )
+}
+
+fn sbpl_path(path: &Path) -> String {
+    path_to_absolute(path)
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+}
+
+fn path_to_absolute(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn path_is_same_or_child(path: &Path, root: &Path) -> bool {
+    let path = path_to_absolute(path);
+    let root = path_to_absolute(root);
+
+    path == root || path.starts_with(root)
+}
+
+#[cfg(not(target_os = "macos"))]
+impl MacosSeatbeltBackend {
+    pub fn unavailable() -> SandboxError {
+        SandboxError::new(
+            super::types::SandboxErrorKind::UnsupportedPlatform,
+            "macOS Seatbelt backend is only available on macOS",
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sandbox::types::{SandboxPurpose, SandboxResourceLimits};
+    use std::collections::BTreeMap;
+    #[cfg(target_os = "macos")]
+    use std::fs;
+    #[cfg(target_os = "macos")]
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn generated_profile_denies_by_default_and_mentions_denied_roots() {
+        let request = SandboxRequest {
+            command_label: "npm run build".to_string(),
+            purpose: SandboxPurpose::Build,
+            executable: PathBuf::from("/managed/node/bin/npm"),
+            args: vec![],
+            working_dir: PathBuf::from("/sandbox/workspace"),
+            readable_roots: vec![PathBuf::from("/managed/node")],
+            writable_roots: vec![PathBuf::from("/sandbox/workspace")],
+            denied_roots: vec![PathBuf::from("/real/project")],
+            environment: BTreeMap::new(),
+            network: SandboxNetworkPolicy::Denied,
+            limits: SandboxResourceLimits {
+                timeout_seconds: Some(1),
+                memory_bytes: 1,
+                active_process_limit: 1,
+                max_output_bytes: 1024,
+            },
+        };
+        let profile = build_profile(&request);
+
+        assert!(profile.contains("(deny default)"));
+        assert!(profile.contains("/managed/node"));
+        assert!(profile.contains("(allow file-map-executable (subpath \"/managed/node\"))"));
+        assert!(profile.contains("/real/project"));
+    }
+
+    #[test]
+    fn generated_profile_does_not_deny_workspace_under_home() {
+        let request = SandboxRequest {
+            command_label: "npm run build".to_string(),
+            purpose: SandboxPurpose::Build,
+            executable: PathBuf::from("/Users/alice/Library/Application Support/nocodeBuilder/node/bin/npm"),
+            args: vec![],
+            working_dir: PathBuf::from("/Users/alice/Library/Application Support/nocodeBuilder/sandbox/workspaces/project/runs/run-1"),
+            readable_roots: vec![
+                PathBuf::from("/Users/alice/Library/Application Support/nocodeBuilder/node"),
+                PathBuf::from("/Users/alice/Library/Application Support/nocodeBuilder/sandbox/workspaces/project/runs/run-1"),
+            ],
+            writable_roots: vec![
+                PathBuf::from("/Users/alice/Library/Application Support/nocodeBuilder/sandbox/workspaces/project/runs/run-1"),
+                PathBuf::from("/Users/alice/Library/Application Support/nocodeBuilder/sandbox/cache/project"),
+                PathBuf::from("/Users/alice/Library/Application Support/nocodeBuilder/sandbox/tmp/project/run-1"),
+            ],
+            denied_roots: vec![
+                PathBuf::from("/Users/alice"),
+                PathBuf::from("/Users/alice/.ssh"),
+                PathBuf::from("/Users/alice/.aws"),
+                PathBuf::from("/Users/alice/.config/gcloud"),
+                PathBuf::from("/Users/alice/.azure"),
+                PathBuf::from("/Users/alice/.kube"),
+                PathBuf::from("/Users/alice/.docker"),
+                PathBuf::from("/Users/alice/.npmrc"),
+                PathBuf::from("/Users/alice/.netrc"),
+                PathBuf::from("/Users/alice/projects/real-app"),
+            ],
+            environment: BTreeMap::new(),
+            network: SandboxNetworkPolicy::Denied,
+            limits: SandboxResourceLimits {
+                timeout_seconds: Some(1),
+                memory_bytes: 1,
+                active_process_limit: 1,
+                max_output_bytes: 1024,
+            },
+        };
+
+        let profile = build_profile(&request);
+
+        assert!(profile.contains("(allow file-write* file-test-existence (subpath \"/Users/alice/Library/Application Support/nocodeBuilder/sandbox/workspaces/project/runs/run-1\"))"));
+        assert!(!profile.contains("(deny file* (subpath \"/Users/alice\"))"));
+        for sensitive in [
+            "/Users/alice/.ssh",
+            "/Users/alice/.aws",
+            "/Users/alice/.config/gcloud",
+            "/Users/alice/.azure",
+            "/Users/alice/.kube",
+            "/Users/alice/.docker",
+            "/Users/alice/.npmrc",
+            "/Users/alice/.netrc",
+        ] {
+            assert!(
+                profile.contains(&format!("(deny file* (subpath \"{sensitive}\"))")),
+                "expected Seatbelt profile to deny {sensitive}"
+            );
+        }
+        assert!(profile.contains("(deny file* (subpath \"/Users/alice/projects/real-app\"))"));
+    }
+
+    #[test]
+    fn generated_profile_encodes_network_modes() {
+        let mut request = SandboxRequest {
+            command_label: "npm install".to_string(),
+            purpose: SandboxPurpose::Install,
+            executable: PathBuf::from("/managed/node/bin/npm"),
+            args: vec![],
+            working_dir: PathBuf::from("/sandbox/workspace"),
+            readable_roots: vec![PathBuf::from("/managed/node")],
+            writable_roots: vec![PathBuf::from("/sandbox/workspace")],
+            denied_roots: vec![PathBuf::from("/real/project")],
+            environment: BTreeMap::new(),
+            network: SandboxNetworkPolicy::Denied,
+            limits: SandboxResourceLimits {
+                timeout_seconds: Some(1),
+                memory_bytes: 1,
+                active_process_limit: 1,
+                max_output_bytes: 1024,
+            },
+        };
+
+        let denied = build_profile(&request);
+        assert!(!denied.contains("(allow network-"));
+
+        request.network = SandboxNetworkPolicy::ManagedProxy {
+            proxy_port: 4873,
+            allowed_hosts: vec![],
+        };
+        let proxy = build_profile(&request);
+        assert!(proxy.contains("(allow network-outbound (remote tcp \"127.0.0.1:4873\"))"));
+
+        request.network = SandboxNetworkPolicy::LocalServer { port: 5173 };
+        let dev = build_profile(&request);
+        assert!(dev.contains("(allow network-bind (local tcp \"127.0.0.1:5173\"))"));
+        assert!(dev.contains("(allow network-inbound (local tcp \"127.0.0.1:5173\"))"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_runtime_allows_workspace_and_denies_sensitive_root() {
+        if !std::path::Path::new(SANDBOX_EXEC).is_file() {
+            panic!("{SANDBOX_EXEC} is required for the macOS Seatbelt smoke test");
+        }
+
+        let root = std::env::temp_dir().join(format!("ncb-seatbelt-smoke-{}", std::process::id()));
+        let workspace_root = root.join("workspace");
+        let real_project_path = root.join("real-project");
+        fs::create_dir_all(&workspace_root).unwrap();
+        fs::create_dir_all(&real_project_path).unwrap();
+        fs::write(workspace_root.join("allowed.txt"), "allowed").unwrap();
+        fs::write(real_project_path.join(".env"), "SECRET_ENV=blocked").unwrap();
+        fs::write(
+            real_project_path.join(".env.local"),
+            "SECRET_ENV_LOCAL=blocked",
+        )
+        .unwrap();
+        fs::write(
+            real_project_path.join(".aibuilder"),
+            "SECRET_AIBUILDER=blocked",
+        )
+        .unwrap();
+
+        let workspace = workspace_root.canonicalize().unwrap();
+        let real_project = real_project_path.canonicalize().unwrap();
+        let allowed_file = workspace.join("allowed.txt").canonicalize().unwrap();
+        let denied_files = [
+            real_project.join(".env").canonicalize().unwrap(),
+            real_project.join(".env.local").canonicalize().unwrap(),
+            real_project.join(".aibuilder").canonicalize().unwrap(),
+        ];
+
+        let request = SandboxRequest {
+            command_label: "npm run build".to_string(),
+            purpose: SandboxPurpose::Build,
+            executable: PathBuf::from("/bin/cat"),
+            args: vec![],
+            working_dir: workspace.clone(),
+            readable_roots: vec![workspace.clone()],
+            writable_roots: vec![workspace.clone()],
+            denied_roots: vec![real_project.clone()],
+            environment: BTreeMap::new(),
+            network: SandboxNetworkPolicy::Denied,
+            limits: SandboxResourceLimits {
+                timeout_seconds: Some(5),
+                memory_bytes: 64 * 1024 * 1024,
+                active_process_limit: 8,
+                max_output_bytes: 1024,
+            },
+        };
+        let profile = build_profile(&request);
+
+        let allowed = std::process::Command::new(SANDBOX_EXEC)
+            .arg("-p")
+            .arg(&profile)
+            .arg("--")
+            .arg("/bin/cat")
+            .arg(&allowed_file)
+            .output()
+            .unwrap();
+        assert!(
+            allowed.status.success(),
+            "allowed read failed: code={:?}, signal={:?}, stdout={}, stderr={}, profile=\n{}",
+            allowed.status.code(),
+            allowed.status.signal(),
+            String::from_utf8_lossy(&allowed.stdout),
+            String::from_utf8_lossy(&allowed.stderr),
+            profile
+        );
+
+        for denied_file in denied_files {
+            let denied = std::process::Command::new(SANDBOX_EXEC)
+                .arg("-p")
+                .arg(&profile)
+                .arg("--")
+                .arg("/bin/cat")
+                .arg(&denied_file)
+                .output()
+                .unwrap();
+            assert!(
+                !denied.status.success(),
+                "denied read unexpectedly succeeded for {}: stdout={}, stderr={}, profile=\n{}",
+                denied_file.display(),
+                String::from_utf8_lossy(&denied.stdout),
+                String::from_utf8_lossy(&denied.stderr),
+                profile
+            );
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+}

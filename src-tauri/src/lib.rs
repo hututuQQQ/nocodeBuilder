@@ -10,6 +10,7 @@ mod app_storage;
 mod commands;
 mod credentials;
 mod projects;
+mod sandbox;
 mod spec_storage;
 
 #[cfg(test)]
@@ -21,12 +22,13 @@ pub(crate) mod test_support {
         sync::{Mutex, MutexGuard, OnceLock},
     };
 
+    pub(crate) fn with_env_lock(run: impl FnOnce()) {
+        let _lock_guard = env_lock();
+        run();
+    }
+
     pub(crate) fn with_temp_home(prefix: &str, run: impl FnOnce()) {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let lock_guard = LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lock_guard = env_lock();
         let old_home = std::env::var_os("HOME");
         let root = std::env::temp_dir().join(format!(
             "{prefix}-{}",
@@ -43,6 +45,13 @@ pub(crate) mod test_support {
         };
 
         run();
+    }
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     struct TempHomeGuard {
@@ -287,6 +296,7 @@ fn process_sse_event(
 pub fn run() {
     tauri::Builder::default()
         .manage(commands::DevServerRegistry::default())
+        .manage(sandbox::SandboxManager::default())
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { .. } = event {
                 let app = window.app_handle().clone();
@@ -337,6 +347,10 @@ pub fn run() {
             commands::run_command,
             commands::start_dev_server,
             commands::stop_dev_server,
+            sandbox::get_sandbox_status,
+            sandbox::initialize_windows_sandbox,
+            sandbox::repair_sandbox,
+            sandbox::reset_project_sandbox,
             commands::open_preview_in_browser,
             commands::probe_preview_url,
             commands::supabase_proxy_request,

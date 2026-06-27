@@ -60,24 +60,41 @@ npm test
 npm run build
 cargo fmt --check --manifest-path src-tauri/Cargo.toml
 cargo check --manifest-path src-tauri/Cargo.toml
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml --features sandbox-sidecars
 npm run tauri dev
 ```
 
 ## Managed Node Runtime
 
-Packaged nocodeBuilder builds do not require the host machine to have Node.js installed before using project chat workflows. When `npm`, `pnpm`, or `npx` are not available on PATH, the desktop app downloads the latest Node.js LTS archive from nodejs.org, extracts it into a local app runtime directory, and uses that runtime for installs, builds, previews, and Vercel CLI calls.
+Packaged nocodeBuilder builds do not require the host machine to have Node.js or Docker installed before using project chat workflows. The desktop app uses a pinned managed Node runtime from `src-tauri/runtime/node-runtime-manifest.json`, verifies downloaded archives with SHA-256, and does not silently fall back to unknown host Node versions for sandboxed npm/pnpm commands.
 
 Advanced overrides:
 
 - `NOCODE_BUILDER_NODE_DIR`: use an existing Node.js installation directory instead of auto-downloading one.
 - `NOCODE_BUILDER_RUNTIME_DIR`: choose where nocodeBuilder stores managed runtimes.
+- `NOCODE_BUILDER_ALLOW_HOST_NODE=1`: development-only override for non-sandboxed Node tooling.
+- `npm run prepare:sidecars`: build and stage the native sandbox helper binaries for Tauri sidecar bundling. The helper entrypoints are compiled through a temporary sidecar-only Cargo manifest so Tauri's main application build does not package duplicate normal binaries.
+
+## Native Sandbox
+
+Generated project commands are routed through `SandboxManager` and run from an app-managed workspace copy instead of the real project directory. The sandbox copy excludes `.aibuilder`, `.env*`, `.git`, `node_modules`, and build outputs; symlinks and Windows reparse points are rejected.
+
+Sandboxed dev servers keep HMR working through trusted-process incremental sync from the real project into a dedicated dev workspace. Ordinary commands use separate per-run workspaces, so builds/tests do not delete a running dev server workspace. The sync manifest is host-owned, and deleted source files only remove files previously copied by nocodeBuilder, not generated dependency or build directories.
+
+Supported runtime targets:
+
+- macOS: Seatbelt via `/usr/bin/sandbox-exec`.
+- Windows: setup status/initialize/repair flow through the structured setup sidecar. Mutating setup actions launch the helper through UAC elevation. The helper provisions app-owned sandbox directories, protected ACLs, a hidden password-protected `NCB_Sandbox` local account/group with batch-only logon rights, loopback-only WFP allow filters, and default outbound WFP block filters for that account. The runner sidecar validates the same command contract, obtains a batch logon token with the generated credential-store password, relaunches itself as `NCB_Sandbox`, refuses execution unless that identity check succeeds, and applies Job Object limits.
+- Linux: compile-only; runtime command execution returns unsupported.
+
+Install network access goes through a managed allowlist proxy that supports HTTPS CONNECT without TLS interception. If the proxy cannot start, install fails closed rather than enabling unrestricted network. See `docs/native-sandbox.md`.
 
 ## Safety Boundaries
 
 - Rust validates project ids and file paths.
-- Agent file tools cannot write `.aibuilder`, `.env`, `node_modules`, build output, or paths outside the project.
+- Agent file tools cannot write `.aibuilder`, `.env*`, `node_modules`, build output, or paths outside the project.
 - Command execution remains limited to the project command whitelist.
+- Production command execution does not fall back to bare host npm/pnpm when the native sandbox is unavailable.
 - Model requests can be cancelled through `AbortSignal`; late results are ignored after cancellation.
 - Production deployment is never automatic and remains a manual Vercel action.
 - Secret-like content is blocked before file writes.

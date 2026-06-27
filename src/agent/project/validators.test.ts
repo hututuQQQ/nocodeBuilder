@@ -1,7 +1,66 @@
 import { describe, expect, it } from "vitest";
-import { validateAgentStepResponse } from "./validators";
+import { NEXTJS_APP_ROUTER_PROJECT_POLICY } from "./projectPolicy";
+import {
+  validateAgentStepResponse,
+  validateGeneratedProjectResponse,
+} from "./validators";
 
 describe("agent model action validation", () => {
+  it("allows scoped initial generation files without app/page.tsx", () => {
+    const requiredFiles = [
+      "package.json",
+      "next.config.js",
+      "tsconfig.json",
+      "tailwind.config.ts",
+      "postcss.config.mjs",
+      "app/layout.tsx",
+      "app/globals.css",
+    ];
+    const policy = {
+      ...NEXTJS_APP_ROUTER_PROJECT_POLICY,
+      requiredFiles,
+    };
+
+    const result = validateGeneratedProjectResponse({
+      type: "write_files",
+      summary: "Generated foundation files",
+      files: [
+        {
+          path: "package.json",
+          content: JSON.stringify({
+            dependencies: {
+              next: "14.2.35",
+              react: "18.3.1",
+              "react-dom": "18.3.1",
+            },
+            devDependencies: {
+              "@types/node": "20.14.11",
+              "@types/react": "18.3.3",
+              "@types/react-dom": "18.3.0",
+              autoprefixer: "10.4.20",
+              postcss: "8.4.49",
+              tailwindcss: "3.4.17",
+              typescript: "5.4.5",
+            },
+            scripts: {
+              build: "next build",
+              dev: "next dev",
+              start: "next start",
+            },
+          }),
+        },
+        { path: "next.config.js", content: "module.exports = {};" },
+        { path: "tsconfig.json", content: "{}" },
+        { path: "tailwind.config.ts", content: "export default {};" },
+        { path: "postcss.config.mjs", content: "export default {};" },
+        { path: "app/layout.tsx", content: "export default function RootLayout() { return null; }" },
+        { path: "app/globals.css", content: "@tailwind base;" },
+      ],
+    }, policy);
+
+    expect(result.files.map((file) => file.path)).not.toContain("app/page.tsx");
+  });
+
   it("normalizes legacy finish into finish_candidate", () => {
     const result = validateAgentStepResponse({
       type: "finish",

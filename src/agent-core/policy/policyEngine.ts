@@ -56,7 +56,7 @@ export class PolicyEngine {
 
     if (
       input.tool.approvalPolicy === "conditional" &&
-      this.requiresConditionalApproval(input.run.contract, input.tool) &&
+      this.requiresConditionalApproval(input.run.contract, input.tool, input.args) &&
       !input.approvedHashes?.has(approvalHash)
     ) {
       return {
@@ -123,12 +123,34 @@ export class PolicyEngine {
       };
     }
 
+    if (
+      tool.name === "run_command" &&
+      isInstallCommand(args) &&
+      contract.permissions.dependencyChange === "deny"
+    ) {
+      return {
+        allowed: false,
+        reason: "This task contract denies dependency installation.",
+      };
+    }
+
+    if (
+      tool.name === "start_dev_server" &&
+      contract.permissions.previewDeployment === "deny"
+    ) {
+      return {
+        allowed: false,
+        reason: "This task contract denies starting preview servers.",
+      };
+    }
+
     return null;
   }
 
   private requiresConditionalApproval(
     contract: TaskContract,
     tool: ToolDefinition,
+    args: unknown,
   ) {
     if (tool.name === "update_design_tokens") {
       return false;
@@ -138,8 +160,31 @@ export class PolicyEngine {
       return contract.permissions.databaseChange === "ask";
     }
 
+    if (tool.name === "run_command" && isInstallCommand(args)) {
+      return true;
+    }
+
+    if (tool.name === "start_dev_server") {
+      return contract.permissions.previewDeployment === "ask";
+    }
+
     return false;
   }
+}
+
+function isInstallCommand(args: unknown) {
+  if (typeof args !== "object" || args === null || !("command" in args)) {
+    return false;
+  }
+
+  const command = normalizeCommand((args as { command?: unknown }).command);
+  return command === "npm install" || command === "pnpm install";
+}
+
+function normalizeCommand(command: unknown) {
+  return typeof command === "string"
+    ? command.trim().split(/\s+/).join(" ")
+    : "";
 }
 
 export function normalizeApprovalHash(

@@ -2,22 +2,26 @@ use std::{
     fs,
     path::Path,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use tauri::AppHandle;
 
-use crate::projects::resolve_project_dir;
+use crate::{projects::resolve_project_dir, sandbox::SandboxManager};
 
 use super::{
+    command_spec::CommandWriteBackSpec,
     command_whitelist::parse_allowed_command,
-    events::{emit_status, spawn_output_reader},
-    process::spawn_child,
+    events::{
+        emit_status, output_event_budget, spawn_output_reader, DEFAULT_MAX_OUTPUT_LINE_BYTES,
+    },
     time::current_timestamp,
     types::{AllowedCommand, CommandResult},
 };
 
 pub async fn run_command(
     app: AppHandle,
+    sandbox_manager: SandboxManager,
     project_id: String,
     command: String,
 ) -> Result<CommandResult, String> {
@@ -30,6 +34,7 @@ pub async fn run_command(
     tauri::async_runtime::spawn_blocking(move || {
         run_command_blocking(
             app_for_task,
+            sandbox_manager,
             project_id_for_task,
             project_dir.as_path(),
             allowed,
@@ -53,6 +58,7 @@ pub async fn run_command(
 
 pub(crate) fn run_command_blocking(
     app: AppHandle,
+    sandbox_manager: SandboxManager,
     project_id: String,
     project_dir: &Path,
     allowed: AllowedCommand,
@@ -71,10 +77,14 @@ pub(crate) fn run_command_blocking(
         None,
     );
 
-    let mut child = spawn_child(project_dir, allowed)?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    let mut prepared = sandbox_manager
+        .spawn_command(&project_id, project_dir, allowed)
+        .map_err(|error| error.to_string())?;
+    let stdout = prepared.child.take_stdout();
+    let stderr = prepared.child.take_stderr();
     let mut readers = Vec::new();
+    let max_output_bytes = Some(prepared.policy.limits.max_output_bytes);
+    let event_budget = output_event_budget(prepared.policy.limits.max_output_bytes);
 
     if let Some(stdout) = stdout {
         readers.push(spawn_output_reader(
@@ -86,6 +96,9 @@ pub(crate) fn run_command_blocking(
             Some(output.clone()),
             None,
             None,
+            max_output_bytes,
+            Some(DEFAULT_MAX_OUTPUT_LINE_BYTES),
+            Some(event_budget.clone()),
             None,
         ));
     }
@@ -100,12 +113,21 @@ pub(crate) fn run_command_blocking(
             Some(output.clone()),
             None,
             None,
+            max_output_bytes,
+            Some(DEFAULT_MAX_OUTPUT_LINE_BYTES),
+            Some(event_budget.clone()),
             None,
         ));
     }
 
-    let status = child
-        .wait()
+    let timeout = prepared
+        .policy
+        .limits
+        .timeout_seconds
+        .map(Duration::from_secs);
+    let sandbox_exit = prepared
+        .child
+        .wait_with_timeout(timeout)
         .map_err(|error| format!("command: failed to wait for {command_label}: {error}"))?;
 
     for reader in readers {
@@ -113,14 +135,55 @@ pub(crate) fn run_command_blocking(
     }
 
     let finished_at = current_timestamp();
-    let mut success = status.success();
-    let exit_code = status.code();
+    let mut success = sandbox_exit.success;
+    let exit_code = sandbox_exit.code;
     let mut validation_message = None;
+    prepared.metadata.termination_reason = Some(sandbox_exit.termination_reason);
+    let is_install = allowed.label == "npm install" || allowed.label == "pnpm install";
 
     if success {
-        if let Err(error) = validate_post_command(project_dir, allowed) {
+        if let Err(error) = validate_post_command(&prepared.workspace.workspace_root, allowed) {
             success = false;
             validation_message = Some(error);
+        }
+    }
+
+    if success {
+        match write_back_outputs_for_policy(
+            &prepared.workspace,
+            project_dir,
+            prepared.policy.write_back,
+        ) {
+            Ok(written) if !written.is_empty() => {
+                if let Ok(mut output) = output.lock() {
+                    output.push_str("[sandbox] wrote back ");
+                    output.push_str(&written.join(", "));
+                    output.push('\n');
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                success = false;
+                validation_message = Some(error.to_string());
+            }
+        }
+    }
+
+    if success && is_install {
+        if let Err(error) = prepared.workspace.mark_dependency_layer_current(
+            project_dir,
+            allowed.package_manager,
+            &prepared.managed_node_version,
+        ) {
+            success = false;
+            validation_message = Some(error.to_string());
+        }
+    }
+
+    if is_install {
+        if let Err(error) = sandbox_manager.harden_dependency_layer(&prepared.workspace) {
+            success = false;
+            validation_message = Some(error.to_string());
         }
     }
 
@@ -144,6 +207,8 @@ pub(crate) fn run_command_blocking(
         output.push('\n');
     }
 
+    prepared.workspace.cleanup_after_command();
+
     Ok(CommandResult {
         project_id,
         command: command_label,
@@ -152,7 +217,21 @@ pub(crate) fn run_command_blocking(
         output,
         started_at,
         finished_at,
+        sandbox: Some(prepared.metadata),
     })
+}
+
+fn write_back_outputs_for_policy(
+    workspace: &crate::sandbox::SandboxWorkspace,
+    project_dir: &Path,
+    write_back: CommandWriteBackSpec,
+) -> Result<Vec<String>, String> {
+    match write_back {
+        CommandWriteBackSpec::None => Ok(Vec::new()),
+        CommandWriteBackSpec::Files(files) => workspace
+            .write_back_allowed_outputs(project_dir, files)
+            .map_err(|error| error.to_string()),
+    }
 }
 
 fn validate_post_command(project_dir: &Path, allowed: AllowedCommand) -> Result<(), String> {
@@ -225,4 +304,130 @@ fn project_uses_next(project_dir: &Path) -> Result<bool, String> {
             .get("devDependencies")
             .and_then(|value| value.as_object())
             .is_some_and(|dependencies| dependencies.contains_key("next")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        commands::command_spec::{
+            spec_for_label, CommandWriteBackSpec, BUILD_WRITE_BACK_FILES,
+            NPM_INSTALL_WRITE_BACK_FILES,
+        },
+        sandbox::{SandboxWorkspace, SandboxWorkspaceKind},
+    };
+    use chrono::Utc;
+    use std::{fs, path::PathBuf};
+
+    #[test]
+    fn install_write_back_writes_lockfile_without_package_json() {
+        let root = unique_root("install-write-back");
+        let project = root.join("project");
+        let workspace_root = root.join("workspace");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&workspace_root).unwrap();
+        fs::write(project.join("package.json"), "{\"name\":\"real\"}").unwrap();
+        fs::write(workspace_root.join("package-lock.json"), "{\"lock\":true}").unwrap();
+        fs::write(
+            workspace_root.join("package.json"),
+            "{\"name\":\"sandbox\"}",
+        )
+        .unwrap();
+
+        let workspace = test_workspace(&root, workspace_root);
+        let written = write_back_outputs_for_policy(
+            &workspace,
+            &project,
+            CommandWriteBackSpec::Files(NPM_INSTALL_WRITE_BACK_FILES),
+        )
+        .unwrap();
+
+        assert_eq!(written, vec!["package-lock.json".to_string()]);
+        assert_eq!(
+            fs::read_to_string(project.join("package-lock.json")).unwrap(),
+            "{\"lock\":true}"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("package.json")).unwrap(),
+            "{\"name\":\"real\"}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_write_back_writes_next_env_without_lockfiles() {
+        let root = unique_root("build-write-back");
+        let project = root.join("project");
+        let workspace_root = root.join("workspace");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&workspace_root).unwrap();
+        fs::write(workspace_root.join("next-env.d.ts"), "/// <reference />").unwrap();
+        fs::write(workspace_root.join("package-lock.json"), "sandbox npm lock").unwrap();
+        fs::write(workspace_root.join("pnpm-lock.yaml"), "sandbox pnpm lock").unwrap();
+
+        let workspace = test_workspace(&root, workspace_root);
+        let written = write_back_outputs_for_policy(
+            &workspace,
+            &project,
+            CommandWriteBackSpec::Files(BUILD_WRITE_BACK_FILES),
+        )
+        .unwrap();
+
+        assert_eq!(written, vec!["next-env.d.ts".to_string()]);
+        assert_eq!(
+            fs::read_to_string(project.join("next-env.d.ts")).unwrap(),
+            "/// <reference />"
+        );
+        assert!(!project.join("package-lock.json").exists());
+        assert!(!project.join("pnpm-lock.yaml").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lint_and_test_policy_do_not_write_back_lockfiles() {
+        for command_name in ["npm run lint", "npm run test", "npm test", "pnpm test"] {
+            let root = unique_root(command_name);
+            let project = root.join("project");
+            let workspace_root = root.join("workspace");
+            fs::create_dir_all(&project).unwrap();
+            fs::create_dir_all(&workspace_root).unwrap();
+            fs::write(project.join("package-lock.json"), "real lock").unwrap();
+            fs::write(workspace_root.join("package-lock.json"), "sandbox lock").unwrap();
+
+            let workspace = test_workspace(&root, workspace_root);
+            let spec = spec_for_label(command_name).expect("command spec");
+            let written =
+                write_back_outputs_for_policy(&workspace, &project, spec.write_back).unwrap();
+
+            assert!(written.is_empty());
+            assert_eq!(
+                fs::read_to_string(project.join("package-lock.json")).unwrap(),
+                "real lock"
+            );
+
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    fn test_workspace(root: &Path, workspace_root: PathBuf) -> SandboxWorkspace {
+        SandboxWorkspace {
+            project_id: "test".to_string(),
+            kind: SandboxWorkspaceKind::Run,
+            workspace_root,
+            dependency_root: root.join("dependency-layer"),
+            cache_root: root.join("cache"),
+            tmp_root: root.join("tmp"),
+            source_manifest_path: root.join("state").join("source-manifest.json"),
+            dependency_fingerprint_path: root.join("state").join("dependency-fingerprint.json"),
+        }
+    }
+
+    fn unique_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ncb-command-runner-{label}-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ))
+    }
 }

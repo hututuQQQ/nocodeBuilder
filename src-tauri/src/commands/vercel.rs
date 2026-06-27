@@ -5,12 +5,15 @@ use std::{
 
 use tauri::AppHandle;
 
-use crate::projects::resolve_project_dir;
+use crate::{projects::resolve_project_dir, sandbox::SandboxManager};
 
 use super::{
     command_runner::run_command_blocking,
     command_whitelist::preferred_build_command,
-    events::{emit_status, redact_secrets, spawn_output_reader},
+    events::{
+        emit_status, output_event_budget, redact_secrets, spawn_output_reader,
+        DEFAULT_EVENT_OUTPUT_BYTES, DEFAULT_MAX_OUTPUT_LINE_BYTES,
+    },
     time::current_timestamp,
     types::{VercelDeployOptions, VercelDeploymentInfo, VercelUserInfo},
 };
@@ -20,6 +23,7 @@ mod urls;
 
 pub async fn deploy_to_vercel(
     app: AppHandle,
+    sandbox_manager: SandboxManager,
     project_id: String,
     options: VercelDeployOptions,
 ) -> Result<VercelDeploymentInfo, String> {
@@ -33,6 +37,7 @@ pub async fn deploy_to_vercel(
         let build_command = preferred_build_command(&project_dir);
         let build_result = run_command_blocking(
             app_for_task.clone(),
+            sandbox_manager,
             project_id_for_task.clone(),
             project_dir.as_path(),
             build_command,
@@ -105,6 +110,7 @@ fn run_vercel_deploy_blocking(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let mut readers = Vec::new();
+    let event_budget = output_event_budget(DEFAULT_EVENT_OUTPUT_BYTES);
 
     if let Some(stdout) = stdout {
         readers.push(spawn_output_reader(
@@ -116,6 +122,9 @@ fn run_vercel_deploy_blocking(
             Some(output.clone()),
             None,
             None,
+            None,
+            Some(DEFAULT_MAX_OUTPUT_LINE_BYTES),
+            Some(event_budget.clone()),
             Some(redactions.clone()),
         ));
     }
@@ -130,6 +139,9 @@ fn run_vercel_deploy_blocking(
             Some(output.clone()),
             None,
             None,
+            None,
+            Some(DEFAULT_MAX_OUTPUT_LINE_BYTES),
+            Some(event_budget.clone()),
             Some(redactions.clone()),
         ));
     }
