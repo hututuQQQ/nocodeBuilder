@@ -6,6 +6,7 @@ import {
   Loader2,
   RotateCcw,
 } from "lucide-react";
+import { useI18n } from "../../i18n";
 import {
   getPendingReviewFiles,
   type PendingReviewFile,
@@ -37,14 +38,15 @@ export function ReviewPanel({
   onSelectFile,
   selectedFilePath,
 }: ReviewPanelProps) {
+  const { t } = useI18n();
   const pendingFiles = getPendingReviewFiles(changeHistory);
 
   if (!currentProjectName) {
     return (
       <EmptyState
         icon={<FileDiff size={18} aria-hidden="true" />}
-        title="No project selected"
-        detail="Select a project to review code changes."
+        title={t("files.noProjectTitle")}
+        detail={t("review.noProjectDetail")}
       />
     );
   }
@@ -53,8 +55,8 @@ export function ReviewPanel({
     return (
       <EmptyState
         icon={<FileDiff size={18} aria-hidden="true" />}
-        title="No code changes yet"
-        detail="Agent edits from the current chat will appear here."
+        title={t("review.noChangesTitle")}
+        detail={t("review.noChangesDetail")}
       />
     );
   }
@@ -68,15 +70,15 @@ export function ReviewPanel({
       <header className="flex min-h-12 flex-wrap items-center gap-3 border-b border-zinc-800 px-3 py-2">
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-medium text-zinc-100">
-            Pending review
+            {t("review.pending")}
           </div>
           <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
-            <span>{pendingFiles.length} file(s)</span>
+            <span>{t("review.filesCount", { count: pendingFiles.length })}</span>
             <span>
               +{sumBy(pendingFiles, "additions")} / -
               {sumBy(pendingFiles, "deletions")}
             </span>
-            <span>current chat</span>
+            <span>{t("review.currentChat")}</span>
           </div>
         </div>
         <button
@@ -86,7 +88,7 @@ export function ReviewPanel({
           type="button"
         >
           <Check size={13} aria-hidden="true" />
-          Accept all
+          {t("review.acceptAll")}
         </button>
         <button
           className="flex h-8 shrink-0 items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-3 text-xs font-medium text-zinc-300 transition hover:border-zinc-700 hover:text-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-600"
@@ -99,13 +101,13 @@ export function ReviewPanel({
           ) : (
             <RotateCcw size={13} aria-hidden="true" />
           )}
-          Revert all
+          {t("review.revertAll")}
         </button>
       </header>
 
       <div className="min-w-0 border-b border-zinc-800 px-3 py-2">
         <div className="mb-2 text-xs font-medium text-zinc-500">
-          Changed files
+          {t("review.changedFiles")}
         </div>
         <div className="flex min-w-0 gap-2 overflow-x-auto overscroll-x-contain pb-1 [scrollbar-gutter:stable]">
           {pendingFiles.map((file) => (
@@ -140,6 +142,7 @@ export function ReviewPanel({
         isRevertingChange={isRevertingChange}
         onAcceptFile={onAcceptFile}
         onRevertFile={onRevertFile}
+        t={t}
       />
     </div>
   );
@@ -150,11 +153,13 @@ function DiffPane({
   isRevertingChange,
   onAcceptFile,
   onRevertFile,
+  t,
 }: {
   file: PendingReviewFile;
   isRevertingChange: boolean;
   onAcceptFile: (path: string) => Promise<void>;
   onRevertFile: (path: string) => Promise<void>;
+  t: ReturnType<typeof useI18n>["t"];
 }) {
   const language = getMonacoLanguage(file.path);
   const languageLabel = getLanguageLabel(language, file.path);
@@ -180,7 +185,7 @@ function DiffPane({
           type="button"
         >
           <CheckCircle2 size={12} aria-hidden="true" />
-          Accept file
+          {t("review.acceptFile")}
         </button>
         <button
           className="flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-2 text-xs text-zinc-300 transition hover:border-zinc-700 hover:text-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-600"
@@ -193,7 +198,7 @@ function DiffPane({
           ) : (
             <RotateCcw size={12} aria-hidden="true" />
           )}
-          Revert file
+          {t("review.revertFile")}
         </button>
       </div>
       <div className="min-h-0 min-w-0 overflow-hidden">

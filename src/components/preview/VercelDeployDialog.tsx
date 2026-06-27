@@ -4,6 +4,7 @@ import {
   Loader2,
   Rocket,
 } from "lucide-react";
+import { useI18n } from "../../i18n";
 import { VercelDeployTarget } from "../../services/keyStore";
 import { Notice } from "./previewPanelTypes";
 
@@ -40,6 +41,8 @@ export function VercelDeployDialog({
   target,
   token,
 }: VercelDeployDialogProps) {
+  const { t } = useI18n();
+
   return (
     <div className="absolute inset-0 z-20 grid place-items-center bg-black/70 px-4">
       <form
@@ -49,10 +52,10 @@ export function VercelDeployDialog({
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
             <h3 className="text-sm font-semibold text-zinc-100">
-              Vercel Deploy
+              {t("vercel.title")}
             </h3>
             <p className="mt-1 text-xs text-zinc-500">
-              Token is saved to the current project .env file.
+              {t("vercel.description")}
             </p>
           </div>
           <button
@@ -60,13 +63,13 @@ export function VercelDeployDialog({
             onClick={onClose}
             type="button"
           >
-            Close
+            {t("common.close")}
           </button>
         </div>
 
         <label className="mb-3 block">
           <span className="mb-2 block text-xs font-medium text-zinc-400">
-            Vercel token
+            {t("vercel.token")}
           </span>
           <input
             className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-blue-400/60 focus:ring-2 focus:ring-blue-400/10"
@@ -80,7 +83,7 @@ export function VercelDeployDialog({
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="block">
             <span className="mb-2 block text-xs font-medium text-zinc-400">
-              Scope
+              {t("vercel.scope")}
             </span>
             <input
               className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-blue-400/60 focus:ring-2 focus:ring-blue-400/10"
@@ -91,7 +94,7 @@ export function VercelDeployDialog({
           </label>
           <label className="block">
             <span className="mb-2 block text-xs font-medium text-zinc-400">
-              Existing Vercel project
+              {t("vercel.existingProject")}
             </span>
             <input
               className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-blue-400/60 focus:ring-2 focus:ring-blue-400/10"
@@ -100,14 +103,14 @@ export function VercelDeployDialog({
               value={projectName}
             />
             <span className="mt-2 block text-xs leading-5 text-zinc-500">
-              Leave empty to let Vercel create or use the linked project.
+              {t("vercel.projectHint")}
             </span>
           </label>
         </div>
 
         <label className="mt-3 block">
           <span className="mb-2 block text-xs font-medium text-zinc-400">
-            Default target
+            {t("vercel.defaultTarget")}
           </span>
           <select
             className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition focus:border-blue-400/60 focus:ring-2 focus:ring-blue-400/10"
@@ -116,8 +119,8 @@ export function VercelDeployDialog({
             }
             value={target}
           >
-            <option value="preview">Preview</option>
-            <option value="production">Production</option>
+            <option value="preview">{t("vercel.preview")}</option>
+            <option value="production">{t("vercel.production")}</option>
           </select>
         </label>
 
@@ -131,7 +134,7 @@ export function VercelDeployDialog({
                 : "border-zinc-800 bg-zinc-900 text-zinc-600"
           }`}
         >
-          {notice?.message ?? "Token test result will appear here."}
+          {notice?.message ?? t("vercel.noticePlaceholder")}
         </div>
 
         <div className="mt-4 flex justify-end gap-2">
@@ -146,7 +149,7 @@ export function VercelDeployDialog({
             ) : (
               <CheckCircle2 size={14} aria-hidden="true" />
             )}
-            Test
+            {t("common.test")}
           </button>
           <button
             className="flex h-9 items-center gap-2 rounded-md border border-blue-400/30 bg-blue-400/10 px-3 text-sm font-medium text-blue-100 transition hover:border-blue-300/60 hover:bg-blue-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
@@ -158,7 +161,7 @@ export function VercelDeployDialog({
             ) : (
               <Rocket size={14} aria-hidden="true" />
             )}
-            Save and deploy
+            {t("vercel.saveDeploy")}
           </button>
         </div>
       </form>

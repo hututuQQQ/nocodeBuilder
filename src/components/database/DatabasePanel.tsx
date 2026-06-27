@@ -26,6 +26,7 @@ import {
   type SupabaseTable,
 } from "../../services/supabaseRest";
 import { useAppStore } from "../../store/appStore";
+import { useI18n, type TranslateFunction } from "../../i18n";
 
 type Notice = { tone: "error" | "success"; message: string };
 type RowFormState = {
@@ -72,6 +73,7 @@ const COLUMN_TYPES = [
 ];
 
 export function DatabasePanel() {
+  const { t } = useI18n();
   const currentProject = useAppStore((state) => state.currentProject);
   const [config, setConfig] = useState<ProjectSupabaseConfig | null>(null);
   const [urlDraft, setUrlDraft] = useState("");
@@ -138,7 +140,7 @@ export function DatabasePanel() {
         setIsConfigOpen(!storedConfig || !storedConfig.secretKey);
         if (storedConfig) await loadTables(storedConfig, isActive);
       } catch (error) {
-        if (isActive) setNotice({ tone: "error", message: getReadableError(error) });
+        if (isActive) setNotice({ tone: "error", message: getReadableError(error, t) });
       } finally {
         if (isActive) setIsLoadingConfig(false);
       }
@@ -167,8 +169,11 @@ export function DatabasePanel() {
       setNotice({
         tone: "success",
         message: nextTables.length > 0
-          ? `Connected to ${nextTables.length} table(s) for ${currentProject?.name ?? "this project"}.`
-          : "Connected, but no readable tables were found in this schema.",
+          ? t("database.connectedTables", {
+              count: nextTables.length,
+              project: currentProject?.name ?? "this project",
+            })
+          : t("database.connectedNoTables"),
       });
     } catch (error) {
       if (isActive) {
@@ -176,7 +181,7 @@ export function DatabasePanel() {
         setSelectedTableName("");
         setRows([]);
         setRowCount(null);
-        setNotice({ tone: "error", message: getReadableError(error) });
+        setNotice({ tone: "error", message: getReadableError(error, t) });
       }
     } finally {
       if (isActive) setIsLoadingTables(false);
@@ -199,7 +204,7 @@ export function DatabasePanel() {
     } catch (error) {
       setRows([]);
       setRowCount(null);
-      setNotice({ tone: "error", message: getReadableError(error) });
+      setNotice({ tone: "error", message: getReadableError(error, t) });
     } finally {
       setIsLoadingRows(false);
     }
@@ -209,7 +214,7 @@ export function DatabasePanel() {
     event.preventDefault();
     if (!currentProject) return;
 
-    const validationError = validateConfigDraft(urlDraft, anonKeyDraft, secretKeyDraft);
+    const validationError = validateConfigDraft(urlDraft, anonKeyDraft, secretKeyDraft, t);
     if (validationError) {
       setNotice({ tone: "error", message: validationError });
       return;
@@ -244,7 +249,7 @@ export function DatabasePanel() {
       setIsConfigOpen(false);
       await loadTables(nextConfig);
     } catch (error) {
-      setNotice({ tone: "error", message: getReadableError(error) });
+      setNotice({ tone: "error", message: getReadableError(error, t) });
     } finally {
       setIsTesting(false);
     }
@@ -320,9 +325,12 @@ export function DatabasePanel() {
       }
       setRowForm(null);
       await loadRows(config, selectedTable);
-      setNotice({ tone: "success", message: rowForm.mode === "create" ? "Row inserted." : "Row updated." });
+      setNotice({
+        tone: "success",
+        message: rowForm.mode === "create" ? t("database.insertRow") : t("database.updateRow"),
+      });
     } catch (error) {
-      setNotice({ tone: "error", message: getReadableError(error) });
+      setNotice({ tone: "error", message: getReadableError(error, t) });
     } finally {
       setIsSavingRow(false);
     }
@@ -330,15 +338,15 @@ export function DatabasePanel() {
 
   async function handleDeleteRow(row: SupabaseRow) {
     if (!config || !selectedTable) return;
-    if (!window.confirm(`Delete this row from ${selectedTable.name}?`)) return;
+    if (!window.confirm(t("database.deleteRowConfirm", { table: selectedTable.name }))) return;
 
     setNotice(null);
     try {
       await new SupabaseRestClient(config).deleteRow(selectedTable, row);
       await loadRows(config, selectedTable);
-      setNotice({ tone: "success", message: "Row deleted." });
+      setNotice({ tone: "success", message: t("database.rowDeleted") });
     } catch (error) {
-      setNotice({ tone: "error", message: getReadableError(error) });
+      setNotice({ tone: "error", message: getReadableError(error, t) });
     }
   }
 
@@ -347,7 +355,7 @@ export function DatabasePanel() {
     if (!config.dbUrl.trim()) {
       setNotice({
         tone: "error",
-        message: "Add SUPABASE_DB_URL in Supabase settings before creating tables.",
+        message: t("database.addDbUrlCreate"),
       });
       setIsConfigOpen(true);
       return;
@@ -360,7 +368,7 @@ export function DatabasePanel() {
     event.preventDefault();
     if (!config || !tableForm) return;
 
-    const validationError = validateTableForm(tableForm);
+    const validationError = validateTableForm(tableForm, t);
     if (validationError) {
       setNotice({ tone: "error", message: validationError });
       return;
@@ -385,9 +393,9 @@ export function DatabasePanel() {
       await delay(500);
       await loadTables(config);
       setSelectedTableName(tableName);
-      setNotice({ tone: "success", message: `Table ${tableName} created.` });
+      setNotice({ tone: "success", message: t("database.tableCreated", { table: tableName }) });
     } catch (error) {
-      setNotice({ tone: "error", message: getReadableError(error) });
+      setNotice({ tone: "error", message: getReadableError(error, t) });
     } finally {
       setIsCreatingTable(false);
     }
@@ -398,7 +406,7 @@ export function DatabasePanel() {
     if (!config.dbUrl.trim()) {
       setNotice({
         tone: "error",
-        message: "Add SUPABASE_DB_URL in Supabase settings before editing columns.",
+        message: t("database.addDbUrlEdit"),
       });
       setIsConfigOpen(true);
       return;
@@ -411,7 +419,7 @@ export function DatabasePanel() {
     event.preventDefault();
     if (!config || !columnEditor) return;
 
-    const validationError = validateColumnEditor(columnEditor);
+    const validationError = validateColumnEditor(columnEditor, t);
     if (validationError) {
       setNotice({ tone: "error", message: validationError });
       return;
@@ -437,9 +445,9 @@ export function DatabasePanel() {
       await delay(500);
       await loadTables(config);
       setSelectedTableName(columnEditor.tableName);
-      setNotice({ tone: "success", message: "Columns updated." });
+      setNotice({ tone: "success", message: t("database.columnsUpdated") });
     } catch (error) {
-      setNotice({ tone: "error", message: getReadableError(error) });
+      setNotice({ tone: "error", message: getReadableError(error, t) });
     } finally {
       setIsUpdatingColumns(false);
     }
@@ -450,12 +458,12 @@ export function DatabasePanel() {
     if (!config.dbUrl.trim()) {
       setNotice({
         tone: "error",
-        message: "Add SUPABASE_DB_URL in Supabase settings before deleting tables.",
+        message: t("database.addDbUrlDelete"),
       });
       setIsConfigOpen(true);
       return;
     }
-    if (!window.confirm(`Delete table ${selectedTable.name}? This cannot be undone.`)) return;
+    if (!window.confirm(t("database.deleteTableConfirm", { table: selectedTable.name }))) return;
 
     setIsLoadingTables(true);
     setNotice(null);
@@ -466,9 +474,9 @@ export function DatabasePanel() {
       setSelectedTableName("");
       await delay(500);
       await loadTables(config);
-      setNotice({ tone: "success", message: `Table ${selectedTable.name} deleted.` });
+      setNotice({ tone: "success", message: t("database.tableDeleted", { table: selectedTable.name }) });
     } catch (error) {
-      setNotice({ tone: "error", message: getReadableError(error) });
+      setNotice({ tone: "error", message: getReadableError(error, t) });
     } finally {
       setIsLoadingTables(false);
     }
@@ -480,29 +488,29 @@ export function DatabasePanel() {
         <div className="flex min-w-0 items-center gap-2">
           <Database size={16} className="shrink-0 text-emerald-300" aria-hidden="true" />
           <div className="min-w-0">
-            <h2 className="truncate text-sm font-semibold text-zinc-100">Database</h2>
+            <h2 className="truncate text-sm font-semibold text-zinc-100">{t("database.title")}</h2>
             <p className="truncate text-[11px] text-zinc-600">
-              {currentProject ? `${currentProject.name} / ${config?.schema ?? "not connected"}` : "No project selected"}
+              {currentProject ? `${currentProject.name} / ${config?.schema ?? t("database.notConnected")}` : t("database.noProjectTitle")}
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
           <button
-            aria-label="Refresh database"
+            aria-label={t("database.refresh")}
             className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200 disabled:cursor-not-allowed disabled:text-zinc-700"
             disabled={!config || isLoadingTables || isLoadingRows}
             onClick={() => void handleRefresh()}
-            title="Refresh"
+            title={t("database.refresh")}
             type="button"
           >
             {isLoadingTables || isLoadingRows ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <RefreshCcw size={14} aria-hidden="true" />}
           </button>
           <button
-            aria-label="Configure Supabase"
+            aria-label={t("database.configure")}
             className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-emerald-400/40 hover:text-emerald-200 disabled:cursor-not-allowed disabled:text-zinc-700"
             disabled={!currentProject}
             onClick={() => setIsConfigOpen(true)}
-            title="Supabase settings"
+            title={t("database.supabaseSettings")}
             type="button"
           >
             <KeyRound size={14} aria-hidden="true" />
@@ -511,9 +519,9 @@ export function DatabasePanel() {
       </header>
 
       {!currentProject ? (
-        <EmptyDatabaseState title="No project selected" message="Select a generated project to manage its Supabase database." />
+        <EmptyDatabaseState title={t("database.noProjectTitle")} message={t("database.noProjectMessage")} />
       ) : isLoadingConfig ? (
-        <EmptyDatabaseState title="Loading database" message="Reading this project's Supabase connection." loading />
+        <EmptyDatabaseState title={t("database.loadingTitle")} message={t("database.loadingMessage")} loading />
       ) : !config ? (
         <div className="min-h-0 flex-1 overflow-y-auto">
           <SupabaseConfigForm
@@ -539,14 +547,14 @@ export function DatabasePanel() {
             <div className="flex h-10 items-center justify-between gap-2 border-b border-zinc-800 px-3 text-xs font-semibold text-zinc-400">
               <div className="flex min-w-0 items-center gap-2">
                 <Table2 size={13} aria-hidden="true" />
-                <span className="truncate">Tables</span>
+                <span className="truncate">{t("database.tables")}</span>
               </div>
               <button
-                aria-label="Create table"
+                aria-label={t("database.createTable")}
                 className="grid size-6 shrink-0 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-emerald-400/40 hover:text-emerald-200 disabled:cursor-not-allowed disabled:text-zinc-700"
                 disabled={!config}
                 onClick={openCreateTableForm}
-                title="New table"
+                title={t("database.newTable")}
                 type="button"
               >
                 <Plus size={12} aria-hidden="true" />
@@ -554,7 +562,7 @@ export function DatabasePanel() {
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-2">
               {tables.length === 0 ? (
-                <p className="px-2 py-4 text-xs leading-5 text-zinc-600">No readable tables.</p>
+                <p className="px-2 py-4 text-xs leading-5 text-zinc-600">{t("database.noReadableTables")}</p>
               ) : tables.map((table) => (
                 <button
                   className={`mb-1 flex h-8 w-full items-center justify-between rounded px-2 text-left text-xs transition ${selectedTableName === table.name ? "bg-emerald-400/10 text-emerald-100 ring-1 ring-emerald-400/25" : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"}`}
@@ -577,7 +585,7 @@ export function DatabasePanel() {
                 <input
                   className="h-7 min-w-0 flex-1 rounded border border-zinc-800 bg-zinc-950 px-2 text-xs text-zinc-200 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/50 focus:ring-2 focus:ring-emerald-400/10"
                   onChange={(event) => setSearchDraft(event.currentTarget.value)}
-                  placeholder="Search text columns"
+                  placeholder={t("database.searchTextColumns")}
                   value={searchDraft}
                 />
               </form>
@@ -588,14 +596,14 @@ export function DatabasePanel() {
                 type="button"
               >
                 <Pencil size={13} aria-hidden="true" />
-                Columns
+                {t("database.columns")}
               </button>
               <button
-                aria-label="Delete table"
+                aria-label={t("database.delete")}
                 className="grid size-7 shrink-0 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-red-400/40 hover:text-red-200 disabled:cursor-not-allowed disabled:text-zinc-700"
                 disabled={!selectedTable || isLoadingTables}
                 onClick={() => void handleDeleteTable()}
-                title="Delete table"
+                title={t("database.delete")}
                 type="button"
               >
                 <Trash2 size={13} aria-hidden="true" />
@@ -607,20 +615,20 @@ export function DatabasePanel() {
                 type="button"
               >
                 <Plus size={13} aria-hidden="true" />
-                New
+                {t("database.new")}
               </button>
             </div>
 
             {notice ? <NoticeBar notice={notice} /> : null}
 
             {!selectedTable ? (
-              <EmptyDatabaseState title="Select a table" message="Choose a Supabase table to inspect rows." />
+              <EmptyDatabaseState title={t("database.selectTableTitle")} message={t("database.selectTableMessage")} />
             ) : (
               <div className="min-h-0 flex-1 overflow-auto">
                 <table className="min-w-full border-separate border-spacing-0 text-left text-xs">
                   <thead className="sticky top-0 z-10 bg-zinc-950 text-zinc-500">
                     <tr>
-                      <th className="w-20 border-b border-zinc-800 px-3 py-2 font-medium">Actions</th>
+                      <th className="w-20 border-b border-zinc-800 px-3 py-2 font-medium">{t("database.actions")}</th>
                       {selectedTable.columns.map((column) => (
                         <th className="border-b border-zinc-800 px-3 py-2 font-medium" key={column.name}>
                           <button className="flex max-w-[180px] items-center gap-1 truncate text-left transition hover:text-zinc-200" onClick={() => handleSort(column.name)} type="button">
@@ -633,15 +641,15 @@ export function DatabasePanel() {
                   </thead>
                   <tbody>
                     {isLoadingRows ? (
-                      <tr><td className="px-3 py-8 text-center text-zinc-500" colSpan={selectedTable.columns.length + 1}><Loader2 size={16} className="mx-auto mb-2 animate-spin" aria-hidden="true" />Loading rows</td></tr>
+                      <tr><td className="px-3 py-8 text-center text-zinc-500" colSpan={selectedTable.columns.length + 1}><Loader2 size={16} className="mx-auto mb-2 animate-spin" aria-hidden="true" />{t("database.loadingRows")}</td></tr>
                     ) : rows.length === 0 ? (
-                      <tr><td className="px-3 py-8 text-center text-zinc-600" colSpan={selectedTable.columns.length + 1}>No rows found.</td></tr>
+                      <tr><td className="px-3 py-8 text-center text-zinc-600" colSpan={selectedTable.columns.length + 1}>{t("database.noRows")}</td></tr>
                     ) : rows.map((row, rowIndex) => (
                       <tr className="group hover:bg-zinc-900/60" key={createRowKey(row, rowIndex)}>
                         <td className="border-b border-zinc-900 px-3 py-2">
                           <div className="flex items-center gap-1">
-                            <button aria-label="Edit row" className="grid size-7 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200" onClick={() => openEditForm(row)} title="Edit" type="button"><Pencil size={12} aria-hidden="true" /></button>
-                            <button aria-label="Delete row" className="grid size-7 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-red-400/40 hover:text-red-200" onClick={() => void handleDeleteRow(row)} title="Delete" type="button"><Trash2 size={12} aria-hidden="true" /></button>
+                            <button aria-label={t("database.editRowAction")} className="grid size-7 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200" onClick={() => openEditForm(row)} title={t("database.edit")} type="button"><Pencil size={12} aria-hidden="true" /></button>
+                            <button aria-label={t("database.deleteRowAction")} className="grid size-7 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-red-400/40 hover:text-red-200" onClick={() => void handleDeleteRow(row)} title={t("database.delete")} type="button"><Trash2 size={12} aria-hidden="true" /></button>
                           </div>
                         </td>
                         {selectedTable.columns.map((column) => (
@@ -657,11 +665,11 @@ export function DatabasePanel() {
             )}
 
             <footer className="flex h-10 shrink-0 items-center justify-between border-t border-zinc-800 px-3 text-xs text-zinc-500">
-              <span>{selectedTable ? `${selectedTable.name}${rowCount === null ? "" : ` / ${rowCount} rows`}` : "No table"}</span>
+              <span>{selectedTable ? `${selectedTable.name}${rowCount === null ? "" : ` / ${rowCount} ${t("database.rows")}`}` : t("database.noTable")}</span>
               <div className="flex items-center gap-2">
-                <button aria-label="Previous page" className="grid size-7 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200 disabled:cursor-not-allowed disabled:text-zinc-700" disabled={page === 0} onClick={() => setPage((currentPage) => Math.max(0, currentPage - 1))} type="button"><ChevronLeft size={13} aria-hidden="true" /></button>
-                <span>Page {page + 1}{totalPages ? ` / ${totalPages}` : ""}</span>
-                <button aria-label="Next page" className="grid size-7 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200 disabled:cursor-not-allowed disabled:text-zinc-700" disabled={!canGoForward} onClick={() => setPage((currentPage) => currentPage + 1)} type="button"><ChevronRight size={13} aria-hidden="true" /></button>
+                <button aria-label={t("database.previousPage")} className="grid size-7 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200 disabled:cursor-not-allowed disabled:text-zinc-700" disabled={page === 0} onClick={() => setPage((currentPage) => Math.max(0, currentPage - 1))} type="button"><ChevronLeft size={13} aria-hidden="true" /></button>
+                <span>{totalPages ? t("database.pageOf", { page: page + 1, total: totalPages }) : t("database.page", { page: page + 1 })}</span>
+                <button aria-label={t("database.nextPage")} className="grid size-7 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200 disabled:cursor-not-allowed disabled:text-zinc-700" disabled={!canGoForward} onClick={() => setPage((currentPage) => currentPage + 1)} type="button"><ChevronRight size={13} aria-hidden="true" /></button>
               </div>
             </footer>
           </main>
@@ -673,10 +681,10 @@ export function DatabasePanel() {
           <div className="mx-auto w-full max-w-[460px] rounded-md border border-zinc-800 bg-zinc-950 p-4 shadow-2xl">
             <div className="mb-4 flex items-start justify-between gap-3">
               <div>
-                <h3 className="text-sm font-semibold text-zinc-100">Supabase Settings</h3>
-                <p className="mt-1 text-xs text-zinc-500">Saved to {currentProject.name}/.env.</p>
+                <h3 className="text-sm font-semibold text-zinc-100">{t("database.supabaseSettings")}</h3>
+                <p className="mt-1 text-xs text-zinc-500">{t("database.savedToEnv", { project: currentProject.name })}</p>
               </div>
-              <button aria-label="Close Supabase settings" className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200" onClick={() => setIsConfigOpen(false)} type="button"><X size={14} aria-hidden="true" /></button>
+              <button aria-label={t("common.close")} className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200" onClick={() => setIsConfigOpen(false)} type="button"><X size={14} aria-hidden="true" /></button>
             </div>
             <SupabaseConfigForm anonKeyDraft={anonKeyDraft} compact dbUrlDraft={dbUrlDraft} isTesting={isTesting} notice={notice} onAnonKeyChange={setAnonKeyDraft} onDbUrlChange={setDbUrlDraft} onSchemaChange={setSchemaDraft} onSecretKeyChange={setSecretKeyDraft} onSubmit={handleSaveConfig} onUrlChange={setUrlDraft} projectName={currentProject.name} schemaDraft={schemaDraft} secretKeyDraft={secretKeyDraft} urlDraft={urlDraft} />
           </div>
@@ -738,16 +746,18 @@ function SupabaseConfigForm({ anonKeyDraft, compact = false, dbUrlDraft, isTesti
   secretKeyDraft: string;
   urlDraft: string;
 }) {
+  const { t } = useI18n();
+
   return (
     <form className={compact ? "" : "mx-auto w-full max-w-[520px] p-5"} onSubmit={onSubmit}>
-      {!compact ? <div className="mb-5"><h3 className="text-sm font-semibold text-zinc-100">Connect Supabase</h3><p className="mt-1 text-xs leading-5 text-zinc-500">This connection is read from and saved to {projectName}/.env. The public key is for generated apps, the secret key is used for row data, and the database URL is used for schema changes.</p></div> : null}
-      <label className="mb-3 block"><span className="mb-2 block text-xs font-medium text-zinc-400">Project URL</span><input className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/10" onChange={(event) => onUrlChange(event.currentTarget.value)} placeholder="https://your-project.supabase.co" value={urlDraft} /></label>
-      <label className="mb-3 block"><span className="mb-2 block text-xs font-medium text-zinc-400">Public / anon key</span><input className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/10" onChange={(event) => onAnonKeyChange(event.currentTarget.value)} placeholder="sb_publishable_... or legacy anon key" type="password" value={anonKeyDraft} /></label>
-      <label className="mb-3 block"><span className="mb-2 block text-xs font-medium text-zinc-400">Secret key</span><input className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/10" onChange={(event) => onSecretKeyChange(event.currentTarget.value)} placeholder="sb_secret_... or service_role key" type="password" value={secretKeyDraft} /></label>
-      <label className="mb-3 block"><span className="mb-2 block text-xs font-medium text-zinc-400">Database URL</span><input className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/10" onChange={(event) => onDbUrlChange(event.currentTarget.value)} placeholder="postgresql://postgres.project-ref:...@...pooler.supabase.com:5432/postgres?sslmode=require" type="password" value={dbUrlDraft} /><span className="mt-2 block text-[11px] leading-5 text-zinc-500">For schema changes, use Supabase Connect &gt; Connection Pooler &gt; Session mode. Direct db.* URLs can be IPv6-only and may fail on IPv4 networks. Pooler usernames usually look like postgres.project-ref.</span></label>
-      <label className="mb-3 block"><span className="mb-2 block text-xs font-medium text-zinc-400">Schema</span><input className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/10" onChange={(event) => onSchemaChange(event.currentTarget.value)} placeholder="public" value={schemaDraft} /></label>
+      {!compact ? <div className="mb-5"><h3 className="text-sm font-semibold text-zinc-100">{t("database.connectSupabase")}</h3><p className="mt-1 text-xs leading-5 text-zinc-500">{t("database.connectionDescription", { project: projectName })}</p></div> : null}
+      <label className="mb-3 block"><span className="mb-2 block text-xs font-medium text-zinc-400">{t("database.projectUrl")}</span><input className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/10" onChange={(event) => onUrlChange(event.currentTarget.value)} placeholder="https://your-project.supabase.co" value={urlDraft} /></label>
+      <label className="mb-3 block"><span className="mb-2 block text-xs font-medium text-zinc-400">{t("database.anonKey")}</span><input className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/10" onChange={(event) => onAnonKeyChange(event.currentTarget.value)} placeholder="sb_publishable_... or legacy anon key" type="password" value={anonKeyDraft} /></label>
+      <label className="mb-3 block"><span className="mb-2 block text-xs font-medium text-zinc-400">{t("database.secretKey")}</span><input className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/10" onChange={(event) => onSecretKeyChange(event.currentTarget.value)} placeholder="sb_secret_... or service_role key" type="password" value={secretKeyDraft} /></label>
+      <label className="mb-3 block"><span className="mb-2 block text-xs font-medium text-zinc-400">{t("database.dbUrl")}</span><input className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/10" onChange={(event) => onDbUrlChange(event.currentTarget.value)} placeholder="postgresql://postgres.project-ref:...@...pooler.supabase.com:5432/postgres?sslmode=require" type="password" value={dbUrlDraft} /><span className="mt-2 block text-[11px] leading-5 text-zinc-500">{t("database.dbUrlHint")}</span></label>
+      <label className="mb-3 block"><span className="mb-2 block text-xs font-medium text-zinc-400">{t("database.schema")}</span><input className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/10" onChange={(event) => onSchemaChange(event.currentTarget.value)} placeholder="public" value={schemaDraft} /></label>
       {notice ? <NoticeBar notice={notice} /> : null}
-      <div className="mt-4 flex justify-end"><button className="flex h-9 items-center gap-2 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 text-sm font-medium text-emerald-100 transition hover:border-emerald-300/60 hover:bg-emerald-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600" disabled={isTesting} type="submit">{isTesting ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <CheckCircle2 size={14} aria-hidden="true" />}Save and connect</button></div>
+      <div className="mt-4 flex justify-end"><button className="flex h-9 items-center gap-2 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 text-sm font-medium text-emerald-100 transition hover:border-emerald-300/60 hover:bg-emerald-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600" disabled={isTesting} type="submit">{isTesting ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <CheckCircle2 size={14} aria-hidden="true" />}{t("database.saveAndConnect")}</button></div>
     </form>
   );
 }
@@ -761,6 +771,8 @@ function TableFormDialog({ form, isSaving, onAddColumn, onChange, onClose, onRem
   onRemoveColumn: (columnId: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
+  const { t } = useI18n();
+
   function updateColumn(columnId: string, updates: Partial<TableColumnDraft>) {
     onChange({
       ...form,
@@ -775,56 +787,56 @@ function TableFormDialog({ form, isSaving, onAddColumn, onChange, onClose, onRem
       <form className="mx-auto flex max-h-full w-full max-w-[780px] flex-col rounded-md border border-zinc-800 bg-zinc-950 shadow-2xl" onSubmit={onSubmit}>
         <div className="flex shrink-0 items-start justify-between gap-3 border-b border-zinc-800 p-4">
           <div>
-            <h3 className="text-sm font-semibold text-zinc-100">New table</h3>
-            <p className="mt-1 text-xs text-zinc-500">Create a table in the configured Supabase schema.</p>
+            <h3 className="text-sm font-semibold text-zinc-100">{t("database.newTable")}</h3>
+            <p className="mt-1 text-xs text-zinc-500">{t("database.createTableDescription")}</p>
           </div>
-          <button aria-label="Close table editor" className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200" onClick={onClose} type="button"><X size={14} aria-hidden="true" /></button>
+          <button aria-label={t("database.closeTableEditor")} className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200" onClick={onClose} type="button"><X size={14} aria-hidden="true" /></button>
         </div>
         <div className="min-h-0 flex-1 overflow-auto p-4">
           <div className="mb-4 grid grid-cols-[minmax(0,1fr)_auto] items-end gap-3">
             <label className="block">
-              <span className="mb-2 block text-xs font-medium text-zinc-400">Table name</span>
+              <span className="mb-2 block text-xs font-medium text-zinc-400">{t("database.tableName")}</span>
               <input className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/10" onChange={(event) => onChange({ ...form, name: event.currentTarget.value })} placeholder="customers" value={form.name} />
             </label>
             <label className="flex h-10 items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-3 text-xs text-zinc-300">
               <input checked={form.enableRls} className="accent-emerald-400" onChange={(event) => onChange({ ...form, enableRls: event.currentTarget.checked })} type="checkbox" />
-              Enable RLS
+              {t("database.enableRls")}
             </label>
           </div>
           <div className="mb-2 flex items-center justify-between gap-2">
-            <h4 className="text-xs font-semibold text-zinc-400">Columns</h4>
-            <button className="flex h-8 items-center gap-1.5 rounded border border-zinc-800 px-2 text-xs text-zinc-400 transition hover:border-emerald-400/40 hover:text-emerald-100" onClick={onAddColumn} type="button"><Plus size={13} aria-hidden="true" />Column</button>
+            <h4 className="text-xs font-semibold text-zinc-400">{t("database.columns")}</h4>
+            <button className="flex h-8 items-center gap-1.5 rounded border border-zinc-800 px-2 text-xs text-zinc-400 transition hover:border-emerald-400/40 hover:text-emerald-100" onClick={onAddColumn} type="button"><Plus size={13} aria-hidden="true" />{t("database.column")}</button>
           </div>
           <div className="min-w-[700px] space-y-2">
             {form.columns.map((column) => (
               <div className="grid grid-cols-[minmax(120px,1.2fr)_minmax(110px,0.9fr)_minmax(110px,0.9fr)_repeat(3,auto)_32px] items-end gap-2 rounded-md border border-zinc-800 bg-zinc-900/50 p-2" key={column.id}>
                 <label className="block">
-                  <span className="mb-1 block text-[11px] font-medium text-zinc-500">Name</span>
+                  <span className="mb-1 block text-[11px] font-medium text-zinc-500">{t("database.name")}</span>
                   <input className="h-9 w-full rounded border border-zinc-800 bg-zinc-950 px-2 text-xs text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/50" onChange={(event) => updateColumn(column.id, { name: event.currentTarget.value })} placeholder="column_name" value={column.name} />
                 </label>
                 <label className="block">
-                  <span className="mb-1 block text-[11px] font-medium text-zinc-500">Type</span>
+                  <span className="mb-1 block text-[11px] font-medium text-zinc-500">{t("database.type")}</span>
                   <select className="h-9 w-full rounded border border-zinc-800 bg-zinc-950 px-2 text-xs text-zinc-100 outline-none transition focus:border-emerald-400/50" onChange={(event) => updateColumn(column.id, { dataType: event.currentTarget.value, defaultValue: defaultForType(event.currentTarget.value) })} value={column.dataType}>
                     {COLUMN_TYPES.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
                   </select>
                 </label>
                 <label className="block">
-                  <span className="mb-1 block text-[11px] font-medium text-zinc-500">Default</span>
+                  <span className="mb-1 block text-[11px] font-medium text-zinc-500">{t("database.default")}</span>
                   <select className="h-9 w-full rounded border border-zinc-800 bg-zinc-950 px-2 text-xs text-zinc-100 outline-none transition focus:border-emerald-400/50" onChange={(event) => updateColumn(column.id, { defaultValue: event.currentTarget.value })} value={column.defaultValue ?? "none"}>
-                    {defaultOptionsForType(column.dataType).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                    {defaultOptionsForType(column.dataType, false, t).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                   </select>
                 </label>
-                <label className="flex h-9 items-center gap-1.5 rounded border border-zinc-800 px-2 text-[11px] text-zinc-400"><input checked={column.nullable} className="accent-emerald-400" disabled={column.primaryKey} onChange={(event) => updateColumn(column.id, { nullable: event.currentTarget.checked })} type="checkbox" />Null</label>
-                <label className="flex h-9 items-center gap-1.5 rounded border border-zinc-800 px-2 text-[11px] text-zinc-400"><input checked={column.primaryKey} className="accent-emerald-400" onChange={(event) => updateColumn(column.id, { nullable: event.currentTarget.checked ? false : column.nullable, primaryKey: event.currentTarget.checked, unique: event.currentTarget.checked ? false : column.unique })} type="checkbox" />PK</label>
-                <label className="flex h-9 items-center gap-1.5 rounded border border-zinc-800 px-2 text-[11px] text-zinc-400"><input checked={column.unique} className="accent-emerald-400" disabled={column.primaryKey} onChange={(event) => updateColumn(column.id, { unique: event.currentTarget.checked })} type="checkbox" />Unique</label>
-                <button aria-label="Remove column" className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-red-400/40 hover:text-red-200 disabled:cursor-not-allowed disabled:text-zinc-700" disabled={form.columns.length <= 1} onClick={() => onRemoveColumn(column.id)} title="Remove column" type="button"><Trash2 size={13} aria-hidden="true" /></button>
+                <label className="flex h-9 items-center gap-1.5 rounded border border-zinc-800 px-2 text-[11px] text-zinc-400"><input checked={column.nullable} className="accent-emerald-400" disabled={column.primaryKey} onChange={(event) => updateColumn(column.id, { nullable: event.currentTarget.checked })} type="checkbox" />{t("database.null")}</label>
+                <label className="flex h-9 items-center gap-1.5 rounded border border-zinc-800 px-2 text-[11px] text-zinc-400"><input checked={column.primaryKey} className="accent-emerald-400" onChange={(event) => updateColumn(column.id, { nullable: event.currentTarget.checked ? false : column.nullable, primaryKey: event.currentTarget.checked, unique: event.currentTarget.checked ? false : column.unique })} type="checkbox" />{t("database.pk")}</label>
+                <label className="flex h-9 items-center gap-1.5 rounded border border-zinc-800 px-2 text-[11px] text-zinc-400"><input checked={column.unique} className="accent-emerald-400" disabled={column.primaryKey} onChange={(event) => updateColumn(column.id, { unique: event.currentTarget.checked })} type="checkbox" />{t("database.unique")}</label>
+                <button aria-label={t("database.removeColumn")} className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-red-400/40 hover:text-red-200 disabled:cursor-not-allowed disabled:text-zinc-700" disabled={form.columns.length <= 1} onClick={() => onRemoveColumn(column.id)} title={t("database.removeColumn")} type="button"><Trash2 size={13} aria-hidden="true" /></button>
               </div>
             ))}
           </div>
         </div>
         <div className="flex shrink-0 justify-end gap-2 border-t border-zinc-800 p-4">
-          <button className="h-9 rounded-md border border-zinc-800 px-3 text-sm text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-200" onClick={onClose} type="button">Cancel</button>
-          <button className="flex h-9 items-center gap-2 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 text-sm font-medium text-emerald-100 transition hover:border-emerald-300/60 hover:bg-emerald-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600" disabled={isSaving} type="submit">{isSaving ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}Create table</button>
+          <button className="h-9 rounded-md border border-zinc-800 px-3 text-sm text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-200" onClick={onClose} type="button">{t("common.cancel")}</button>
+          <button className="flex h-9 items-center gap-2 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 text-sm font-medium text-emerald-100 transition hover:border-emerald-300/60 hover:bg-emerald-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600" disabled={isSaving} type="submit">{isSaving ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}{t("database.createTableSubmit")}</button>
         </div>
       </form>
     </div>
@@ -839,6 +851,8 @@ function ColumnEditorDialog({ editor, isSaving, onAddColumn, onChange, onClose, 
   onClose: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
+  const { t } = useI18n();
+
   function updateColumn(columnId: string, updates: Partial<ColumnEditDraft>) {
     onChange({
       ...editor,
@@ -865,46 +879,46 @@ function ColumnEditorDialog({ editor, isSaving, onAddColumn, onChange, onClose, 
       <form className="mx-auto flex max-h-full w-full max-w-[860px] flex-col rounded-md border border-zinc-800 bg-zinc-950 shadow-2xl" onSubmit={onSubmit}>
         <div className="flex shrink-0 items-start justify-between gap-3 border-b border-zinc-800 p-4">
           <div>
-            <h3 className="text-sm font-semibold text-zinc-100">Edit columns</h3>
+            <h3 className="text-sm font-semibold text-zinc-100">{t("database.editColumns")}</h3>
             <p className="mt-1 text-xs text-zinc-500">{editor.tableName}</p>
           </div>
-          <button aria-label="Close column editor" className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200" onClick={onClose} type="button"><X size={14} aria-hidden="true" /></button>
+          <button aria-label={t("database.closeColumnEditor")} className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200" onClick={onClose} type="button"><X size={14} aria-hidden="true" /></button>
         </div>
         <div className="min-h-0 flex-1 overflow-auto p-4">
           <div className="mb-2 flex items-center justify-between gap-2">
-            <h4 className="text-xs font-semibold text-zinc-400">Columns</h4>
-            <button className="flex h-8 items-center gap-1.5 rounded border border-zinc-800 px-2 text-xs text-zinc-400 transition hover:border-emerald-400/40 hover:text-emerald-100" onClick={onAddColumn} type="button"><Plus size={13} aria-hidden="true" />Column</button>
+            <h4 className="text-xs font-semibold text-zinc-400">{t("database.columns")}</h4>
+            <button className="flex h-8 items-center gap-1.5 rounded border border-zinc-800 px-2 text-xs text-zinc-400 transition hover:border-emerald-400/40 hover:text-emerald-100" onClick={onAddColumn} type="button"><Plus size={13} aria-hidden="true" />{t("database.column")}</button>
           </div>
           <div className="min-w-[760px] space-y-2">
             {editor.columns.map((column) => (
               <div className={`grid grid-cols-[minmax(120px,1.2fr)_minmax(110px,0.9fr)_minmax(120px,0.9fr)_repeat(3,auto)_32px] items-end gap-2 rounded-md border p-2 ${column.dropped ? "border-red-400/20 bg-red-400/5 opacity-70" : "border-zinc-800 bg-zinc-900/50"}`} key={column.id}>
                 <label className="block">
-                  <span className="mb-1 block text-[11px] font-medium text-zinc-500">Name</span>
+                  <span className="mb-1 block text-[11px] font-medium text-zinc-500">{t("database.name")}</span>
                   <input className="h-9 w-full rounded border border-zinc-800 bg-zinc-950 px-2 text-xs text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/50 disabled:text-zinc-600" disabled={column.dropped} onChange={(event) => updateColumn(column.id, { name: event.currentTarget.value })} placeholder="column_name" value={column.name} />
                 </label>
                 <label className="block">
-                  <span className="mb-1 block text-[11px] font-medium text-zinc-500">Type</span>
+                  <span className="mb-1 block text-[11px] font-medium text-zinc-500">{t("database.type")}</span>
                   <select className="h-9 w-full rounded border border-zinc-800 bg-zinc-950 px-2 text-xs text-zinc-100 outline-none transition focus:border-emerald-400/50 disabled:text-zinc-600" disabled={column.dropped} onChange={(event) => updateColumn(column.id, { dataType: event.currentTarget.value, defaultValue: column.defaultValue === "unchanged" ? "unchanged" : defaultForType(event.currentTarget.value) })} value={column.dataType}>
                     {COLUMN_TYPES.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
                   </select>
                 </label>
                 <label className="block">
-                  <span className="mb-1 block text-[11px] font-medium text-zinc-500">Default</span>
+                  <span className="mb-1 block text-[11px] font-medium text-zinc-500">{t("database.default")}</span>
                   <select className="h-9 w-full rounded border border-zinc-800 bg-zinc-950 px-2 text-xs text-zinc-100 outline-none transition focus:border-emerald-400/50 disabled:text-zinc-600" disabled={column.dropped} onChange={(event) => updateColumn(column.id, { defaultValue: event.currentTarget.value })} value={column.defaultValue}>
-                    {defaultOptionsForType(column.dataType, !column.isNew).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                    {defaultOptionsForType(column.dataType, !column.isNew, t).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                   </select>
                 </label>
-                <label className="flex h-9 items-center gap-1.5 rounded border border-zinc-800 px-2 text-[11px] text-zinc-400"><input checked={column.nullable} className="accent-emerald-400" disabled={column.dropped || column.isPrimaryKey} onChange={(event) => updateColumn(column.id, { nullable: event.currentTarget.checked })} type="checkbox" />Null</label>
-                <label className="flex h-9 items-center gap-1.5 rounded border border-zinc-800 px-2 text-[11px] text-zinc-400"><input checked={column.unique} className="accent-emerald-400" disabled={column.dropped || !column.isNew} onChange={(event) => updateColumn(column.id, { unique: event.currentTarget.checked })} type="checkbox" />Unique</label>
-                <span className="flex h-9 items-center rounded border border-zinc-800 px-2 text-[11px] text-zinc-500">{column.isNew ? "New" : column.isPrimaryKey ? "PK" : "Existing"}</span>
-                <button aria-label={column.dropped ? "Restore column" : "Remove column"} className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-red-400/40 hover:text-red-200 disabled:cursor-not-allowed disabled:text-zinc-700" disabled={column.isPrimaryKey && !column.isNew} onClick={() => removeColumn(column)} title={column.dropped ? "Restore column" : "Remove column"} type="button">{column.dropped ? <RefreshCcw size={13} aria-hidden="true" /> : <Trash2 size={13} aria-hidden="true" />}</button>
+                <label className="flex h-9 items-center gap-1.5 rounded border border-zinc-800 px-2 text-[11px] text-zinc-400"><input checked={column.nullable} className="accent-emerald-400" disabled={column.dropped || column.isPrimaryKey} onChange={(event) => updateColumn(column.id, { nullable: event.currentTarget.checked })} type="checkbox" />{t("database.null")}</label>
+                <label className="flex h-9 items-center gap-1.5 rounded border border-zinc-800 px-2 text-[11px] text-zinc-400"><input checked={column.unique} className="accent-emerald-400" disabled={column.dropped || !column.isNew} onChange={(event) => updateColumn(column.id, { unique: event.currentTarget.checked })} type="checkbox" />{t("database.unique")}</label>
+                <span className="flex h-9 items-center rounded border border-zinc-800 px-2 text-[11px] text-zinc-500">{column.isNew ? t("database.new") : column.isPrimaryKey ? t("database.pk") : t("database.existing")}</span>
+                <button aria-label={column.dropped ? t("database.restoreColumn") : t("database.removeColumn")} className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-red-400/40 hover:text-red-200 disabled:cursor-not-allowed disabled:text-zinc-700" disabled={column.isPrimaryKey && !column.isNew} onClick={() => removeColumn(column)} title={column.dropped ? t("database.restoreColumn") : t("database.removeColumn")} type="button">{column.dropped ? <RefreshCcw size={13} aria-hidden="true" /> : <Trash2 size={13} aria-hidden="true" />}</button>
               </div>
             ))}
           </div>
         </div>
         <div className="flex shrink-0 justify-end gap-2 border-t border-zinc-800 p-4">
-          <button className="h-9 rounded-md border border-zinc-800 px-3 text-sm text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-200" onClick={onClose} type="button">Cancel</button>
-          <button className="flex h-9 items-center gap-2 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 text-sm font-medium text-emerald-100 transition hover:border-emerald-300/60 hover:bg-emerald-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600" disabled={isSaving} type="submit">{isSaving ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}Save columns</button>
+          <button className="h-9 rounded-md border border-zinc-800 px-3 text-sm text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-200" onClick={onClose} type="button">{t("common.cancel")}</button>
+          <button className="flex h-9 items-center gap-2 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 text-sm font-medium text-emerald-100 transition hover:border-emerald-300/60 hover:bg-emerald-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600" disabled={isSaving} type="submit">{isSaving ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}{t("database.saveColumns")}</button>
         </div>
       </form>
     </div>
@@ -920,14 +934,16 @@ function RowFormDialog({ columns, form, isSaving, onChange, onClose, onSubmit, t
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   tableName: string;
 }) {
+  const { t } = useI18n();
+
   return (
     <div className="absolute inset-0 z-30 overflow-y-auto bg-black/70 p-4">
       <form className="mx-auto flex max-h-full w-full max-w-[560px] flex-col rounded-md border border-zinc-800 bg-zinc-950 shadow-2xl" onSubmit={onSubmit}>
-        <div className="flex shrink-0 items-start justify-between gap-3 border-b border-zinc-800 p-4"><div><h3 className="text-sm font-semibold text-zinc-100">{form.mode === "create" ? "New row" : "Edit row"}</h3><p className="mt-1 text-xs text-zinc-500">{tableName}</p></div><button aria-label="Close row editor" className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200" onClick={onClose} type="button"><X size={14} aria-hidden="true" /></button></div>
+        <div className="flex shrink-0 items-start justify-between gap-3 border-b border-zinc-800 p-4"><div><h3 className="text-sm font-semibold text-zinc-100">{form.mode === "create" ? t("database.newRow") : t("database.editRow")}</h3><p className="mt-1 text-xs text-zinc-500">{tableName}</p></div><button aria-label={t("database.closeRowEditor")} className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200" onClick={onClose} type="button"><X size={14} aria-hidden="true" /></button></div>
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
           {columns.map((column) => <FieldEditor column={column} key={column.name} onChange={onChange} value={form.values[column.name] ?? ""} />)}
         </div>
-        <div className="flex shrink-0 justify-end gap-2 border-t border-zinc-800 p-4"><button className="h-9 rounded-md border border-zinc-800 px-3 text-sm text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-200" onClick={onClose} type="button">Cancel</button><button className="flex h-9 items-center gap-2 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 text-sm font-medium text-emerald-100 transition hover:border-emerald-300/60 hover:bg-emerald-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600" disabled={isSaving} type="submit">{isSaving ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}Save</button></div>
+        <div className="flex shrink-0 justify-end gap-2 border-t border-zinc-800 p-4"><button className="h-9 rounded-md border border-zinc-800 px-3 text-sm text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-200" onClick={onClose} type="button">{t("common.cancel")}</button><button className="flex h-9 items-center gap-2 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 text-sm font-medium text-emerald-100 transition hover:border-emerald-300/60 hover:bg-emerald-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600" disabled={isSaving} type="submit">{isSaving ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}{t("common.save")}</button></div>
       </form>
     </div>
   );
@@ -966,42 +982,42 @@ function EmptyDatabaseState({ loading = false, message, title }: { loading?: boo
   );
 }
 
-function validateConfigDraft(url: string, anonKey: string, secretKey: string) {
-  if (!url.trim()) return "Enter a Supabase project URL.";
-  if (!anonKey.trim()) return "Enter a Supabase public / anon key for generated apps.";
-  if (!secretKey.trim()) return "Enter SUPABASE_SECRET_KEY for the database dashboard.";
+function validateConfigDraft(url: string, anonKey: string, secretKey: string, t: TranslateFunction) {
+  if (!url.trim()) return t("database.enterUrl");
+  if (!anonKey.trim()) return t("database.enterAnon");
+  if (!secretKey.trim()) return t("database.enterSecret");
   try {
     const parsedUrl = new URL(url.trim());
-    if (!parsedUrl.protocol.startsWith("http")) return "Supabase URL must start with http or https.";
+    if (!parsedUrl.protocol.startsWith("http")) return t("database.invalidUrlProtocol");
   } catch {
-    return "Supabase URL must be a valid URL.";
+    return t("database.invalidUrl");
   }
   return null;
 }
 
-function validateTableForm(form: TableFormState) {
-  if (!isValidIdentifier(form.name)) return "Table name must start with a letter or underscore and only contain letters, numbers, and underscores.";
-  if (form.columns.length === 0) return "Add at least one column.";
+function validateTableForm(form: TableFormState, t: TranslateFunction) {
+  if (!isValidIdentifier(form.name)) return t("database.invalidTableName");
+  if (form.columns.length === 0) return t("database.addColumn");
 
   const names = new Set<string>();
   for (const column of form.columns) {
-    if (!isValidIdentifier(column.name)) return "Column names must start with a letter or underscore and only contain letters, numbers, and underscores.";
-    if (names.has(column.name.trim())) return `Duplicate column name: ${column.name.trim()}.`;
+    if (!isValidIdentifier(column.name)) return t("database.invalidColumnName");
+    if (names.has(column.name.trim())) return t("database.duplicateColumn", { name: column.name.trim() });
     names.add(column.name.trim());
   }
 
   return null;
 }
 
-function validateColumnEditor(editor: ColumnEditorState) {
+function validateColumnEditor(editor: ColumnEditorState, t: TranslateFunction) {
   const activeColumns = editor.columns.filter((column) => !column.dropped);
-  if (activeColumns.length === 0) return "A table must keep at least one column.";
+  if (activeColumns.length === 0) return t("database.keepColumn");
 
   const names = new Set<string>();
   for (const column of activeColumns) {
-    if (!isValidIdentifier(column.name)) return "Column names must start with a letter or underscore and only contain letters, numbers, and underscores.";
+    if (!isValidIdentifier(column.name)) return t("database.invalidColumnName");
     const normalizedName = column.name.trim();
-    if (names.has(normalizedName)) return `Duplicate column name: ${normalizedName}.`;
+    if (names.has(normalizedName)) return t("database.duplicateColumn", { name: normalizedName });
     names.add(normalizedName);
   }
 
@@ -1178,19 +1194,27 @@ function defaultForType(dataType: string) {
   return "none";
 }
 
-function defaultOptionsForType(dataType: string, includeKeep = false) {
+function defaultOptionsForType(dataType: string, includeKeep = false, t?: TranslateFunction) {
   const baseOptions = [
-    ...(includeKeep ? [{ label: "Keep", value: "unchanged" }] : []),
-    { label: "None", value: "none" },
+    ...(includeKeep ? [{ label: t ? t("database.defaultKeep") : "Keep", value: "unchanged" }] : []),
+    { label: t ? t("database.defaultNone") : "None", value: "none" },
   ];
 
-  if (dataType === "uuid") return [...baseOptions, { label: "UUID", value: "gen_random_uuid()" }];
-  if (dataType === "timestamptz") return [...baseOptions, { label: "Now", value: "now()" }];
-  if (dataType === "date") return [...baseOptions, { label: "Today", value: "CURRENT_DATE" }];
-  if (dataType === "boolean") return [...baseOptions, { label: "True", value: "true" }, { label: "False", value: "false" }];
-  if (dataType === "integer" || dataType === "bigint" || dataType === "numeric") return [...baseOptions, { label: "Zero", value: "0" }];
-  if (dataType === "text") return [...baseOptions, { label: "Empty string", value: "''" }];
-  if (dataType === "jsonb") return [...baseOptions, { label: "Object", value: "'{}'::jsonb" }, { label: "Array", value: "'[]'::jsonb" }];
+  if (dataType === "uuid") return [...baseOptions, { label: t ? t("database.defaultUuid") : "UUID", value: "gen_random_uuid()" }];
+  if (dataType === "timestamptz") return [...baseOptions, { label: t ? t("database.defaultNow") : "Now", value: "now()" }];
+  if (dataType === "date") return [...baseOptions, { label: t ? t("database.defaultToday") : "Today", value: "CURRENT_DATE" }];
+  if (dataType === "boolean") return [
+    ...baseOptions,
+    { label: t ? t("database.defaultTrue") : "True", value: "true" },
+    { label: t ? t("database.defaultFalse") : "False", value: "false" },
+  ];
+  if (dataType === "integer" || dataType === "bigint" || dataType === "numeric") return [...baseOptions, { label: t ? t("database.defaultZero") : "Zero", value: "0" }];
+  if (dataType === "text") return [...baseOptions, { label: t ? t("database.defaultEmptyString") : "Empty string", value: "''" }];
+  if (dataType === "jsonb") return [
+    ...baseOptions,
+    { label: t ? t("database.defaultObject") : "Object", value: "'{}'::jsonb" },
+    { label: t ? t("database.defaultArray") : "Array", value: "'[]'::jsonb" },
+  ];
 
   return baseOptions;
 }
@@ -1244,9 +1268,9 @@ function createRowKey(row: SupabaseRow, index: number) {
   return typeof id === "string" || typeof id === "number" ? String(id) : String(index);
 }
 
-function getReadableError(error: unknown) {
+function getReadableError(error: unknown, t?: TranslateFunction) {
   if (error instanceof Error && error.message) return error.message;
-  return "Supabase request failed.";
+  return t ? t("database.requestFailed") : "Supabase request failed.";
 }
 
 function delay(milliseconds: number) {

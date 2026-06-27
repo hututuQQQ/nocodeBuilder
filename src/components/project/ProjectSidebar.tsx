@@ -12,6 +12,8 @@ import {
   SquarePen,
   X,
 } from "lucide-react";
+import appIcon from "../../assets/nocodebuilder-icon.png";
+import { useI18n } from "../../i18n";
 import type { ProjectConversation, ProjectConversationSummary } from "../../services/projects";
 import type { DevelopmentSpec } from "../../spec-core/types";
 import { useAppStore } from "../../store/appStore";
@@ -21,12 +23,16 @@ import {
   isWorkspaceNavigationLocked,
   WORKSPACE_NAVIGATION_LOCK_MESSAGE,
 } from "../../store/workspaceNavigationLock";
+import { LocaleSelect } from "../settings/LocaleSelect";
 
 type ProjectSidebarProps = {
   onOpenSettings: () => void;
 };
 
+type SidebarTranslate = ReturnType<typeof useI18n>["t"];
+
 export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
+  const { t } = useI18n();
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [newIterationProjectId, setNewIterationProjectId] = useState<string | null>(null);
   const [newIterationMode, setNewIterationMode] = useState<"chat" | "spec">("chat");
@@ -199,14 +205,16 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
     <aside className="relative flex min-h-0 min-w-0 flex-col bg-[#101012]">
       <div className="border-b border-zinc-800 px-4 py-4">
         <div className="flex items-center gap-3">
-          <div className="grid size-9 place-items-center rounded-md border border-teal-400/30 bg-teal-400/10 text-teal-200">
-            <FolderKanban size={18} aria-hidden="true" />
-          </div>
+          <img
+            alt=""
+            className="size-10 rounded-lg border border-teal-400/20 bg-zinc-950 object-cover shadow-lg shadow-black/30"
+            src={appIcon}
+          />
           <div>
             <h1 className="text-sm font-semibold tracking-wide text-zinc-50">
-              AI Web Builder
+              {t("app.name")}
             </h1>
-            <p className="text-xs text-zinc-500">Desktop MVP</p>
+            <p className="text-xs text-zinc-500">{t("app.tagline")}</p>
           </div>
         </div>
       </div>
@@ -219,20 +227,20 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
           title={
             workspaceNavigationLocked
               ? WORKSPACE_NAVIGATION_LOCK_MESSAGE
-              : "New Project"
+              : t("sidebar.newProject")
           }
           type="button"
           onClick={() => setIsDialogOpen(true)}
         >
           <Plus size={16} aria-hidden="true" />
-          New Project
+          {t("sidebar.newProject")}
         </button>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4">
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
-            Projects
+            {t("sidebar.projects")}
           </h2>
           <span className="rounded border border-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500">
             {projects.length}
@@ -242,11 +250,11 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
         {isLoadingProjects ? (
           <div className="flex items-center justify-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/40 px-3 py-6 text-sm text-zinc-500">
             <Loader2 size={15} className="animate-spin" aria-hidden="true" />
-            Loading projects
+            {t("sidebar.loadingProjects")}
           </div>
         ) : projects.length === 0 ? (
           <div className="rounded-md border border-dashed border-zinc-800 bg-zinc-900/40 px-3 py-6 text-center text-sm text-zinc-500">
-            No projects yet
+            {t("sidebar.noProjects")}
           </div>
         ) : (
           <div className="space-y-2">
@@ -319,18 +327,18 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                       }`}
                     >
                       <button
-                        aria-label={`Open ${project.name} folder`}
+                        aria-label={`${t("sidebar.openFolder")}: ${project.name}`}
                         className="grid size-7 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-teal-400/40 hover:text-teal-200"
                         onClick={(event) =>
                           handleOpenProjectFolder(event, project.id)
                         }
-                        title="Open folder"
+                        title={t("sidebar.openFolder")}
                         type="button"
                       >
                         <FolderOpen size={14} aria-hidden="true" />
                       </button>
                       <button
-                        aria-label={`Show archived iterations for ${project.name}`}
+                        aria-label={`${t("sidebar.showArchivedIterations")}: ${project.name}`}
                         className={`grid size-7 place-items-center rounded border transition disabled:cursor-not-allowed disabled:text-zinc-700 ${
                           isCurrent && showArchivedConversations
                             ? "border-teal-400/40 bg-teal-400/10 text-teal-100"
@@ -345,15 +353,15 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                         }
                         title={
                           isCurrent && showArchivedConversations
-                            ? "Show active iterations"
-                            : "Show archived iterations"
+                            ? t("sidebar.showActiveIterations")
+                            : t("sidebar.showArchivedIterations")
                         }
                         type="button"
                       >
                         <Archive size={14} aria-hidden="true" />
                       </button>
                       <button
-                        aria-label={`New iteration in ${project.name}`}
+                        aria-label={`${t("sidebar.newIteration")}: ${project.name}`}
                         className="grid size-7 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-teal-400/40 hover:text-teal-100 disabled:cursor-not-allowed disabled:text-zinc-700"
                         disabled={!canUseNewIteration}
                         onClick={(event) =>
@@ -363,10 +371,10 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                           workspaceNavigationLocked
                             ? WORKSPACE_NAVIGATION_LOCK_MESSAGE
                             : !isCurrent
-                            ? "Select project first"
+                            ? t("sidebar.selectProjectFirst")
                             : !initialBuildCompleted
-                              ? "Complete Initial Spec first"
-                              : "New iteration"
+                              ? t("sidebar.completeInitialSpec")
+                              : t("sidebar.newIteration")
                         }
                         type="button"
                       >
@@ -379,7 +387,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                     <div className="mt-1 space-y-1 pl-4">
                       {!showArchivedConversations && !initialBuildCompleted ? (
                         <div className="px-2 py-1.5 text-xs text-zinc-500">
-                          Complete Initial Spec first
+                          {t("sidebar.completeInitialSpec")}
                         </div>
                       ) : null}
                       {isLoadingConversations ? (
@@ -389,13 +397,13 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                             className="animate-spin"
                             aria-hidden="true"
                           />
-                          Loading iterations
+                          {t("sidebar.loadingIterations")}
                         </div>
                       ) : visibleConversations.length === 0 ? (
                         <div className="px-2 py-2 text-xs text-zinc-500">
                           {showArchivedConversations
-                            ? "No archived iterations"
-                            : "No active iterations"}
+                            ? t("sidebar.noArchivedIterations")
+                            : t("sidebar.noActiveIterations")}
                         </div>
                       ) : (
                         visibleConversations.map((conversation) => {
@@ -458,14 +466,14 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                                 {conversation.title}
                               </span>
                               <span className="shrink-0 rounded border border-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500">
-                                {formatConversationMarker(conversation)}
+                                {formatConversationMarker(conversation, t)}
                               </span>
                               <span className="shrink-0 text-[10px] text-zinc-600">
-                                {formatRelativeTime(conversation.lastMessageAt)}
+                                {formatRelativeTime(conversation.lastMessageAt, t)}
                               </span>
                               {conversation.archivedAt ? (
                                 <button
-                                  aria-label={`Restore ${conversation.title}`}
+                                  aria-label={`${t("sidebar.restoreChat")}: ${conversation.title}`}
                                   className="grid size-6 shrink-0 place-items-center rounded text-zinc-500 transition hover:bg-zinc-800 hover:text-teal-100"
                                   onClick={(event) =>
                                     handleRestoreConversation(
@@ -473,14 +481,14 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                                       conversation.id,
                                     )
                                   }
-                                  title="Restore chat"
+                                  title={t("sidebar.restoreChat")}
                                   type="button"
                                 >
                                   <RotateCcw size={12} aria-hidden="true" />
                                 </button>
                               ) : !canArchive ? null : (
                                 <button
-                                  aria-label={`Archive ${conversation.title}`}
+                                  aria-label={`${t("sidebar.archiveChat")}: ${conversation.title}`}
                                   className="grid size-6 shrink-0 place-items-center rounded text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-100"
                                   aria-disabled={archiveLocked}
                                   disabled={archiveLocked}
@@ -493,7 +501,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                                   title={
                                     archiveLocked
                                       ? WORKSPACE_NAVIGATION_LOCK_MESSAGE
-                                      : "Archive chat"
+                                      : t("sidebar.archiveChat")
                                   }
                                   type="button"
                                 >
@@ -513,33 +521,34 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
         )}
       </div>
 
-      <div className="border-t border-zinc-800 p-3">
+      <div className="space-y-2 border-t border-zinc-800 p-3">
+        <LocaleSelect compact />
         <button
           className="flex h-10 w-full items-center justify-center gap-2 rounded-md border border-zinc-800 bg-zinc-900 text-sm text-zinc-300 transition hover:border-zinc-700 hover:bg-zinc-800"
           onClick={onOpenSettings}
           type="button"
         >
           <Settings size={16} aria-hidden="true" />
-          Settings
+          {t("common.settings")}
         </button>
       </div>
 
       {isDialogOpen ? (
         <div className="absolute inset-0 z-10 grid place-items-center bg-black/60 px-4">
           <form
-            className="w-full max-w-[360px] rounded-md border border-zinc-800 bg-zinc-950 p-4 shadow-2xl"
+            className="w-full max-w-[380px] rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-2xl"
             onSubmit={handleCreateProject}
           >
             <div className="mb-4 flex items-start justify-between gap-3">
               <div>
                 <h2 className="text-sm font-semibold text-zinc-100">
-                  New Project
+                  {t("sidebar.newProject")}
                 </h2>
                 <p className="mt-1 text-xs text-zinc-500">
-                  Development mode
+                  {t("sidebar.developmentMode")}
                 </p>
                 <p className="mt-1 text-xs font-medium text-teal-100">
-                  Spec Coding
+                  {t("sidebar.specCoding")}
                 </p>
               </div>
               <button
@@ -555,7 +564,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
               className="mb-2 block text-xs font-medium text-zinc-400"
               htmlFor="project-name"
             >
-              Project name
+              {t("sidebar.projectName")}
             </label>
             <input
               autoFocus
@@ -570,17 +579,17 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
               className="mb-2 mt-4 block text-xs font-medium text-zinc-400"
               htmlFor="project-prompt"
             >
-              Website brief
+              {t("sidebar.websiteBrief")}
             </label>
             <textarea
               className="h-28 min-h-28 w-full resize-none rounded-md border border-zinc-800 bg-zinc-900 px-3 py-3 text-sm leading-5 text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/10"
               id="project-prompt"
               onChange={(event) => setProjectPrompt(event.currentTarget.value)}
-              placeholder="Build a polished Chinese landing page for a boutique coffee brand with menu, story, and reservation sections."
+              placeholder={t("sidebar.projectPromptPlaceholder")}
               value={projectPrompt}
             />
             <p className="mt-2 text-xs leading-5 text-zinc-500">
-              New projects begin with requirements, design, and tasks. Code is generated only after approval.
+              {t("sidebar.projectSpecHint")}
             </p>
 
             {projectError ? (
@@ -595,7 +604,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                 onClick={() => setIsDialogOpen(false)}
                 type="button"
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 className="flex h-9 w-full items-center justify-center gap-2 whitespace-nowrap rounded-md border border-teal-400/30 bg-teal-400/10 px-3 text-sm font-medium text-teal-100 transition hover:border-teal-300/60 hover:bg-teal-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
@@ -611,7 +620,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                 ) : (
                   <Plus size={15} aria-hidden="true" />
                 )}
-                Create specification
+                {t("sidebar.createSpecification")}
               </button>
             </div>
           </form>
@@ -621,16 +630,16 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
       {newIterationProjectId ? (
         <div className="absolute inset-0 z-10 grid place-items-center bg-black/60 px-4">
           <form
-            className="w-full max-w-[360px] rounded-md border border-zinc-800 bg-zinc-950 p-4 shadow-2xl"
+            className="w-full max-w-[380px] rounded-lg border border-zinc-800 bg-zinc-950 p-4 shadow-2xl"
             onSubmit={handleCreateIteration}
           >
             <div className="mb-4 flex items-start justify-between gap-3">
               <div>
                 <h2 className="text-sm font-semibold text-zinc-100">
-                  New Iteration
+                  {t("sidebar.newIterationTitle")}
                 </h2>
                 <p className="mt-1 text-xs text-zinc-500">
-                  Initial mode
+                  {t("sidebar.initialMode")}
                 </p>
               </div>
               <button
@@ -653,7 +662,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                 type="button"
               >
                 <MessageSquare size={15} aria-hidden="true" />
-                Chat
+                {t("sidebar.chat")}
               </button>
               <button
                 className={`flex h-10 items-center justify-center gap-2 border-l border-zinc-800 text-sm ${
@@ -665,7 +674,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                 type="button"
               >
                 <FileText size={15} aria-hidden="true" />
-                Spec
+                {t("sidebar.spec")}
               </button>
             </div>
 
@@ -673,7 +682,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
               className="mb-2 mt-4 block text-xs font-medium text-zinc-400"
               htmlFor="iteration-title"
             >
-              Iteration title
+              {t("sidebar.iterationTitle")}
             </label>
             <input
               className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/10"
@@ -681,8 +690,8 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
               onChange={(event) => setNewIterationTitle(event.currentTarget.value)}
               placeholder={
                 newIterationMode === "spec"
-                  ? "Checkout refinement"
-                  : "Follow-up changes"
+                  ? t("sidebar.checkoutRefinement")
+                  : t("sidebar.followUpChanges")
               }
               value={newIterationTitle}
             />
@@ -693,13 +702,13 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                   className="mb-2 mt-4 block text-xs font-medium text-zinc-400"
                   htmlFor="iteration-brief"
                 >
-                  Brief
+                  {t("sidebar.brief")}
                 </label>
                 <textarea
                   className="h-28 min-h-28 w-full resize-none rounded-md border border-zinc-800 bg-zinc-900 px-3 py-3 text-sm leading-5 text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-blue-400/60 focus:ring-2 focus:ring-blue-400/10"
                   id="iteration-brief"
                   onChange={(event) => setNewIterationBrief(event.currentTarget.value)}
-                  placeholder="Describe the next feature or change"
+                  placeholder={t("sidebar.describeNext")}
                   value={newIterationBrief}
                 />
               </>
@@ -717,7 +726,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                 onClick={() => setNewIterationProjectId(null)}
                 type="button"
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 className="flex h-9 w-full items-center justify-center gap-2 whitespace-nowrap rounded-md border border-teal-400/30 bg-teal-400/10 px-3 text-sm font-medium text-teal-100 transition hover:border-teal-300/60 hover:bg-teal-400/15 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:bg-zinc-900 disabled:text-zinc-600"
@@ -737,7 +746,7 @@ export function ProjectSidebar({ onOpenSettings }: ProjectSidebarProps) {
                 ) : (
                   <Plus size={15} aria-hidden="true" />
                 )}
-                Create iteration
+                {t("sidebar.createIteration")}
               </button>
             </div>
           </form>
@@ -779,12 +788,17 @@ export function canUseNewIterationShortcut({
   return isCurrentProject && initialBuildCompleted && !iterationBusy;
 }
 
-export function formatConversationMarker(conversation: ProjectConversationSummary) {
+export function formatConversationMarker(
+  conversation: ProjectConversationSummary,
+  t: SidebarTranslate,
+) {
   if (conversation.kind === "initial_build") {
-    return "Spec · Locked";
+    return t("sidebar.initialBuildLocked");
   }
 
-  return conversation.mode === "spec" ? "Spec" : "Chat";
+  return conversation.mode === "spec"
+    ? t("sidebar.iterationMarkerSpec")
+    : t("sidebar.iterationMarkerChat");
 }
 
 export function canArchiveConversation(
@@ -830,35 +844,39 @@ function isInitialBuildCompleted(
   );
 }
 
-function formatRelativeTime(value: string) {
+export function formatRelativeTime(
+  value: string,
+  t: SidebarTranslate,
+  now = Date.now(),
+) {
   const timestamp = new Date(value).getTime();
 
   if (!Number.isFinite(timestamp)) {
     return "";
   }
 
-  const diffMs = Math.max(0, Date.now() - timestamp);
+  const diffMs = Math.max(0, now - timestamp);
   const minutes = Math.floor(diffMs / 60_000);
 
   if (minutes < 1) {
-    return "刚刚";
+    return t("time.justNow");
   }
 
   if (minutes < 60) {
-    return `${minutes}分`;
+    return t("time.minutesAgo", { count: minutes });
   }
 
   const hours = Math.floor(minutes / 60);
 
   if (hours < 24) {
-    return `${hours}时`;
+    return t("time.hoursAgo", { count: hours });
   }
 
   const days = Math.floor(hours / 24);
 
   if (days < 14) {
-    return `${days}天`;
+    return t("time.daysAgo", { count: days });
   }
 
-  return `${Math.floor(days / 7)}周`;
+  return t("time.weeksAgo", { count: Math.floor(days / 7) });
 }

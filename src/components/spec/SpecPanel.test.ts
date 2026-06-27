@@ -12,12 +12,13 @@ import {
   shouldShowSpecApprovalNotice,
 } from "./SpecPanel";
 import type { AgentApproval, AgentRun } from "../../agent-core/types";
+import { translate } from "../../i18n";
 
 describe("SpecPanel acceptance criteria projection", () => {
   it("uses explicit status symbols for acceptance criteria", () => {
-    expect(getAcceptanceStatusSymbol("passed")).toBe("✓");
-    expect(getAcceptanceStatusSymbol("failed")).toBe("✕");
-    expect(getAcceptanceStatusSymbol("pending")).toBe("○");
+    expect(getAcceptanceStatusSymbol("passed")).toBe("+");
+    expect(getAcceptanceStatusSymbol("failed")).toBe("x");
+    expect(getAcceptanceStatusSymbol("pending")).toBe("o");
   });
 
   it("formats task and run evidence for each acceptance criterion", () => {
@@ -33,6 +34,15 @@ describe("SpecPanel acceptance criteria projection", () => {
     expect(formatAcceptanceEvidenceLabels({ runIds: [], taskIds: [] })).toEqual({
       runs: "Runs: none",
       tasks: "Tasks: none",
+    });
+    expect(
+      formatAcceptanceEvidenceLabels(
+        { runIds: [], taskIds: ["task-1"] },
+        translateZh,
+      ),
+    ).toEqual({
+      runs: "运行：无",
+      tasks: "任务：task-1",
     });
   });
 
@@ -265,6 +275,11 @@ describe("SpecPanel acceptance criteria projection", () => {
     ).toBe(false);
   });
 });
+
+const translateZh = (
+  key: Parameters<typeof translate>[1],
+  params?: Parameters<typeof translate>[2],
+) => translate("zh-CN", key, params);
 
 function createNoticeApproval(
   overrides: Partial<

@@ -5,6 +5,7 @@ import {
   Loader2,
   TerminalSquare,
 } from "lucide-react";
+import { useI18n } from "../../i18n";
 import { useAppStore } from "../../store/appStore";
 import { getPendingReviewFiles } from "../../store/changeHistory";
 import { formatElapsedTime } from "../../store/commandLogs";
@@ -15,6 +16,7 @@ import { ReviewPanel } from "./ReviewPanel";
 type WorkspaceTab = "files" | "logs" | "review";
 
 export function LogsPanel() {
+  const { t } = useI18n();
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("files");
   const activeCommand = useAppStore((state) => state.activeCommand);
   const activeCommandRunId = useAppStore((state) => state.activeCommandRunId);
@@ -112,7 +114,7 @@ export function LogsPanel() {
             type="button"
           >
             <FileCode2 size={15} aria-hidden="true" />
-            Files
+            {t("logs.files")}
           </button>
           <button
             className={`flex h-8 items-center gap-2 rounded px-3 text-sm transition ${
@@ -124,7 +126,7 @@ export function LogsPanel() {
             type="button"
           >
             <TerminalSquare size={15} aria-hidden="true" />
-            Logs
+            {t("logs.logs")}
           </button>
           <button
             className={`flex h-8 items-center gap-2 rounded px-3 text-sm transition ${
@@ -136,7 +138,7 @@ export function LogsPanel() {
             type="button"
           >
             <FileDiff size={15} aria-hidden="true" />
-            Review
+            {t("logs.review")}
             {pendingReviewFiles.length > 0 ? (
               <span className="rounded bg-teal-400/10 px-1.5 py-0.5 text-[10px] text-teal-200">
                 {pendingReviewFiles.length}
@@ -193,8 +195,8 @@ export function LogsPanel() {
         ) : terminalLogs.length === 0 ? (
           <EmptyState
             icon={<TerminalSquare size={18} aria-hidden="true" />}
-            title="No logs yet"
-            detail="Build and agent logs will appear here later."
+            title={t("logs.noLogs")}
+            detail={t("logs.noLogsDetail")}
           />
         ) : (
           <div className="space-y-2 font-mono text-xs text-zinc-400">

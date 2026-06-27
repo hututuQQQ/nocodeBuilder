@@ -3,11 +3,13 @@ import type {
   ProjectConversation,
   ProjectConversationSummary,
 } from "../../services/projects";
+import { translate } from "../../i18n";
 import type { DevelopmentSpec } from "../../spec-core/types";
 import {
   canArchiveConversation,
   canUseNewIterationShortcut,
   formatConversationMarker,
+  formatRelativeTime,
 } from "./ProjectSidebar";
 
 describe("ProjectSidebar", () => {
@@ -78,7 +80,9 @@ describe("ProjectSidebar", () => {
       ),
     ).toBe(true);
 
-    expect(formatConversationMarker(initialBuild)).toBe("Spec · Locked");
+    expect(formatConversationMarker(initialBuild, translateEn)).toBe(
+      "Spec locked",
+    );
   });
 
   it("allows archive for normal iterations regardless of Initial Build state", () => {
@@ -103,7 +107,22 @@ describe("ProjectSidebar", () => {
       ),
     ).toBe(true);
   });
+
+  it("formats relative time without mojibake", () => {
+    expect(
+      formatRelativeTime(
+        "2026-01-01T00:00:00.000Z",
+        translateEn,
+        new Date("2026-01-01T00:45:00.000Z").getTime(),
+      ),
+    ).toBe("45m");
+  });
 });
+
+const translateEn = (
+  key: Parameters<typeof translate>[1],
+  params?: Parameters<typeof translate>[2],
+) => translate("en", key, params);
 
 function createSummary(
   patch: Partial<ProjectConversationSummary> = {},

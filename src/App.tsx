@@ -8,6 +8,7 @@ import {
 } from "react";
 import { AppShell } from "./components/layout/AppShell";
 import { ApiKeySetupPage } from "./components/settings/ApiKeySetupPage";
+import { useI18n } from "./i18n";
 import { AI_PROVIDER_IDS, type AiProviderId } from "./services/aiProviders";
 import {
   AiProviderConfigInput,
@@ -22,6 +23,7 @@ export type ConfiguredModelOption = {
 };
 
 function App() {
+  const { t } = useI18n();
   const [aiState, setAiState] = useState<AiProviderState | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -107,14 +109,14 @@ function App() {
   if (isLoading) {
     return (
       <main className="grid h-dvh w-dvw place-items-center bg-[#0b0b0d] text-sm text-zinc-500">
-        Loading configuration...
+        {t("app.loading")}
       </main>
     );
   }
 
   if (!config || isSettingsOpen) {
     return (
-      <AppErrorBoundary>
+      <AppErrorBoundary errorTitle={t("app.renderFailed")}>
         <ApiKeySetupPage
           aiState={aiState}
           mode={config ? "settings" : "onboarding"}
@@ -126,7 +128,7 @@ function App() {
   }
 
   return (
-    <AppErrorBoundary>
+    <AppErrorBoundary errorTitle={t("app.renderFailed")}>
       <AppShell
         activeProvider={config.provider}
         activeModel={config.model}
@@ -162,6 +164,7 @@ function getConfiguredModelOptions(
 
 type AppErrorBoundaryProps = {
   children: ReactNode;
+  errorTitle: string;
 };
 
 type AppErrorBoundaryState = {
@@ -188,9 +191,9 @@ class AppErrorBoundary extends Component<
     if (this.state.error) {
       return (
         <main className="grid h-dvh w-dvw place-items-center bg-[#0b0b0d] p-8 text-zinc-200">
-          <section className="max-w-2xl rounded-md border border-red-400/30 bg-red-950/30 p-5">
+          <section className="w-full max-w-2xl rounded-lg border border-red-400/30 bg-red-950/30 p-5 shadow-2xl shadow-black/30">
             <h1 className="text-base font-semibold text-red-100">
-              App failed to render
+              {this.props.errorTitle}
             </h1>
             <pre className="mt-3 max-h-[60vh] overflow-auto whitespace-pre-wrap text-xs leading-5 text-red-100/80">
               {this.state.error.message}

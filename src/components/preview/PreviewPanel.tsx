@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { useAppStore } from "../../store/appStore";
+import { useI18n } from "../../i18n";
 import {
   DEFAULT_VERCEL_DEPLOY_TARGET,
   VercelDeployTarget,
@@ -19,6 +20,7 @@ import {
 } from "./previewPanelTypes";
 
 export function PreviewPanel() {
+  const { t } = useI18n();
   const currentProject = useAppStore((state) => state.currentProject);
   const deployCurrentProject = useAppStore((state) => state.deployCurrentProject);
   const devServerStatus = useAppStore((state) => state.devServerStatus);
@@ -133,7 +135,7 @@ export function PreviewPanel() {
 
   async function handleTestToken() {
     if (!token.trim()) {
-      setNotice({ tone: "error", message: "Enter a Vercel token first." });
+      setNotice({ tone: "error", message: t("preview.enterVercelToken") });
       return;
     }
 
@@ -144,7 +146,7 @@ export function PreviewPanel() {
       const user = await projectApi.testVercelToken(token.trim());
       setNotice({
         tone: "success",
-        message: `Token verified for ${user.username}.`,
+        message: t("preview.tokenVerified", { username: user.username }),
       });
     } catch (error) {
       setNotice({
@@ -160,7 +162,7 @@ export function PreviewPanel() {
     event.preventDefault();
 
     if (!token.trim()) {
-      setNotice({ tone: "error", message: "Enter a Vercel token first." });
+      setNotice({ tone: "error", message: t("preview.enterVercelToken") });
       return;
     }
 

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import { MonitorPlay } from "lucide-react";
+import { useI18n } from "../../i18n";
 import { useAppStore } from "../../store/appStore";
 import { PreviewTab } from "./previewPanelTypes";
 
@@ -16,6 +17,7 @@ export function PreviewFrame({
   deploymentRefreshKey,
   previewRefreshKey,
 }: PreviewFrameProps) {
+  const { t } = useI18n();
   const setSelectedSiteNode = useAppStore((state) => state.setSelectedSiteNode);
   const recordPreviewDiagnostic = useAppStore((state) => state.recordPreviewDiagnostic);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -76,8 +78,8 @@ export function PreviewFrame({
           src={activePreviewUrl}
           title={
             activePreviewTab === "deployment"
-              ? "Vercel deployment"
-              : "Local preview"
+              ? t("preview.deploymentFrameTitle")
+              : t("preview.localFrameTitle")
           }
         />
       ) : (
@@ -86,10 +88,10 @@ export function PreviewFrame({
             <MonitorPlay size={18} aria-hidden="true" />
           </div>
           <p className="text-sm font-medium text-zinc-300">
-            No preview running
+            {t("preview.noPreview")}
           </p>
           <p className="mt-1 text-xs text-zinc-600">
-            Start preview when you want to load the generated app.
+            {t("preview.startPreviewHint")}
           </p>
         </div>
       )}

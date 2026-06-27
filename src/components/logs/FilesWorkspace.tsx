@@ -8,6 +8,7 @@ import {
   FileCode2,
   Loader2,
 } from "lucide-react";
+import { useI18n } from "../../i18n";
 import { FileTree } from "../../services/projects";
 import { CodeViewer } from "./CodeViewer";
 import { EmptyState } from "./EmptyState";
@@ -34,6 +35,7 @@ export function FilesWorkspace({
   selectedFileContent,
   selectedFilePath,
 }: FilesWorkspaceProps) {
+  const { t } = useI18n();
   const [treeWidth, setTreeWidth] = useState(270);
   const [isResizingTree, setIsResizingTree] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -103,8 +105,8 @@ export function FilesWorkspace({
     return (
       <EmptyState
         icon={<FileCode2 size={18} aria-hidden="true" />}
-        title="No project selected"
-        detail="Create or select a project to inspect local files."
+        title={t("files.noProjectTitle")}
+        detail={t("files.noProjectDetail")}
       />
     );
   }
@@ -114,7 +116,7 @@ export function FilesWorkspace({
       <div className="grid h-full min-h-[180px] place-items-center rounded-md border border-zinc-800 bg-zinc-900/30 px-6 text-sm text-zinc-500">
         <div className="flex items-center gap-2">
           <Loader2 size={16} className="animate-spin" aria-hidden="true" />
-          Loading files
+          {t("files.loadingFiles")}
         </div>
       </div>
     );
@@ -124,8 +126,8 @@ export function FilesWorkspace({
     return (
       <EmptyState
         icon={<FileCode2 size={18} aria-hidden="true" />}
-        title="No file tree"
-        detail="The selected project did not return a file tree."
+        title={t("files.noTreeTitle")}
+        detail={t("files.noTreeDetail")}
       />
     );
   }
@@ -147,7 +149,7 @@ export function FilesWorkspace({
         />
       </div>
       <div
-        aria-label="Resize file tree and code viewer"
+        aria-label={t("files.resize")}
         aria-orientation="vertical"
         className={`group grid cursor-col-resize place-items-center border-y border-zinc-800 bg-zinc-950 transition hover:bg-teal-400/10 ${
           isResizingTree ? "bg-teal-400/15" : ""
@@ -185,7 +187,7 @@ export function FilesWorkspace({
           />
         ) : (
           <div className="grid min-h-0 flex-1 place-items-center px-6 text-center text-sm text-zinc-600">
-            Select a file to view its contents.
+            {t("files.selectFile")}
           </div>
         )}
 

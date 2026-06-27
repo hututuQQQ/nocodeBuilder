@@ -53,6 +53,7 @@ fn storage_file_name(key: &str) -> Result<&'static str, String> {
     match key {
         "ai-provider-config" => Ok("ai-provider-config.v3.json"),
         "project-memory" => Ok("project-memory.v1.json"),
+        "ui-locale" => Ok("ui-locale.v1.json"),
         _ => Err("app-storage: unknown storage key".to_string()),
     }
 }
@@ -78,4 +79,14 @@ fn storage_dir() -> Result<PathBuf, String> {
 fn state_dir(base: PathBuf) -> PathBuf {
     base.join(Path::new(APP_STORAGE_DIR_NAME))
         .join(APP_STORAGE_STATE_DIR)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::storage_file_name;
+
+    #[test]
+    fn ui_locale_storage_key_is_whitelisted() {
+        assert_eq!(storage_file_name("ui-locale"), Ok("ui-locale.v1.json"));
+    }
 }
