@@ -17,7 +17,7 @@ pub(crate) enum CommandNetworkSpec {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CommandWriteBackSpec {
     None,
-    AllowedGeneratedFiles,
+    Files(&'static [&'static str]),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,6 +52,10 @@ pub(crate) const MANAGED_PROXY_ALLOWED_HOSTS: &[&str] = &[
     "nodejs.org",
 ];
 
+pub(crate) const NPM_INSTALL_WRITE_BACK_FILES: &[&str] = &["package-lock.json"];
+pub(crate) const PNPM_INSTALL_WRITE_BACK_FILES: &[&str] = &["pnpm-lock.yaml"];
+pub(crate) const BUILD_WRITE_BACK_FILES: &[&str] = &["next-env.d.ts"];
+
 pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec {
         label: "npm install",
@@ -66,7 +70,7 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
             active_process_limit: 256,
             max_output_bytes: 256 * 1024,
         },
-        write_back: CommandWriteBackSpec::AllowedGeneratedFiles,
+        write_back: CommandWriteBackSpec::Files(NPM_INSTALL_WRITE_BACK_FILES),
     },
     CommandSpec {
         label: "npm run dev",
@@ -96,7 +100,7 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
             active_process_limit: 128,
             max_output_bytes: 256 * 1024,
         },
-        write_back: CommandWriteBackSpec::AllowedGeneratedFiles,
+        write_back: CommandWriteBackSpec::Files(BUILD_WRITE_BACK_FILES),
     },
     CommandSpec {
         label: "npm run lint",
@@ -156,7 +160,7 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
             active_process_limit: 256,
             max_output_bytes: 256 * 1024,
         },
-        write_back: CommandWriteBackSpec::AllowedGeneratedFiles,
+        write_back: CommandWriteBackSpec::Files(PNPM_INSTALL_WRITE_BACK_FILES),
     },
     CommandSpec {
         label: "pnpm dev",
@@ -186,7 +190,7 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
             active_process_limit: 128,
             max_output_bytes: 256 * 1024,
         },
-        write_back: CommandWriteBackSpec::AllowedGeneratedFiles,
+        write_back: CommandWriteBackSpec::Files(BUILD_WRITE_BACK_FILES),
     },
     CommandSpec {
         label: "pnpm lint",

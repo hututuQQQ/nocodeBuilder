@@ -16,11 +16,11 @@ use super::{
         SandboxBackendKind, SandboxError, SandboxErrorKind, SandboxHealth, SandboxRequest,
         SandboxResourceLimits,
     },
-    workspace::sandbox_root_dir,
+    workspace::{sandbox_root_dir, SandboxWorkspace},
 };
 use crate::{commands::node_runtime, sandbox::policy::SANDBOX_POLICY_VERSION};
 
-const SETUP_SCHEMA_VERSION: u32 = 1;
+const SETUP_SCHEMA_VERSION: u32 = 2;
 const RUNNER_SCHEMA_VERSION: u32 = 1;
 const SETUP_SIDECAR_NAME: &str = "ncb-sandbox-setup";
 const RUNNER_SIDECAR_NAME: &str = "ncb-sandbox-runner";
@@ -52,6 +52,42 @@ impl WindowsNativeBackend {
     pub fn repair(&self) -> Result<SandboxHealth, SandboxError> {
         call_setup_sidecar(SetupSidecarAction::Repair)
     }
+
+    pub fn prepare_dependency_install(
+        &self,
+        workspace: &SandboxWorkspace,
+    ) -> Result<(), SandboxError> {
+        call_setup_sidecar_with_acl_paths(
+            SetupSidecarAction::PrepareDependencyInstall,
+            Some(workspace.dependency_root.clone()),
+            None,
+        )
+        .map(|_| ())
+    }
+
+    pub fn harden_dependency_layer(
+        &self,
+        workspace: &SandboxWorkspace,
+    ) -> Result<(), SandboxError> {
+        call_setup_sidecar_with_acl_paths(
+            SetupSidecarAction::HardenDependencyLayer,
+            Some(workspace.dependency_root.clone()),
+            None,
+        )
+        .map(|_| ())
+    }
+
+    pub fn prepare_command_workspace(
+        &self,
+        workspace: &SandboxWorkspace,
+    ) -> Result<(), SandboxError> {
+        call_setup_sidecar_with_acl_paths(
+            SetupSidecarAction::PrepareCommandWorkspace,
+            Some(workspace.dependency_root.clone()),
+            Some(workspace.workspace_root.clone()),
+        )
+        .map(|_| ())
+    }
 }
 
 pub fn expected_health() -> SandboxHealth {
@@ -72,6 +108,10 @@ struct SetupSidecarRequest {
     launcher_user_sid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sandbox_account_password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dependency_layer_root: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command_workspace_root: Option<PathBuf>,
     policy_version: u32,
 }
 
@@ -81,6 +121,9 @@ enum SetupSidecarAction {
     Status,
     Initialize,
     Repair,
+    PrepareDependencyInstall,
+    HardenDependencyLayer,
+    PrepareCommandWorkspace,
 }
 
 impl SetupSidecarAction {
@@ -179,7 +222,15 @@ impl From<SandboxResourceLimits> for RunnerSidecarLimits {
 }
 
 fn call_setup_sidecar(action: SetupSidecarAction) -> Result<SandboxHealth, SandboxError> {
-    let request = build_setup_request(action)?;
+    call_setup_sidecar_with_acl_paths(action, None, None)
+}
+
+fn call_setup_sidecar_with_acl_paths(
+    action: SetupSidecarAction,
+    dependency_layer_root: Option<PathBuf>,
+    command_workspace_root: Option<PathBuf>,
+) -> Result<SandboxHealth, SandboxError> {
+    let request = build_setup_request(action, dependency_layer_root, command_workspace_root)?;
     let response = if action.requires_elevation() {
         invoke_setup_sidecar_elevated(&request)?
     } else {
@@ -188,7 +239,11 @@ fn call_setup_sidecar(action: SetupSidecarAction) -> Result<SandboxHealth, Sandb
     setup_response_to_health(response)
 }
 
-fn build_setup_request(action: SetupSidecarAction) -> Result<SetupSidecarRequest, SandboxError> {
+fn build_setup_request(
+    action: SetupSidecarAction,
+    dependency_layer_root: Option<PathBuf>,
+    command_workspace_root: Option<PathBuf>,
+) -> Result<SetupSidecarRequest, SandboxError> {
     let sandbox_root = sandbox_root_dir()?;
     let node_runtime_root =
         node_runtime::managed_node_runtime_parent_dir().map_err(SandboxError::unavailable)?;
@@ -205,6 +260,8 @@ fn build_setup_request(action: SetupSidecarAction) -> Result<SetupSidecarRequest
         } else {
             None
         },
+        dependency_layer_root,
+        command_workspace_root,
         policy_version: SANDBOX_POLICY_VERSION,
     })
 }
@@ -829,6 +886,9 @@ mod tests {
         assert!(!SetupSidecarAction::Status.requires_elevation());
         assert!(SetupSidecarAction::Initialize.requires_elevation());
         assert!(SetupSidecarAction::Repair.requires_elevation());
+        assert!(!SetupSidecarAction::PrepareDependencyInstall.requires_elevation());
+        assert!(!SetupSidecarAction::HardenDependencyLayer.requires_elevation());
+        assert!(!SetupSidecarAction::PrepareCommandWorkspace.requires_elevation());
     }
 
     #[test]
@@ -855,6 +915,8 @@ mod tests {
             workspace_root: sandbox_root.join("workspaces"),
             launcher_user_sid: Some("S-1-5-21-1000".to_string()),
             sandbox_account_password: Some("Ncb!9abcdefghijklmnopqrstuvwxyz12345".to_string()),
+            dependency_layer_root: None,
+            command_workspace_root: None,
             policy_version: SANDBOX_POLICY_VERSION,
         };
 

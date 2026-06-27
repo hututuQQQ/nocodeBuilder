@@ -28,7 +28,7 @@ mod windows_native_smoke {
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
 
-    const SETUP_SCHEMA_VERSION: u32 = 1;
+    const SETUP_SCHEMA_VERSION: u32 = 2;
     const RUNNER_SCHEMA_VERSION: u32 = 1;
     const POLICY_VERSION: u32 = 1;
     const CREDENTIAL_SERVICE_NAME: &str = "AI Web Builder";
@@ -40,6 +40,8 @@ mod windows_native_smoke {
         Status,
         Initialize,
         Uninstall,
+        HardenDependencyLayer,
+        PrepareCommandWorkspace,
     }
 
     #[derive(Clone, Debug, Serialize)]
@@ -53,6 +55,10 @@ mod windows_native_smoke {
         launcher_user_sid: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         sandbox_account_password: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        dependency_layer_root: Option<PathBuf>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        command_workspace_root: Option<PathBuf>,
         policy_version: u32,
     }
 
@@ -116,10 +122,10 @@ mod windows_native_smoke {
             std::env::temp_dir().join(format!("ncb-windows-native-smoke-{}", std::process::id()));
         let sandbox_root = root.join("sandbox");
         let workspace_root = sandbox_root.join("workspaces");
-        let workspace = workspace_root
+        let dependency_layer = workspace_root
             .join("smoke-project")
-            .join("runs")
-            .join("run-1");
+            .join("dependency-layer");
+        let workspace = dependency_layer.join("runs").join("run-1");
         let cache_root = sandbox_root.join("cache").join("smoke-project");
         let tmp_root = sandbox_root.join("tmp").join("run-1");
         let node_runtime_root = sandbox_root.join("runtime").join("node");
@@ -137,6 +143,8 @@ mod windows_native_smoke {
             workspace_root: workspace_root.clone(),
             launcher_user_sid: Some(current_user_sid()),
             sandbox_account_password: Some(password.clone()),
+            dependency_layer_root: None,
+            command_workspace_root: None,
             policy_version: POLICY_VERSION,
         };
         let _cleanup = SmokeCleanup {
@@ -146,6 +154,16 @@ mod windows_native_smoke {
         };
 
         fs::create_dir_all(&node_bin).expect("create fake managed node bin");
+        fs::create_dir_all(dependency_layer.join("node_modules").join("smoke-package"))
+            .expect("create fake dependency node_modules");
+        fs::write(
+            dependency_layer
+                .join("node_modules")
+                .join("smoke-package")
+                .join("index.js"),
+            "dependency_read_ok\n",
+        )
+        .expect("write fake dependency package");
         fs::create_dir_all(&workspace).expect("create smoke workspace");
         fs::create_dir_all(&cache_root).expect("create smoke cache root");
         fs::create_dir_all(&tmp_root).expect("create smoke tmp root");
@@ -167,6 +185,7 @@ mod windows_native_smoke {
             &real_project_env,
             &real_project_env_local,
             &real_project_aibuilder,
+            &dependency_layer,
         );
 
         keyring::Entry::new(CREDENTIAL_SERVICE_NAME, SANDBOX_ACCOUNT_PASSWORD_KEY)
@@ -190,6 +209,24 @@ mod windows_native_smoke {
         assert_eq!(status.policy_version, POLICY_VERSION);
         assert!(status.message.contains("runner launch prerequisites"));
 
+        setup_request.action = SetupAction::HardenDependencyLayer;
+        setup_request.sandbox_account_password = None;
+        setup_request.dependency_layer_root = Some(dependency_layer.clone());
+        setup_request.command_workspace_root = None;
+        let hardened = run_setup(&setup_exe, &setup_request);
+        assert!(
+            hardened.ok && hardened.state == "ready",
+            "dependency layer harden failed: {hardened:?}"
+        );
+
+        setup_request.action = SetupAction::PrepareCommandWorkspace;
+        setup_request.command_workspace_root = Some(workspace.clone());
+        let prepared_workspace = run_setup(&setup_exe, &setup_request);
+        assert!(
+            prepared_workspace.ok && prepared_workspace.state == "ready",
+            "command workspace ACL prep failed: {prepared_workspace:?}"
+        );
+
         let job_probe_deadline = Instant::now() + Duration::from_secs(25);
         let runner_response = run_runner(
             &runner_exe,
@@ -203,7 +240,7 @@ mod windows_native_smoke {
                     node_runtime_root.clone(),
                     node_bin.clone(),
                     workspace.clone(),
-                    workspace.join("node_modules").join(".bin"),
+                    dependency_layer.join("node_modules"),
                 ],
                 writable_roots: vec![workspace.clone(), cache_root.clone(), tmp_root.clone()],
                 denied_roots: vec![
@@ -211,7 +248,12 @@ mod windows_native_smoke {
                     user_profile_dir().join(".ssh"),
                     user_profile_dir().join(".aws"),
                 ],
-                environment: smoke_environment(&node_bin, &workspace, &cache_root, &tmp_root),
+                environment: smoke_environment(
+                    &node_bin,
+                    &dependency_layer,
+                    &cache_root,
+                    &tmp_root,
+                ),
                 limits: RunnerLimits {
                     memory_bytes: 512 * 1024 * 1024,
                     active_process_limit: 16,
@@ -236,6 +278,21 @@ mod windows_native_smoke {
         assert!(
             workspace.join("job-child.txt").exists(),
             "sandbox command did not start the process-tree cleanup probe"
+        );
+        let dependency_read = fs::read_to_string(workspace.join("dependency-read.txt"))
+            .expect("read dependency read probe output");
+        assert!(
+            dependency_read.contains("dependency_read_ok"),
+            "sandbox command could not read dependency node_modules: {dependency_read}"
+        );
+        let dependency_write = fs::read_to_string(workspace.join("dependency-write.txt"))
+            .expect("read dependency write probe output");
+        assert!(
+            dependency_write.contains("dependency_write_blocked")
+                && !dependency_layer
+                    .join("sandbox-should-not-write.txt")
+                    .exists(),
+            "sandbox command wrote to dependency layer despite hardened ACL: {dependency_write}"
         );
         let sensitive_read = fs::read_to_string(workspace.join("sensitive-read.txt"))
             .expect("read sandbox sensitive path probe output");
@@ -312,12 +369,15 @@ mod windows_native_smoke {
 
     fn smoke_environment(
         node_bin: &Path,
-        workspace: &Path,
+        dependency_layer: &Path,
         cache_root: &Path,
         tmp_root: &Path,
     ) -> BTreeMap<String, String> {
-        let path = std::env::join_paths([node_bin, &workspace.join("node_modules").join(".bin")])
-            .expect("join smoke PATH");
+        let path = std::env::join_paths([
+            node_bin,
+            &dependency_layer.join("node_modules").join(".bin"),
+        ])
+        .expect("join smoke PATH");
         let system_root = std::env::var("SystemRoot")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(r"C:\Windows"));
@@ -377,11 +437,27 @@ mod windows_native_smoke {
         real_project_env: &Path,
         real_project_env_local: &Path,
         real_project_aibuilder: &Path,
+        dependency_layer: &Path,
     ) {
         let script = format!(
             r#"@echo off
 echo command_started>command.txt
 start "" /b "%ComSpec%" /c "echo job_child_started>job-child.txt & %SystemRoot%\System32\ping.exe -n 21 127.0.0.1 >NUL & echo job_object_escape>job-survivor.txt"
+type "{}" > dependency-read.txt 2>dependency-read-error.txt
+"%SystemRoot%\System32\findstr.exe" /C:"dependency_read_ok" dependency-read.txt >NUL 2>NUL
+if %ERRORLEVEL% NEQ 0 (
+  echo dependency_read_failed>>dependency-read.txt
+  exit /b 25
+)
+(
+  echo dependency_write_allowed
+) > "{}" 2>dependency-write-error.txt
+if exist "{}" (
+  echo dependency_write_allowed>dependency-write.txt
+  exit /b 24
+) else (
+  echo dependency_write_blocked>dependency-write.txt
+)
 (
   type "{}"
   type "{}"
@@ -403,6 +479,14 @@ if %ERRORLEVEL% EQU 0 (
   exit /b 0
 )
 "#,
+            batch_path(
+                &dependency_layer
+                    .join("node_modules")
+                    .join("smoke-package")
+                    .join("index.js")
+            ),
+            batch_path(&dependency_layer.join("sandbox-should-not-write.txt")),
+            batch_path(&dependency_layer.join("sandbox-should-not-write.txt")),
             batch_path(real_project_env),
             batch_path(real_project_env_local),
             batch_path(real_project_aibuilder)

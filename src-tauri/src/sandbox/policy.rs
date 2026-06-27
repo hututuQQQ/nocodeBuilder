@@ -2,7 +2,7 @@ use super::types::{SandboxError, SandboxNetworkPolicy, SandboxPurpose, SandboxRe
 use crate::commands::{
     command_spec::{
         spec_for_label, spec_matches_app_command, CommandNetworkSpec, CommandPurposeSpec,
-        MANAGED_PROXY_ALLOWED_HOSTS,
+        CommandWriteBackSpec, MANAGED_PROXY_ALLOWED_HOSTS,
     },
     types::AllowedCommand,
 };
@@ -14,6 +14,7 @@ pub struct SandboxCommandPolicy {
     pub purpose: SandboxPurpose,
     pub network: SandboxNetworkPolicy,
     pub limits: SandboxResourceLimits,
+    pub write_back: CommandWriteBackSpec,
 }
 
 pub fn policy_for_allowed_command(
@@ -58,6 +59,7 @@ pub fn policy_for_allowed_command(
             active_process_limit: spec.limits.active_process_limit,
             max_output_bytes: spec.limits.max_output_bytes,
         },
+        write_back: spec.write_back,
     })
 }
 
@@ -104,6 +106,53 @@ mod tests {
                 .expect("command policy");
 
             assert_eq!(policy.limits.max_output_bytes, spec.limits.max_output_bytes);
+            assert_eq!(policy.write_back, spec.write_back);
+        }
+    }
+
+    #[test]
+    fn write_back_policy_matches_command_contract() {
+        use crate::commands::command_spec::{
+            CommandWriteBackSpec, BUILD_WRITE_BACK_FILES, NPM_INSTALL_WRITE_BACK_FILES,
+            PNPM_INSTALL_WRITE_BACK_FILES,
+        };
+
+        let npm_install = policy_for_allowed_command(parse_allowed_command("npm install").unwrap())
+            .expect("npm install policy");
+        assert_eq!(
+            npm_install.write_back,
+            CommandWriteBackSpec::Files(NPM_INSTALL_WRITE_BACK_FILES)
+        );
+
+        let pnpm_install =
+            policy_for_allowed_command(parse_allowed_command("pnpm install").unwrap())
+                .expect("pnpm install policy");
+        assert_eq!(
+            pnpm_install.write_back,
+            CommandWriteBackSpec::Files(PNPM_INSTALL_WRITE_BACK_FILES)
+        );
+
+        for command in ["npm run build", "pnpm build"] {
+            let policy =
+                policy_for_allowed_command(parse_allowed_command(command).unwrap()).unwrap();
+            assert_eq!(
+                policy.write_back,
+                CommandWriteBackSpec::Files(BUILD_WRITE_BACK_FILES)
+            );
+        }
+
+        for command in [
+            "npm run lint",
+            "npm run test",
+            "npm test",
+            "npm run dev",
+            "pnpm lint",
+            "pnpm test",
+            "pnpm dev",
+        ] {
+            let policy =
+                policy_for_allowed_command(parse_allowed_command(command).unwrap()).unwrap();
+            assert_eq!(policy.write_back, CommandWriteBackSpec::None);
         }
     }
 }

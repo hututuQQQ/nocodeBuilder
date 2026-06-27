@@ -18,7 +18,7 @@ const DEPENDENCY_LAYER_DIR_NAME: &str = "dependency-layer";
 const MAX_WRITE_BACK_BYTES: u64 = 10 * 1024 * 1024;
 const SOURCE_MANIFEST_VERSION: u32 = 1;
 const DEPENDENCY_FINGERPRINT_VERSION: u32 = 1;
-const WRITE_BACK_FILES: [&str; 3] = ["package-lock.json", "pnpm-lock.yaml", "next-env.d.ts"];
+const KNOWN_WRITE_BACK_FILES: [&str; 3] = ["package-lock.json", "pnpm-lock.yaml", "next-env.d.ts"];
 const DEPENDENCY_INPUT_FILES: [&str; 3] = ["package.json", "package-lock.json", "pnpm-lock.yaml"];
 
 #[derive(Clone, Debug)]
@@ -272,10 +272,13 @@ impl SandboxWorkspace {
     pub fn write_back_allowed_outputs(
         &self,
         project_dir: &Path,
+        allowed_files: &[&str],
     ) -> Result<Vec<String>, SandboxError> {
         let mut written = Vec::new();
 
-        for relative in WRITE_BACK_FILES {
+        for relative in allowed_files {
+            let relative = *relative;
+            validate_write_back_relative(relative)?;
             let source = self.workspace_root.join(relative);
 
             if !source.exists() {
@@ -310,6 +313,21 @@ impl SandboxWorkspace {
 
         Ok(written)
     }
+}
+
+fn validate_write_back_relative(relative: &str) -> Result<(), SandboxError> {
+    if KNOWN_WRITE_BACK_FILES.contains(&relative) && is_simple_relative_file(relative) {
+        return Ok(());
+    }
+
+    Err(SandboxError::policy_denied(format!(
+        "refusing to write back non-policy sandbox output '{relative}'"
+    )))
+}
+
+fn is_simple_relative_file(relative: &str) -> bool {
+    let mut components = Path::new(relative).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
 pub fn sync_project_to_workspace(
@@ -1254,7 +1272,7 @@ mod tests {
     }
 
     #[test]
-    fn write_back_only_copies_allowed_generated_files() {
+    fn write_back_only_copies_requested_policy_files() {
         let root = std::env::temp_dir().join(format!(
             "ncb-sandbox-write-back-test-{}",
             Utc::now().timestamp_nanos_opt().unwrap_or_default()
@@ -1285,28 +1303,17 @@ mod tests {
             dependency_fingerprint_path: root.join("state").join("dependency-fingerprint.json"),
         };
 
-        let written = workspace.write_back_allowed_outputs(&project).unwrap();
+        let written = workspace
+            .write_back_allowed_outputs(&project, &["package-lock.json"])
+            .unwrap();
 
-        assert_eq!(
-            written,
-            vec![
-                "package-lock.json".to_string(),
-                "pnpm-lock.yaml".to_string(),
-                "next-env.d.ts".to_string()
-            ]
-        );
+        assert_eq!(written, vec!["package-lock.json".to_string()]);
         assert_eq!(
             fs::read_to_string(project.join("package-lock.json")).unwrap(),
             "{\"lock\":true}"
         );
-        assert_eq!(
-            fs::read_to_string(project.join("pnpm-lock.yaml")).unwrap(),
-            "lockfileVersion: 9"
-        );
-        assert_eq!(
-            fs::read_to_string(project.join("next-env.d.ts")).unwrap(),
-            "/// <reference />"
-        );
+        assert!(!project.join("pnpm-lock.yaml").exists());
+        assert!(!project.join("next-env.d.ts").exists());
         assert_eq!(
             fs::read_to_string(project.join("package.json")).unwrap(),
             "{\"name\":\"real\"}"
@@ -1345,7 +1352,7 @@ mod tests {
         };
 
         let error = workspace
-            .write_back_allowed_outputs(&project)
+            .write_back_allowed_outputs(&project, &["package-lock.json"])
             .expect_err("oversized sandbox output should be rejected");
 
         assert_eq!(error.kind, SandboxErrorKind::PolicyDenied);
@@ -1353,6 +1360,48 @@ mod tests {
         assert_eq!(
             fs::read_to_string(project.join("package-lock.json")).unwrap(),
             "real lock"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn write_back_rejects_non_policy_file_names() {
+        let root = std::env::temp_dir().join(format!(
+            "ncb-sandbox-write-back-policy-test-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let project = root.join("project");
+        let workspace_root = root.join("workspace");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&workspace_root).unwrap();
+        fs::write(project.join("package.json"), "{\"name\":\"real\"}").unwrap();
+        fs::write(
+            workspace_root.join("package.json"),
+            "{\"name\":\"sandbox\"}",
+        )
+        .unwrap();
+
+        let workspace = SandboxWorkspace {
+            project_id: "test".to_string(),
+            kind: SandboxWorkspaceKind::Run,
+            workspace_root,
+            dependency_root: root.join("dependency-layer"),
+            cache_root: root.join("cache"),
+            tmp_root: root.join("tmp"),
+            source_manifest_path: root.join("state").join("source-manifest.json"),
+            dependency_fingerprint_path: root.join("state").join("dependency-fingerprint.json"),
+        };
+
+        let error = workspace
+            .write_back_allowed_outputs(&project, &["package.json"])
+            .expect_err("package.json should not be a write-back output");
+
+        assert_eq!(error.kind, SandboxErrorKind::PolicyDenied);
+        assert!(error.message.contains("non-policy sandbox output"));
+        assert_eq!(
+            fs::read_to_string(project.join("package.json")).unwrap(),
+            "{\"name\":\"real\"}"
         );
 
         let _ = fs::remove_dir_all(root);
@@ -1388,7 +1437,7 @@ mod tests {
         };
 
         let error = workspace
-            .write_back_allowed_outputs(&project)
+            .write_back_allowed_outputs(&project, &["package-lock.json"])
             .expect_err("symlink write-back target should be rejected");
 
         assert_eq!(error.kind, SandboxErrorKind::PolicyDenied);
@@ -1442,7 +1491,7 @@ mod tests {
         };
 
         let error = workspace
-            .write_back_allowed_outputs(&project)
+            .write_back_allowed_outputs(&project, &["package-lock.json"])
             .expect_err("Windows reparse-point write-back target should be rejected");
 
         assert_eq!(error.kind, SandboxErrorKind::PolicyDenied);

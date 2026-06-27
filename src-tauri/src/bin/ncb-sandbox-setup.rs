@@ -9,7 +9,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 const MAX_INPUT_BYTES: usize = 64 * 1024;
-const SETUP_SCHEMA_VERSION: u32 = 1;
+const SETUP_SCHEMA_VERSION: u32 = 2;
+const DEPENDENCY_LAYER_DIR_NAME: &str = "dependency-layer";
 // TODO(PR7-follow-up): derive these names from the Tauri app identifier before
 // exposing upgrade/uninstall across dev, beta, prod, or forked installs.
 const SANDBOX_ACCOUNT_NAME: &str = "NCB_Sandbox";
@@ -36,6 +37,10 @@ struct SetupRequest {
     launcher_user_sid: Option<String>,
     #[serde(default)]
     sandbox_account_password: Option<String>,
+    #[serde(default)]
+    dependency_layer_root: Option<PathBuf>,
+    #[serde(default)]
+    command_workspace_root: Option<PathBuf>,
     policy_version: u32,
 }
 
@@ -47,12 +52,29 @@ enum SetupAction {
     Repair,
     Upgrade,
     Uninstall,
+    PrepareDependencyInstall,
+    HardenDependencyLayer,
+    PrepareCommandWorkspace,
 }
 
 impl SetupAction {
     fn requires_account_password(self) -> bool {
         matches!(self, Self::Initialize | Self::Repair | Self::Upgrade)
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SandboxAclRights {
+    HostOnly,
+    ReadExecute,
+    Modify,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SandboxAclTarget {
+    path: PathBuf,
+    rights: SandboxAclRights,
+    recursive: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -206,6 +228,9 @@ fn handle_setup_request(request: SetupRequest) -> Result<SetupResponse, String> 
             require_elevated_setup_token()?;
             uninstall_progress(&request)
         }
+        SetupAction::PrepareDependencyInstall => prepare_dependency_install_acl_response(&request),
+        SetupAction::HardenDependencyLayer => harden_dependency_layer_acl_response(&request),
+        SetupAction::PrepareCommandWorkspace => prepare_command_workspace_acl_response(&request),
     }
 }
 
@@ -236,6 +261,45 @@ fn validate_request(request: &SetupRequest) -> Result<(), String> {
         &request.sandbox_root,
         &request.workspace_root,
     )?;
+    if let Some(path) = &request.dependency_layer_root {
+        validate_absolute_path("dependencyLayerRoot", path)?;
+        ensure_child_path("dependencyLayerRoot", &request.workspace_root, path)?;
+        if path.file_name() != Some(OsStr::new(DEPENDENCY_LAYER_DIR_NAME)) {
+            return Err(format!(
+                "dependencyLayerRoot must end with {DEPENDENCY_LAYER_DIR_NAME}"
+            ));
+        }
+    }
+    if let Some(path) = &request.command_workspace_root {
+        validate_absolute_path("commandWorkspaceRoot", path)?;
+        let dependency_layer_root = request
+            .dependency_layer_root
+            .as_deref()
+            .ok_or_else(|| "commandWorkspaceRoot requires dependencyLayerRoot".to_string())?;
+        ensure_child_path("commandWorkspaceRoot", dependency_layer_root, path)?;
+        let runs_root = dependency_layer_root.join("runs");
+        let dev_root = dependency_layer_root.join("dev");
+        if !path.starts_with(&runs_root) && !path.starts_with(&dev_root) {
+            return Err(
+                "commandWorkspaceRoot must stay inside dependency-layer runs/dev".to_string(),
+            );
+        }
+    }
+
+    match request.action {
+        SetupAction::PrepareDependencyInstall | SetupAction::HardenDependencyLayer => {
+            require_dependency_layer_root(request)?;
+        }
+        SetupAction::PrepareCommandWorkspace => {
+            require_dependency_layer_root(request)?;
+            require_command_workspace_root(request)?;
+        }
+        SetupAction::Status
+        | SetupAction::Initialize
+        | SetupAction::Repair
+        | SetupAction::Upgrade
+        | SetupAction::Uninstall => {}
+    }
 
     Ok(())
 }
@@ -411,6 +475,71 @@ fn uninstall_progress(request: &SetupRequest) -> Result<SetupResponse, String> {
     ))
 }
 
+fn prepare_dependency_install_acl_response(
+    request: &SetupRequest,
+) -> Result<SetupResponse, String> {
+    let dependency_layer_root = require_dependency_layer_root(request)?;
+    fs::create_dir_all(dependency_layer_root).map_err(|error| {
+        format!(
+            "failed to create dependency layer '{}': {error}",
+            dependency_layer_root.display()
+        )
+    })?;
+    configure_dependency_install_acls(request)?;
+
+    Ok(SetupResponse {
+        ok: true,
+        state: "ready",
+        message: "Windows sandbox dependency layer is writable for install.".to_string(),
+        policy_version: request.policy_version,
+    })
+}
+
+fn harden_dependency_layer_acl_response(request: &SetupRequest) -> Result<SetupResponse, String> {
+    let dependency_layer_root = require_dependency_layer_root(request)?;
+    fs::create_dir_all(dependency_layer_root.join("runs")).map_err(|error| {
+        format!(
+            "failed to create dependency run workspace root '{}': {error}",
+            dependency_layer_root.join("runs").display()
+        )
+    })?;
+    fs::create_dir_all(dependency_layer_root.join("dev")).map_err(|error| {
+        format!(
+            "failed to create dependency dev workspace root '{}': {error}",
+            dependency_layer_root.join("dev").display()
+        )
+    })?;
+    harden_dependency_layer_acls(request)?;
+
+    Ok(SetupResponse {
+        ok: true,
+        state: "ready",
+        message: "Windows sandbox dependency layer is hardened read-only for non-install commands."
+            .to_string(),
+        policy_version: request.policy_version,
+    })
+}
+
+fn prepare_command_workspace_acl_response(request: &SetupRequest) -> Result<SetupResponse, String> {
+    let command_workspace_root = require_command_workspace_root(request)?;
+    fs::create_dir_all(command_workspace_root).map_err(|error| {
+        format!(
+            "failed to create command workspace '{}': {error}",
+            command_workspace_root.display()
+        )
+    })?;
+    verify_dependency_layer_hardened_acls(request)?;
+    configure_command_workspace_acls(request)?;
+
+    Ok(SetupResponse {
+        ok: true,
+        state: "ready",
+        message: "Windows sandbox command workspace is writable and dependency layer is read-only."
+            .to_string(),
+        policy_version: request.policy_version,
+    })
+}
+
 fn provision_app_owned_directories(request: &SetupRequest) -> Result<(), String> {
     for path in [
         request.sandbox_root.as_path(),
@@ -466,7 +595,7 @@ fn verify_sandbox_account() -> Result<(), String> {
 
 #[cfg(all(target_os = "windows", not(test)))]
 fn configure_sandbox_acls(request: &SetupRequest) -> Result<(), String> {
-    windows_acl::configure_sandbox_acls(request)
+    windows_acl::apply_acl_targets(request, &base_acl_plan(request))
 }
 
 #[cfg(test)]
@@ -481,7 +610,7 @@ fn configure_sandbox_acls(_request: &SetupRequest) -> Result<(), String> {
 
 #[cfg(all(target_os = "windows", not(test)))]
 fn verify_sandbox_acls(request: &SetupRequest) -> Result<(), String> {
-    windows_acl::verify_sandbox_acls(request)
+    windows_acl::verify_acl_targets(request, &base_acl_plan(request))
 }
 
 #[cfg(test)]
@@ -496,6 +625,69 @@ fn verify_sandbox_acls(_request: &SetupRequest) -> Result<(), String> {
 #[cfg(all(not(target_os = "windows"), not(test)))]
 fn verify_sandbox_acls(_request: &SetupRequest) -> Result<(), String> {
     Err("Windows sandbox ACL verification is only supported on Windows".to_string())
+}
+
+#[cfg(all(target_os = "windows", not(test)))]
+fn configure_dependency_install_acls(request: &SetupRequest) -> Result<(), String> {
+    windows_acl::apply_acl_targets(request, &dependency_install_acl_plan(request)?)
+}
+
+#[cfg(test)]
+fn configure_dependency_install_acls(_request: &SetupRequest) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(all(not(target_os = "windows"), not(test)))]
+fn configure_dependency_install_acls(_request: &SetupRequest) -> Result<(), String> {
+    Err("Windows sandbox dependency ACL provisioning is only supported on Windows".to_string())
+}
+
+#[cfg(all(target_os = "windows", not(test)))]
+fn harden_dependency_layer_acls(request: &SetupRequest) -> Result<(), String> {
+    windows_acl::apply_acl_targets(request, &dependency_hardened_acl_plan(request)?)
+}
+
+#[cfg(test)]
+fn harden_dependency_layer_acls(_request: &SetupRequest) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(all(not(target_os = "windows"), not(test)))]
+fn harden_dependency_layer_acls(_request: &SetupRequest) -> Result<(), String> {
+    Err("Windows sandbox dependency ACL hardening is only supported on Windows".to_string())
+}
+
+#[cfg(all(target_os = "windows", not(test)))]
+fn verify_dependency_layer_hardened_acls(request: &SetupRequest) -> Result<(), String> {
+    windows_acl::verify_acl_targets(request, &dependency_hardened_acl_plan(request)?)
+}
+
+#[cfg(test)]
+fn verify_dependency_layer_hardened_acls(_request: &SetupRequest) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(all(not(target_os = "windows"), not(test)))]
+fn verify_dependency_layer_hardened_acls(_request: &SetupRequest) -> Result<(), String> {
+    Err("Windows sandbox dependency ACL verification is only supported on Windows".to_string())
+}
+
+#[cfg(all(target_os = "windows", not(test)))]
+fn configure_command_workspace_acls(request: &SetupRequest) -> Result<(), String> {
+    windows_acl::apply_acl_targets(request, &command_workspace_acl_plan(request)?)
+}
+
+#[cfg(test)]
+fn configure_command_workspace_acls(_request: &SetupRequest) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(all(not(target_os = "windows"), not(test)))]
+fn configure_command_workspace_acls(_request: &SetupRequest) -> Result<(), String> {
+    Err(
+        "Windows sandbox command workspace ACL provisioning is only supported on Windows"
+            .to_string(),
+    )
 }
 
 #[cfg(all(target_os = "windows", not(test)))]
@@ -684,6 +876,92 @@ fn validate_marker_matches_request(
     }
 
     Ok(())
+}
+
+fn base_acl_plan(request: &SetupRequest) -> Vec<SandboxAclTarget> {
+    vec![
+        SandboxAclTarget {
+            path: request.sandbox_root.clone(),
+            rights: SandboxAclRights::ReadExecute,
+            recursive: false,
+        },
+        SandboxAclTarget {
+            path: request.sandbox_root.join("state"),
+            rights: SandboxAclRights::HostOnly,
+            recursive: true,
+        },
+        SandboxAclTarget {
+            path: request.node_runtime_root.clone(),
+            rights: SandboxAclRights::ReadExecute,
+            recursive: true,
+        },
+        SandboxAclTarget {
+            path: request.workspace_root.clone(),
+            rights: SandboxAclRights::ReadExecute,
+            recursive: true,
+        },
+        SandboxAclTarget {
+            path: request.sandbox_root.join("cache"),
+            rights: SandboxAclRights::Modify,
+            recursive: true,
+        },
+        SandboxAclTarget {
+            path: request.sandbox_root.join("tmp"),
+            rights: SandboxAclRights::Modify,
+            recursive: true,
+        },
+    ]
+}
+
+fn dependency_install_acl_plan(request: &SetupRequest) -> Result<Vec<SandboxAclTarget>, String> {
+    Ok(vec![SandboxAclTarget {
+        path: require_dependency_layer_root(request)?.to_path_buf(),
+        rights: SandboxAclRights::Modify,
+        recursive: true,
+    }])
+}
+
+fn dependency_hardened_acl_plan(request: &SetupRequest) -> Result<Vec<SandboxAclTarget>, String> {
+    let dependency_layer_root = require_dependency_layer_root(request)?;
+    Ok(vec![
+        SandboxAclTarget {
+            path: dependency_layer_root.to_path_buf(),
+            rights: SandboxAclRights::ReadExecute,
+            recursive: true,
+        },
+        SandboxAclTarget {
+            path: dependency_layer_root.join("runs"),
+            rights: SandboxAclRights::Modify,
+            recursive: true,
+        },
+        SandboxAclTarget {
+            path: dependency_layer_root.join("dev"),
+            rights: SandboxAclRights::Modify,
+            recursive: true,
+        },
+    ])
+}
+
+fn command_workspace_acl_plan(request: &SetupRequest) -> Result<Vec<SandboxAclTarget>, String> {
+    Ok(vec![SandboxAclTarget {
+        path: require_command_workspace_root(request)?.to_path_buf(),
+        rights: SandboxAclRights::Modify,
+        recursive: true,
+    }])
+}
+
+fn require_dependency_layer_root(request: &SetupRequest) -> Result<&Path, String> {
+    request
+        .dependency_layer_root
+        .as_deref()
+        .ok_or_else(|| "Windows sandbox ACL request is missing dependencyLayerRoot".to_string())
+}
+
+fn require_command_workspace_root(request: &SetupRequest) -> Result<&Path, String> {
+    request
+        .command_workspace_root
+        .as_deref()
+        .ok_or_else(|| "Windows sandbox ACL request is missing commandWorkspaceRoot".to_string())
 }
 
 fn setup_required_response(request: &SetupRequest, message: impl Into<String>) -> SetupResponse {
@@ -1574,77 +1852,76 @@ mod windows_acl {
         },
     };
 
-    use super::{SetupRequest, SANDBOX_GROUP_NAME};
+    use super::{SandboxAclRights, SandboxAclTarget, SetupRequest, SANDBOX_GROUP_NAME};
 
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
     const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
     const ACCESS_ALLOWED_ACE_TYPE: u8 = 0x00;
     const FILE_READ_EXECUTE: &str = "0x1200a9";
+    const FILE_READ_EXECUTE_MASK: u32 = 0x0012_00a9;
     const FILE_MODIFY: &str = "0x1301bf";
+    const FILE_MODIFY_MASK: u32 = 0x0013_01bf;
 
-    pub fn configure_sandbox_acls(request: &SetupRequest) -> Result<(), String> {
+    pub fn apply_acl_targets(
+        request: &SetupRequest,
+        targets: &[SandboxAclTarget],
+    ) -> Result<(), String> {
         let current_user_sid = request.launcher_user_sid.as_deref().ok_or_else(|| {
             "Windows sandbox setup request is missing the launching app user SID for ACL provisioning".to_string()
         })?;
         let sandbox_group_sid = lookup_account_sid_string(SANDBOX_GROUP_NAME)?;
-        let host_only_acl = sddl_for(None, current_user_sid, &sandbox_group_sid);
-        let sandbox_traverse_acl = sddl_for(
-            Some(FILE_READ_EXECUTE),
-            current_user_sid,
-            &sandbox_group_sid,
-        );
-        let sandbox_read_execute_acl = sddl_for(
-            Some(FILE_READ_EXECUTE),
-            current_user_sid,
-            &sandbox_group_sid,
-        );
-        let sandbox_modify_acl = sddl_for(Some(FILE_MODIFY), current_user_sid, &sandbox_group_sid);
-        let cache_root = request.sandbox_root.join("cache");
-        let tmp_root = request.sandbox_root.join("tmp");
 
-        set_path_acl(&request.sandbox_root, &sandbox_traverse_acl)?;
-        apply_acl_tree(&request.sandbox_root.join("state"), &host_only_acl)?;
-        apply_acl_tree(&request.node_runtime_root, &sandbox_read_execute_acl)?;
-
-        for path in [request.workspace_root.as_path(), &cache_root, &tmp_root] {
-            apply_acl_tree(path, &sandbox_modify_acl)?;
+        for target in targets {
+            let acl = sddl_for(
+                rights_sddl(target.rights),
+                current_user_sid,
+                &sandbox_group_sid,
+            );
+            if target.recursive {
+                apply_acl_tree(&target.path, &acl)?;
+            } else {
+                set_path_acl(&target.path, &acl)?;
+            }
         }
 
         Ok(())
     }
 
-    pub fn verify_sandbox_acls(request: &SetupRequest) -> Result<(), String> {
+    pub fn verify_acl_targets(
+        request: &SetupRequest,
+        targets: &[SandboxAclTarget],
+    ) -> Result<(), String> {
         let current_user_sid = request.launcher_user_sid.as_deref().ok_or_else(|| {
             "Windows sandbox setup request is missing the launching app user SID for ACL verification".to_string()
         })?;
         let sandbox_group_sid = lookup_account_sid_string(SANDBOX_GROUP_NAME)?;
-        let cache_root = request.sandbox_root.join("cache");
-        let tmp_root = request.sandbox_root.join("tmp");
 
-        verify_path_acl(
-            &request.sandbox_root,
-            current_user_sid,
-            &sandbox_group_sid,
-            true,
-        )?;
-        verify_path_acl(
-            &request.sandbox_root.join("state"),
-            current_user_sid,
-            &sandbox_group_sid,
-            false,
-        )?;
-        verify_path_acl(
-            &request.node_runtime_root,
-            current_user_sid,
-            &sandbox_group_sid,
-            true,
-        )?;
-
-        for path in [request.workspace_root.as_path(), &cache_root, &tmp_root] {
-            verify_path_acl(path, current_user_sid, &sandbox_group_sid, true)?;
+        for target in targets {
+            verify_path_acl(
+                &target.path,
+                current_user_sid,
+                &sandbox_group_sid,
+                target.rights,
+            )?;
         }
 
         Ok(())
+    }
+
+    fn rights_sddl(rights: SandboxAclRights) -> Option<&'static str> {
+        match rights {
+            SandboxAclRights::HostOnly => None,
+            SandboxAclRights::ReadExecute => Some(FILE_READ_EXECUTE),
+            SandboxAclRights::Modify => Some(FILE_MODIFY),
+        }
+    }
+
+    fn rights_mask(rights: SandboxAclRights) -> Option<u32> {
+        match rights {
+            SandboxAclRights::HostOnly => None,
+            SandboxAclRights::ReadExecute => Some(FILE_READ_EXECUTE_MASK),
+            SandboxAclRights::Modify => Some(FILE_MODIFY_MASK),
+        }
     }
 
     fn sddl_for(
@@ -1687,7 +1964,7 @@ mod windows_acl {
         path: &Path,
         current_user_sid: &str,
         sandbox_group_sid: &str,
-        sandbox_group_expected: bool,
+        sandbox_rights: SandboxAclRights,
     ) -> Result<(), String> {
         reject_reparse_point(path)?;
         let security_descriptor = read_security_descriptor(path)?;
@@ -1710,9 +1987,10 @@ mod windows_acl {
             ));
         }
 
-        let has_sandbox_group = security_descriptor.dacl_contains_sid(sandbox_group_sid, path)?;
-        match sandbox_group_expected {
-            true if !has_sandbox_group => {
+        let sandbox_group_mask =
+            security_descriptor.dacl_access_mask_for_sid(sandbox_group_sid, path)?;
+        match (rights_mask(sandbox_rights), sandbox_group_mask) {
+            (Some(_), None) => {
                 let sddl = security_descriptor
                     .to_sddl(path)
                     .unwrap_or_else(|_| "<unavailable>".into());
@@ -1721,7 +1999,7 @@ mod windows_acl {
                     path.display()
                 ))
             }
-            false if has_sandbox_group => {
+            (None, Some(_)) => {
                 let sddl = security_descriptor
                     .to_sddl(path)
                     .unwrap_or_else(|_| "<unavailable>".into());
@@ -1730,7 +2008,16 @@ mod windows_acl {
                     path.display()
                 ))
             }
-            true | false => Ok(()),
+            (Some(expected), Some(actual)) if actual != expected => {
+                let sddl = security_descriptor
+                    .to_sddl(path)
+                    .unwrap_or_else(|_| "<unavailable>".into());
+                Err(format!(
+                    "Windows sandbox ACL on '{}' has sandbox group rights 0x{actual:x}, expected 0x{expected:x}; actual DACL: {sddl}",
+                    path.display()
+                ))
+            }
+            (Some(_), Some(_)) | (None, None) => Ok(()),
         }
     }
 
@@ -1841,6 +2128,10 @@ mod windows_acl {
         }
 
         fn dacl_contains_sid(&self, sid: &str, path: &Path) -> Result<bool, String> {
+            Ok(self.dacl_access_mask_for_sid(sid, path)?.is_some())
+        }
+
+        fn dacl_access_mask_for_sid(&self, sid: &str, path: &Path) -> Result<Option<u32>, String> {
             let target_sid = OwnedSid::from_string(sid)?;
             let mut dacl_present = 0;
             let mut dacl_defaulted = 0;
@@ -1880,6 +2171,7 @@ mod windows_acl {
                 ));
             }
 
+            let mut combined_mask = None;
             for index in 0..acl_info.AceCount {
                 let mut ace = std::ptr::null_mut();
                 let got_ace = unsafe { GetAce(dacl, index, &mut ace) };
@@ -1899,11 +2191,11 @@ mod windows_acl {
                 let ace_sid =
                     (&allowed_ace.SidStart as *const u32).cast::<core::ffi::c_void>() as PSID;
                 if unsafe { EqualSid(ace_sid, target_sid.ptr) } != 0 {
-                    return Ok(true);
+                    combined_mask = Some(combined_mask.unwrap_or(0) | allowed_ace.Mask);
                 }
             }
 
-            Ok(false)
+            Ok(combined_mask)
         }
 
         fn to_sddl(&self, path: &Path) -> Result<String, String> {
@@ -2989,6 +3281,8 @@ mod tests {
             workspace_root: sandbox_root.join("workspaces"),
             launcher_user_sid: None,
             sandbox_account_password: None,
+            dependency_layer_root: None,
+            command_workspace_root: None,
             policy_version: 1,
         };
 
@@ -3006,6 +3300,8 @@ mod tests {
             node_runtime_root: absolute_fixture_path("node"),
             launcher_user_sid: None,
             sandbox_account_password: None,
+            dependency_layer_root: None,
+            command_workspace_root: None,
             policy_version: 1,
         };
         let response = handle_setup_request(request).unwrap();
@@ -3025,6 +3321,8 @@ mod tests {
             workspace_root: absolute_fixture_path("workspace"),
             launcher_user_sid: None,
             sandbox_account_password: None,
+            dependency_layer_root: None,
+            command_workspace_root: None,
             policy_version: 1,
         };
 
@@ -3055,6 +3353,8 @@ mod tests {
             node_runtime_root: sandbox_root.join("runtime").join("node"),
             launcher_user_sid: None,
             sandbox_account_password: Some(valid_sandbox_password()),
+            dependency_layer_root: None,
+            command_workspace_root: None,
             policy_version: 7,
         };
 
@@ -3091,6 +3391,8 @@ mod tests {
             node_runtime_root: sandbox_root.join("runtime").join("node"),
             launcher_user_sid: None,
             sandbox_account_password: None,
+            dependency_layer_root: None,
+            command_workspace_root: None,
             policy_version: 4,
         };
         fs::create_dir_all(sandbox_root.join("state")).unwrap();
@@ -3137,6 +3439,8 @@ mod tests {
             node_runtime_root: sandbox_root.join("runtime").join("node"),
             launcher_user_sid: None,
             sandbox_account_password: None,
+            dependency_layer_root: None,
+            command_workspace_root: None,
             policy_version: 5,
         };
         fs::create_dir_all(sandbox_root.join("state")).unwrap();
@@ -3165,6 +3469,149 @@ mod tests {
         assert_eq!(response.state, "setup-required");
         assert!(response.message.contains("network filtering"));
 
+        let _ = fs::remove_dir_all(sandbox_root);
+    }
+
+    #[test]
+    fn base_acl_plan_keeps_workspaces_read_execute_not_modify() {
+        let sandbox_root = unique_fixture_root("acl-plan-base");
+        let request = setup_status_request(&sandbox_root, 13);
+        let plan = base_acl_plan(&request);
+
+        assert!(plan.contains(&SandboxAclTarget {
+            path: request.sandbox_root.clone(),
+            rights: SandboxAclRights::ReadExecute,
+            recursive: false,
+        }));
+        assert!(plan.contains(&SandboxAclTarget {
+            path: request.sandbox_root.join("state"),
+            rights: SandboxAclRights::HostOnly,
+            recursive: true,
+        }));
+        assert!(plan.contains(&SandboxAclTarget {
+            path: request.workspace_root.clone(),
+            rights: SandboxAclRights::ReadExecute,
+            recursive: true,
+        }));
+        assert!(plan.contains(&SandboxAclTarget {
+            path: request.sandbox_root.join("cache"),
+            rights: SandboxAclRights::Modify,
+            recursive: true,
+        }));
+        assert!(plan.contains(&SandboxAclTarget {
+            path: request.sandbox_root.join("tmp"),
+            rights: SandboxAclRights::Modify,
+            recursive: true,
+        }));
+        assert!(!plan.iter().any(|target| {
+            target.path == request.workspace_root && target.rights == SandboxAclRights::Modify
+        }));
+    }
+
+    #[test]
+    fn dependency_acl_plans_split_install_harden_and_command_workspace() {
+        let sandbox_root = unique_fixture_root("acl-plan-dependency");
+        let mut request = setup_status_request(&sandbox_root, 14);
+        let dependency_layer = request
+            .workspace_root
+            .join("project")
+            .join(DEPENDENCY_LAYER_DIR_NAME);
+        let command_workspace = dependency_layer.join("runs").join("run-1");
+        request.dependency_layer_root = Some(dependency_layer.clone());
+        request.command_workspace_root = Some(command_workspace.clone());
+
+        validate_request(&request).expect("dependency ACL request should validate");
+
+        assert_eq!(
+            dependency_install_acl_plan(&request).unwrap(),
+            vec![SandboxAclTarget {
+                path: dependency_layer.clone(),
+                rights: SandboxAclRights::Modify,
+                recursive: true,
+            }]
+        );
+        assert_eq!(
+            dependency_hardened_acl_plan(&request).unwrap(),
+            vec![
+                SandboxAclTarget {
+                    path: dependency_layer.clone(),
+                    rights: SandboxAclRights::ReadExecute,
+                    recursive: true,
+                },
+                SandboxAclTarget {
+                    path: dependency_layer.join("runs"),
+                    rights: SandboxAclRights::Modify,
+                    recursive: true,
+                },
+                SandboxAclTarget {
+                    path: dependency_layer.join("dev"),
+                    rights: SandboxAclRights::Modify,
+                    recursive: true,
+                },
+            ]
+        );
+        assert_eq!(
+            command_workspace_acl_plan(&request).unwrap(),
+            vec![SandboxAclTarget {
+                path: command_workspace,
+                rights: SandboxAclRights::Modify,
+                recursive: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn dependency_acl_requests_validate_paths_and_required_fields() {
+        let sandbox_root = unique_fixture_root("acl-plan-validate");
+        let mut missing = setup_status_request(&sandbox_root, 15);
+        missing.action = SetupAction::PrepareCommandWorkspace;
+        let error = validate_request(&missing).unwrap_err();
+        assert!(error.contains("dependencyLayerRoot"));
+
+        let mut wrong_dependency = setup_status_request(&sandbox_root, 16);
+        wrong_dependency.action = SetupAction::HardenDependencyLayer;
+        wrong_dependency.dependency_layer_root = Some(
+            wrong_dependency
+                .workspace_root
+                .join("project")
+                .join("cache"),
+        );
+        let error = validate_request(&wrong_dependency).unwrap_err();
+        assert!(error.contains(DEPENDENCY_LAYER_DIR_NAME));
+
+        let mut wrong_workspace = setup_status_request(&sandbox_root, 17);
+        wrong_workspace.action = SetupAction::PrepareCommandWorkspace;
+        let dependency_layer = wrong_workspace
+            .workspace_root
+            .join("project")
+            .join(DEPENDENCY_LAYER_DIR_NAME);
+        wrong_workspace.dependency_layer_root = Some(dependency_layer.clone());
+        wrong_workspace.command_workspace_root = Some(dependency_layer.join("node_modules"));
+        let error = validate_request(&wrong_workspace).unwrap_err();
+        assert!(error.contains("runs/dev"));
+    }
+
+    #[test]
+    fn dependency_acl_actions_run_without_elevation_gate() {
+        let _guard = elevation_override_lock().lock().unwrap();
+        std::env::set_var("NCB_SANDBOX_TEST_ELEVATED", "0");
+        let sandbox_root = unique_fixture_root("acl-action-no-elevation");
+        let mut request = setup_status_request(&sandbox_root, 18);
+        let dependency_layer = request
+            .workspace_root
+            .join("project")
+            .join(DEPENDENCY_LAYER_DIR_NAME);
+        request.action = SetupAction::HardenDependencyLayer;
+        request.dependency_layer_root = Some(dependency_layer.clone());
+
+        let response = handle_setup_request(request).unwrap();
+
+        assert!(response.ok);
+        assert_eq!(response.state, "ready");
+        assert!(dependency_layer.join("runs").is_dir());
+        assert!(dependency_layer.join("dev").is_dir());
+
+        std::env::remove_var("NCB_SANDBOX_TEST_ELEVATED");
         let _ = fs::remove_dir_all(sandbox_root);
     }
 
@@ -3316,6 +3763,8 @@ mod tests {
             node_runtime_root: sandbox_root.join("runtime").join("node"),
             launcher_user_sid: None,
             sandbox_account_password: Some(valid_sandbox_password()),
+            dependency_layer_root: None,
+            command_workspace_root: None,
             policy_version: 1,
         };
 
@@ -3342,6 +3791,8 @@ mod tests {
             node_runtime_root: sandbox_root.join("runtime").join("node"),
             launcher_user_sid: None,
             sandbox_account_password: None,
+            dependency_layer_root: None,
+            command_workspace_root: None,
             policy_version: 1,
         };
 
@@ -3443,6 +3894,8 @@ mod tests {
             node_runtime_root: sandbox_root.join("runtime").join("node"),
             launcher_user_sid: None,
             sandbox_account_password: None,
+            dependency_layer_root: None,
+            command_workspace_root: None,
             policy_version: 1,
         };
 
@@ -3486,6 +3939,8 @@ mod tests {
             node_runtime_root: sandbox_root.join("runtime").join("node"),
             launcher_user_sid: None,
             sandbox_account_password: None,
+            dependency_layer_root: None,
+            command_workspace_root: None,
             policy_version,
         }
     }

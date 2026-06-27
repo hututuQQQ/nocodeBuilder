@@ -124,6 +124,7 @@ impl SandboxManager {
             self.workspace_manager
                 .prepare_run(project_id, project_dir)?
         };
+        self.prepare_workspace_acls(&workspace)?;
         let (network, network_proxy) =
             prepare_network_policy(policy.network, project_id, Some(&workspace.cache_root))?;
         policy.network = network;
@@ -162,6 +163,22 @@ impl SandboxManager {
 
     pub fn reset_project(&self, project_id: &str) -> Result<(), SandboxError> {
         self.workspace_manager.reset_project(project_id)
+    }
+
+    pub fn harden_dependency_layer(
+        &self,
+        workspace: &SandboxWorkspace,
+    ) -> Result<(), SandboxError> {
+        #[cfg(target_os = "windows")]
+        {
+            return WindowsNativeBackend::default().harden_dependency_layer(workspace);
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = workspace;
+            Ok(())
+        }
     }
 
     pub fn initialize_windows(&self) -> Result<SandboxHealth, SandboxError> {
@@ -221,6 +238,28 @@ impl SandboxManager {
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             UnsupportedBackend::default().spawn(request)
+        }
+    }
+
+    fn prepare_workspace_acls(&self, workspace: &SandboxWorkspace) -> Result<(), SandboxError> {
+        #[cfg(target_os = "windows")]
+        {
+            let backend = WindowsNativeBackend::default();
+            return match workspace.kind {
+                crate::sandbox::workspace::SandboxWorkspaceKind::Install => {
+                    backend.prepare_dependency_install(workspace)
+                }
+                crate::sandbox::workspace::SandboxWorkspaceKind::Run
+                | crate::sandbox::workspace::SandboxWorkspaceKind::DevServer => {
+                    backend.prepare_command_workspace(workspace)
+                }
+            };
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = workspace;
+            Ok(())
         }
     }
 }
