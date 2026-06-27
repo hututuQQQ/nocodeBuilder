@@ -2,6 +2,7 @@ use chrono::Utc;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::str;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
@@ -172,11 +173,12 @@ async fn llm_chat_completion_stream(
 
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
+    let mut pending_utf8 = Vec::new();
     let mut assistant_content = String::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| format!("stream: {error}"))?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        push_utf8_chunk(&mut buffer, &mut pending_utf8, &chunk)?;
 
         while let Some((event_text, boundary_len)) = next_sse_event(&buffer) {
             let event_text = event_text.to_string();
@@ -189,6 +191,8 @@ async fn llm_chat_completion_stream(
             )?;
         }
     }
+
+    finish_utf8_stream(&pending_utf8)?;
 
     if !buffer.trim().is_empty() {
         let event_text = buffer.clone();
@@ -226,6 +230,49 @@ async fn llm_chat_completion_stream(
 
 fn resolve_llm_timeout_secs(requested: Option<u64>, default_secs: u64) -> u64 {
     requested.unwrap_or(default_secs).clamp(5, 600)
+}
+
+fn push_utf8_chunk(
+    buffer: &mut String,
+    pending_utf8: &mut Vec<u8>,
+    chunk: &[u8],
+) -> Result<(), String> {
+    pending_utf8.extend_from_slice(chunk);
+
+    match str::from_utf8(pending_utf8) {
+        Ok(text) => {
+            buffer.push_str(text);
+            pending_utf8.clear();
+            Ok(())
+        }
+        Err(error) => {
+            let valid_up_to = error.valid_up_to();
+
+            if valid_up_to > 0 {
+                let valid = str::from_utf8(&pending_utf8[..valid_up_to])
+                    .map_err(|error| format!("stream: invalid UTF-8 response: {error}"))?;
+                buffer.push_str(valid);
+                pending_utf8.drain(..valid_up_to);
+            }
+
+            if let Some(error_len) = error.error_len() {
+                return Err(format!(
+                    "stream: invalid UTF-8 response near byte {}",
+                    valid_up_to + error_len
+                ));
+            }
+
+            Ok(())
+        }
+    }
+}
+
+fn finish_utf8_stream(pending_utf8: &[u8]) -> Result<(), String> {
+    if pending_utf8.is_empty() {
+        return Ok(());
+    }
+
+    Err("stream: incomplete UTF-8 response".to_string())
 }
 
 fn next_sse_event(buffer: &str) -> Option<(&str, usize)> {
@@ -281,6 +328,54 @@ fn process_sse_event(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{finish_utf8_stream, next_sse_event, push_utf8_chunk};
+
+    #[test]
+    fn push_utf8_chunk_preserves_multibyte_characters_split_across_chunks() {
+        let event = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"必须显示中文需求\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let bytes = event.as_bytes();
+
+        for split_at in 1..bytes.len() {
+            let mut buffer = String::new();
+            let mut pending_utf8 = Vec::new();
+
+            push_utf8_chunk(&mut buffer, &mut pending_utf8, &bytes[..split_at])
+                .expect("first chunk decodes");
+            push_utf8_chunk(&mut buffer, &mut pending_utf8, &bytes[split_at..])
+                .expect("second chunk decodes");
+            finish_utf8_stream(&pending_utf8).expect("utf8 stream complete");
+
+            assert_eq!(buffer, event, "failed split at byte {split_at}");
+        }
+    }
+
+    #[test]
+    fn push_utf8_chunk_rejects_incomplete_final_sequence() {
+        let mut buffer = String::new();
+        let mut pending_utf8 = Vec::new();
+
+        push_utf8_chunk(&mut buffer, &mut pending_utf8, &[0xe4, 0xb8])
+            .expect("incomplete chunk is held for the next chunk");
+
+        assert_eq!(buffer, "");
+        assert!(finish_utf8_stream(&pending_utf8).is_err());
+    }
+
+    #[test]
+    fn next_sse_event_supports_crlf_and_lf_boundaries() {
+        assert_eq!(
+            next_sse_event("data: one\r\n\r\nrest"),
+            Some(("data: one", 4))
+        );
+        assert_eq!(next_sse_event("data: one\n\nrest"), Some(("data: one", 2)));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
