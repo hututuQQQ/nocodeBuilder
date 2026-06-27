@@ -16,6 +16,7 @@ import {
 import type {
   AgentEvent,
   AgentRunFailureKind,
+  VerificationReport,
 } from "../agent-core/types";
 import { specApi } from "../services/specs";
 import {
@@ -35,7 +36,10 @@ import {
   computeAcceptanceResults,
   validateSpecForApproval,
 } from "../spec-core/validators";
-import { diagnoseSpecBlock } from "../spec-core/blockTriage";
+import {
+  diagnoseSpecBlock,
+  type SpecBlockDiagnosis,
+} from "../spec-core/blockTriage";
 import {
   isTerminalSpecStatus,
   markSpecBlocked,
@@ -1301,9 +1305,11 @@ async function executeSpecTasks(
       failureKind: result.failureKind,
       failureReason: result.failureReason,
       projectId: project.id,
+      projectError: store.get().projectError,
       report,
       runId: run?.id ?? runId,
       runStatus: run?.status,
+      spec: latestExecutionSpec,
     });
     const failureMessage = failureDetails.message;
 
@@ -1316,6 +1322,7 @@ async function executeSpecTasks(
         latestTask,
         failureMessage,
         failureDetails.failureKind,
+        failureDetails.blockDiagnosis,
       )
     ) {
       continue;
@@ -1446,9 +1453,11 @@ async function reconcileAndContinueSpecExecution(
 
   const failureDetails = await getSpecRunFailureDetails({
     projectId: project.id,
+    projectError: store.get().projectError,
     report,
     runId: run.id,
     runStatus: run.status,
+    spec,
   });
   const failureMessage = failureDetails.message;
 
@@ -1460,6 +1469,7 @@ async function reconcileAndContinueSpecExecution(
       runningTask,
       failureMessage,
       failureDetails.failureKind,
+      failureDetails.blockDiagnosis,
     )
   ) {
     if (!refreshSpecExecutionSession(session)) {
@@ -2418,9 +2428,13 @@ async function resetSpecTaskAndExecute(
 function canAutoRetrySpecTask(
   task: SpecTask,
   failureKind?: AgentRunFailureKind,
+  blockDiagnosis?: SpecBlockDiagnosis,
 ) {
   return (
-    failureKind !== "loop_exhausted" &&
+    (
+      failureKind !== "loop_exhausted" ||
+      isTargetedLoopAutoRetryPlan(blockDiagnosis)
+    ) &&
     (task.autoRetryCount ?? 0) < SPEC_TASK_AUTO_RETRY_LIMIT
   );
 }
@@ -2431,8 +2445,9 @@ async function saveAutoRetrySpecTask(
   task: SpecTask,
   reason: string,
   failureKind?: AgentRunFailureKind,
+  blockDiagnosis?: SpecBlockDiagnosis,
 ) {
-  if (!canAutoRetrySpecTask(task, failureKind)) {
+  if (!canAutoRetrySpecTask(task, failureKind, blockDiagnosis)) {
     return false;
   }
 
@@ -2462,6 +2477,14 @@ async function saveAutoRetrySpecTask(
   }));
 
   return true;
+}
+
+function isTargetedLoopAutoRetryPlan(blockDiagnosis?: SpecBlockDiagnosis) {
+  const plan = blockDiagnosis?.recommendedPlan;
+
+  return plan?.action === "retry_with_suggested_action" &&
+    plan.targetedRetry === true &&
+    Boolean(plan.suggestedAction);
 }
 
 function prepareSpecForAutoRetry(spec: DevelopmentSpec, task: SpecTask) {
@@ -2670,27 +2693,37 @@ function compactRetryContext(value: string, maxLength = 10_000) {
 async function getSpecRunFailureDetails({
   failureKind,
   failureReason,
+  projectError,
   projectId,
   report,
   runId,
   runStatus,
+  spec,
 }: {
   failureKind?: AgentRunFailureKind;
   failureReason?: string;
+  projectError?: string | null;
   projectId: string;
-  report: {
-    missingEvidence: string[];
-    newlyIntroducedFailures: string[];
-    repairFeedback: string[];
-  } | null | undefined;
+  report: VerificationReport | null | undefined;
   runId?: string;
   runStatus: string | undefined;
+  spec?: DevelopmentSpec;
 }) {
   const terminalDetails = runId
     ? await getRunTerminalFailureDetails(projectId, runId)
     : {};
+  const blockDiagnosis = spec && runId
+    ? await getSpecRunBlockDiagnosis({
+        projectError,
+        projectId,
+        report,
+        runId,
+        spec,
+      })
+    : undefined;
 
   return {
+    blockDiagnosis,
     failureKind: failureKind ?? terminalDetails.failureKind,
     message: getFailedSpecRunMessage(
       runStatus,
@@ -2698,6 +2731,37 @@ async function getSpecRunFailureDetails({
       failureReason ?? terminalDetails.failureReason,
     ),
   };
+}
+
+async function getSpecRunBlockDiagnosis({
+  projectError,
+  projectId,
+  report,
+  runId,
+  spec,
+}: {
+  projectError?: string | null;
+  projectId: string;
+  report: VerificationReport | null | undefined;
+  runId: string;
+  spec: DevelopmentSpec;
+}): Promise<SpecBlockDiagnosis | undefined> {
+  const revision = getCurrentSpecRevision(spec);
+  const latestRun = await agentRuntimeApi
+    .getRun(projectId, runId)
+    .catch(() => null);
+  const latestCheckpoint = await agentRuntimeApi
+    .getLatestCheckpoint(projectId, runId)
+    .catch(() => null);
+
+  return diagnoseSpecBlock({
+    latestCheckpoint,
+    latestRun,
+    latestVerificationReport: report ?? null,
+    projectError,
+    revision,
+    spec,
+  });
 }
 
 async function getRunTerminalFailureDetails(projectId: string, runId: string) {

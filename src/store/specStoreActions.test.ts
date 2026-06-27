@@ -1897,6 +1897,103 @@ describe("spec store actions", () => {
     expect(store.get().terminalLogs.join("\n")).not.toContain("Auto-retrying task task-1");
   });
 
+  it("auto-retries loop-exhausted terminal runs when diagnosis has a targeted recovery", async () => {
+    const revision = createExecutableRevision({
+      tasks: [
+        createExecutableTask("task-1", {
+          runId: "run-loop",
+          status: "running",
+        }),
+      ],
+    });
+    const spec = createSpec({
+      currentRevisionId: revision.id,
+      revisions: [revision],
+      status: "building",
+    });
+    fake.agentRuns.set("run-loop", createRun("run-loop", {
+      completedAt: "2026-01-01T00:02:00.000Z",
+      phase: "budget_exceeded",
+      status: "budget_exceeded",
+    }));
+    fake.events.set("run-loop", [
+      {
+        artifactIds: [],
+        id: "event-loop",
+        payload: {
+          failureKind: "loop_exhausted",
+          reason: "Read-only exploration repeated before a targeted search.",
+        },
+        runId: "run-loop",
+        sequence: 1,
+        timestamp: "2026-01-01T00:02:00.000Z",
+        type: "run.budget_exceeded",
+      },
+    ]);
+    fake.checkpoints.set("run-loop", createCheckpoint("run-loop", {
+      plan: {
+        __headlessRunController: {
+          workingState: {
+            currentBlocker: {
+              code: "LOOP_EXHAUSTED",
+              fingerprint: "tool_call:read_files:{\"paths\":[\"app/page.tsx\"]}",
+              message: "Read-only exploration repeated before a targeted search.",
+              suggestedAction: {
+                args: { query: "OrderForm", paths: ["components"] },
+                rationale: "Find the component before retrying.",
+                tool: "grep_files",
+                type: "tool_call",
+              },
+            },
+            evidence: {
+              acceptanceEvidence: [],
+              diagnostics: [],
+              mutations: [],
+              readFiles: [],
+              searches: [],
+            },
+            objective: "Implement feature",
+            repeatedActionCount: 3,
+          },
+        },
+      },
+    }));
+    fake.runSpecTaskRuntime.mockImplementation(async (input: RuntimeInput) => {
+      const run = createRun(input.runId, {
+        completedAt: "2026-01-01T00:03:00.000Z",
+        phase: "completed",
+        status: "completed",
+      });
+      const verificationReport = createVerificationReport(input.runId, "passed");
+      fake.agentRuns.set(input.runId, run);
+      fake.verificationReports.set(input.runId, verificationReport);
+
+      return {
+        run,
+        verificationReport,
+      };
+    });
+    const store = createStore({
+      currentSpec: spec,
+    });
+    const actions = createSpecActions(store as never);
+
+    await actions.continueCurrentSpecExecution();
+
+    const task = store.get().currentSpec?.revisions[0].tasks[0];
+    expect(fake.runSpecTaskRuntime).toHaveBeenCalledTimes(1);
+    expect(fake.runSpecTaskRuntime.mock.calls[0][0]).toMatchObject({
+      resumeObservation: {
+        tool: "spec_retry_context",
+      },
+    });
+    expect(task).toMatchObject({
+      autoRetryCount: 1,
+      status: "passed",
+    });
+    expect(store.get().terminalLogs.join("\n")).toContain("Auto-retrying task task-1");
+  });
+
   it("blocks completion when a required acceptance criterion is pending", async () => {
     const revision = createExecutableRevision({
       tasks: [
