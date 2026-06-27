@@ -327,6 +327,43 @@ describe("agent context compression", () => {
       column: 3,
     });
   });
+
+  it("retains structured observation suggestedAction through compression", () => {
+    const context = createAgentStepContext({
+      observations: [
+        {
+          content: "Structured failure",
+          ok: false,
+          step: 1,
+          summary: "Read before write",
+          tool: "policy",
+          structuredData: {
+            ok: false,
+            summary: "Read before write",
+            tool: "policy",
+            error: {
+              code: "MUST_READ_BEFORE_WRITE",
+              message: "Read app/page.tsx before editing.",
+              retryable: true,
+              suggestedAction: {
+                type: "tool_call",
+                tool: "read_files",
+                args: { paths: ["app/page.tsx"] },
+              },
+            },
+          },
+        },
+      ],
+    });
+
+    const compressed = compressAgentStepContext(context);
+
+    expect(compressed.observations[0]?.structuredData?.error?.suggestedAction)
+      .toMatchObject({
+        type: "tool_call",
+        tool: "read_files",
+      });
+  });
 });
 
 function createAgentStepContext(

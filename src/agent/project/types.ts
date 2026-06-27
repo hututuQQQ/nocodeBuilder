@@ -1,6 +1,7 @@
 import type { ProjectFileInput } from "../../services/projects";
 import type {
   AgentBudgetState,
+  AgentFinishEvidence,
   AgentStructuredObservation,
   AgentWorkingState,
   RunContextSummary,
@@ -190,6 +191,7 @@ export type AgentStepResponse =
       type: "finish_candidate";
       summary: string;
       verification?: string;
+      evidence?: AgentFinishEvidence;
     };
 
 export type AgentCommand =

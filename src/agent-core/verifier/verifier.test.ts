@@ -63,6 +63,78 @@ describe("AgentVerifier", () => {
     expect(report.checks.find((check) => check.id === "preview")).toBeUndefined();
   });
 
+  it("passes no-op finish evidence when acceptance evidence explains the result", async () => {
+    const run = createRun("Confirm the existing page already satisfies the request", "component_edit");
+    const verifier = new AgentVerifier({
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+      }),
+      runCommand: async (command) =>
+        command === "npm run build"
+          ? { command, exitCode: 0, output: "ok", success: true }
+          : null,
+    });
+
+    const report = await verifier.verify({
+      changedFiles: [],
+      finishEvidence: {
+        noOpReason: "The requested copy is already present in app/page.tsx.",
+        acceptanceEvidence: [
+          {
+            criterionId: "request-addressed",
+            evidence: "Read app/page.tsx and confirmed the requested copy already exists.",
+          },
+        ],
+      },
+      packageChanged: false,
+      readSnapshots: [
+        {
+          contentHash: "hash",
+          path: "app/page.tsx",
+          readAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      run,
+    });
+
+    expect(report.status).toBe("passed");
+    expect(report.checks.find((check) => check.id === "acceptance:request-addressed"))
+      .toMatchObject({
+        status: "passed",
+        summary: expect.stringContaining("Finish evidence"),
+      });
+  });
+
+  it("keeps no-change finish candidates inconclusive when finish evidence is missing", async () => {
+    const run = createRun("Confirm the existing page already satisfies the request", "component_edit");
+    const verifier = new AgentVerifier({
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+      }),
+      runCommand: async (command) =>
+        command === "npm run build"
+          ? { command, exitCode: 0, output: "ok", success: true }
+          : null,
+    });
+
+    const report = await verifier.verify({
+      changedFiles: [],
+      packageChanged: false,
+      run,
+    });
+
+    expect(report.status).toBe("inconclusive");
+    expect(report.missingEvidence).toContain(
+      "No non-model evidence shows that the request was addressed.",
+    );
+  });
+
   it("fails required preview checks when bridge diagnostics report runtime errors", async () => {
     const run = createRun("Build a complete landing page", "full_site");
     const artifacts: Array<{ content: string; mediaType: string; relativePath: string }> = [];

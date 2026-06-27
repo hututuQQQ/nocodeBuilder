@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { AgentRun, VerificationReport } from "../agent-core/types";
+import type {
+  AgentFailureCode,
+  AgentRun,
+  AgentRunCheckpoint,
+  SuggestedAgentAction,
+  VerificationReport,
+} from "../agent-core/types";
 import type { DevelopmentSpec, SpecRevision, SpecTask } from "./types";
 import { diagnoseSpecBlock } from "./blockTriage";
 
@@ -42,11 +48,11 @@ describe("diagnoseSpecBlock", () => {
 
     expect(diagnosis.kind).toBe("build_blocked");
     expect(diagnosis.recommendedPlan).toMatchObject({
-      action: "retry_task",
+      action: "retry_with_suggested_action",
       taskId: "task-1",
     });
-    if (diagnosis.recommendedPlan.action !== "retry_task") {
-      throw new Error("Expected retry_task recovery plan.");
+    if (diagnosis.recommendedPlan.action !== "retry_with_suggested_action") {
+      throw new Error("Expected retry_with_suggested_action recovery plan.");
     }
     expect(diagnosis.recommendedPlan.note).toContain("app/page.tsx:12:7");
     expect(diagnosis.recommendedPlan.note).toContain("Type error");
@@ -69,7 +75,7 @@ describe("diagnoseSpecBlock", () => {
     });
 
     expect(diagnosis.kind).toBe("build_blocked");
-    expect(diagnosis.recommendedPlan.action).toBe("retry_verification");
+    expect(diagnosis.recommendedPlan.action).toBe("ignore_preexisting");
   });
 
   it("detects scope blocked failures", () => {
@@ -86,7 +92,101 @@ describe("diagnoseSpecBlock", () => {
     });
 
     expect(diagnosis.kind).toBe("scope_blocked");
-    expect(diagnosis.recommendedPlan.action).toBe("expand_scope_and_retry");
+    expect(diagnosis.recommendedPlan.action).toBe("expand_scope");
+  });
+
+  it("uses checkpoint workingState blockers to recommend scope expansion", () => {
+    const task = createTask({
+      status: "failed",
+      runId: "run-1",
+    });
+    const revision = createRevision({ tasks: [task] });
+    const diagnosis = diagnoseSpecBlock({
+      spec: createSpec(revision),
+      revision,
+      latestRun: createRun("run-1"),
+      latestCheckpoint: createCheckpoint({
+        code: "OUTSIDE_ALLOWED_PATH",
+        message: "app/api/orders/route.ts is outside allowed paths.",
+      }),
+    });
+
+    expect(diagnosis.kind).toBe("scope_blocked");
+    expect(diagnosis.recommendedPlan).toMatchObject({
+      action: "expand_scope",
+      taskId: "task-1",
+      contractPatch: {
+        scope: {
+          extraAllowedPaths: expect.any(Array),
+        },
+      },
+    });
+  });
+
+  it("allows one targeted retry when loop exhausted has a distinct suggested action", () => {
+    const task = createTask({
+      status: "failed",
+      runId: "run-1",
+    });
+    const revision = createRevision({ tasks: [task] });
+    const diagnosis = diagnoseSpecBlock({
+      spec: createSpec(revision),
+      revision,
+      latestRun: createRun("run-1"),
+      latestCheckpoint: createCheckpoint({
+        code: "LOOP_EXHAUSTED",
+        message: "Loop exhausted.",
+        fingerprint: "tool_call:read_files:same",
+        suggestedAction: {
+          type: "tool_call",
+          tool: "grep_files",
+          args: { query: "OrderForm", paths: ["components"] },
+          rationale: "Find the component before retrying.",
+        },
+      }),
+    });
+
+    expect(diagnosis.kind).toBe("runtime_blocked");
+    expect(diagnosis.recommendedPlan).toMatchObject({
+      action: "retry_with_suggested_action",
+      targetedRetry: true,
+    });
+  });
+
+  it("can accept no-op recovery when checkpoint finish evidence explains it", () => {
+    const task = createTask({
+      status: "failed",
+      runId: "run-1",
+    });
+    const revision = createRevision({ tasks: [task] });
+    const diagnosis = diagnoseSpecBlock({
+      spec: createSpec(revision),
+      revision,
+      latestRun: createRun("run-1"),
+      latestCheckpoint: createCheckpoint({
+        code: "MISSING_ACCEPTANCE_EVIDENCE",
+        message: "The task had no file changes but reported no-op evidence.",
+        suggestedAction: {
+          type: "finish_candidate",
+          summary: "Existing implementation already satisfies the task.",
+          evidence: {
+            noOpReason: "Existing implementation already satisfies the task.",
+            acceptanceEvidence: [
+              {
+                criterionId: "criterion-1",
+                evidence: "app/page.tsx already renders the required state.",
+              },
+            ],
+          },
+        },
+      }),
+    });
+
+    expect(diagnosis.kind).toBe("acceptance_blocked");
+    expect(diagnosis.recommendedPlan).toMatchObject({
+      action: "accept_noop",
+      reason: "Existing implementation already satisfies the task.",
+    });
   });
 
   it("detects runtime blocked missing runs", () => {
@@ -256,5 +356,42 @@ function createReport(
     repairFeedback: ["Fix task"],
     runId,
     status,
+  };
+}
+
+function createCheckpoint(blocker: {
+  code: AgentFailureCode;
+  message: string;
+  fingerprint?: string;
+  suggestedAction?: SuggestedAgentAction;
+}): AgentRunCheckpoint {
+  return {
+    changedFiles: [],
+    createdAt: "2026-01-01T00:00:00Z",
+    deletedFiles: [],
+    id: "checkpoint-1",
+    observations: [],
+    packageChanged: false,
+    plan: {
+      __headlessRunController: {
+        workingState: {
+          objective: "Implement feature",
+          repeatedActionCount: 0,
+          currentBlocker: blocker,
+          evidence: {
+            acceptanceEvidence: [],
+            diagnostics: [],
+            mutations: [],
+            readFiles: [],
+            searches: [],
+          },
+        },
+      },
+    },
+    readSnapshots: [],
+    repairFeedback: [],
+    runId: "run-1",
+    steeringWatermark: 0,
+    workspaceFingerprint: "workspace",
   };
 }

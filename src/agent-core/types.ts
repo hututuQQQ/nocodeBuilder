@@ -73,6 +73,7 @@ export type SuggestedAgentAction =
       type: "finish_candidate";
       summary: string;
       verification?: string;
+      evidence?: AgentFinishEvidence;
     }
   | {
       type: "answer";
@@ -118,13 +119,31 @@ export type AgentStructuredObservation = {
       endLine?: number;
       contentHash?: string;
     }>;
+    searches?: Array<{
+      tool: string;
+      fingerprint: string;
+      resultCount?: number;
+      newPaths?: string[];
+      summary: string;
+    }>;
     changedFiles?: string[];
     deletedFiles?: string[];
     command?: string;
     commandSuccess?: boolean;
     previewUrl?: string | null;
     acceptanceCriteriaIds?: string[];
+    acceptanceEvidence?: AgentFinishEvidence["acceptanceEvidence"];
   };
+};
+
+export type AgentFinishEvidence = {
+  readFiles?: string[];
+  changedFiles?: string[];
+  noOpReason?: string;
+  acceptanceEvidence?: Array<{
+    criterionId: string;
+    evidence: string;
+  }>;
 };
 
 export type AgentEvidenceLedger = {

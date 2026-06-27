@@ -198,6 +198,8 @@ async function executeAgentToolCore(
   switch (step.tool) {
       case "list_files": {
         const fileTree = await projectApi.listFiles(project.id);
+        const paths = getAllowedFilePaths(fileTree);
+        const summary = "Listed project files.";
         store.set({ fileTree });
 
         return {
@@ -205,7 +207,14 @@ async function executeAgentToolCore(
             content: formatProjectFileTree(fileTree),
             ok: true,
             step: observationStep,
-            summary: "Listed project files.",
+            structuredData: buildSearchStructuredObservation({
+              fingerprint: buildSearchFingerprint(step.tool, {}),
+              newPaths: paths,
+              resultCount: paths.length,
+              summary,
+              tool: step.tool,
+            }),
+            summary,
             tool: step.tool,
           }),
         };
@@ -264,13 +273,22 @@ async function executeAgentToolCore(
           .filter((path) => matchesSearchPaths(path, step.args.paths))
           .slice(0, MAX_GREP_FILES);
         const results = await grepProjectFiles(project, files, step.args);
+        const paths = uniqueStrings(results.map((result) => result.path));
+        const summary = `Found ${results.length} match(es) for "${step.args.query}".`;
 
         return {
           observation: createAgentObservation({
             content: JSON.stringify({ results }, null, 2),
             ok: true,
             step: observationStep,
-            summary: `Found ${results.length} match(es) for "${step.args.query}".`,
+            structuredData: buildSearchStructuredObservation({
+              fingerprint: buildSearchFingerprint(step.tool, step.args),
+              newPaths: paths,
+              resultCount: results.length,
+              summary,
+              tool: step.tool,
+            }),
+            summary,
             tool: step.tool,
           }),
         };
@@ -281,13 +299,21 @@ async function executeAgentToolCore(
         const matches = getAllowedFilePaths(fileTree)
           .filter((path) => matcher(path))
           .slice(0, step.args.maxResults ?? 100);
+        const summary = `Matched ${matches.length} file(s) for ${step.args.pattern}.`;
 
         return {
           observation: createAgentObservation({
             content: JSON.stringify({ files: matches }, null, 2),
             ok: true,
             step: observationStep,
-            summary: `Matched ${matches.length} file(s) for ${step.args.pattern}.`,
+            structuredData: buildSearchStructuredObservation({
+              fingerprint: buildSearchFingerprint(step.tool, step.args),
+              newPaths: matches,
+              resultCount: matches.length,
+              summary,
+              tool: step.tool,
+            }),
+            summary,
             tool: step.tool,
           }),
         };
@@ -1672,6 +1698,64 @@ function createAgentObservation(observation: AgentObservation): AgentObservation
       ? truncateToolOutput(observation.content)
       : observation.content,
   };
+}
+
+function buildSearchStructuredObservation({
+  fingerprint,
+  newPaths,
+  resultCount,
+  summary,
+  tool,
+}: {
+  fingerprint: string;
+  newPaths: string[];
+  resultCount: number;
+  summary: string;
+  tool: "list_files" | "grep_files" | "glob_files";
+}): AgentStructuredObservation {
+  return {
+    evidence: {
+      searches: [
+        {
+          fingerprint,
+          newPaths: uniqueStrings(newPaths),
+          resultCount,
+          summary,
+          tool,
+        },
+      ],
+    },
+    ok: true,
+    summary,
+    tool,
+  };
+}
+
+function buildSearchFingerprint(tool: string, args: unknown) {
+  return `${tool}:${stableJson(args)}`;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(",")}]`;
+  }
+
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
+  }
+
+  return JSON.stringify(value);
+}
+
+function uniqueStrings(values: string[]) {
+  return Array.from(new Set(values));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function classifyToolError(

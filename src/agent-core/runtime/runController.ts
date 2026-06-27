@@ -3,6 +3,7 @@ import type {
   AgentApprovalDecision,
   AgentEvent,
   AgentFailureCode,
+  AgentFinishEvidence,
   AgentReadSnapshot,
   AgentRun,
   AgentRunCheckpoint,
@@ -50,6 +51,7 @@ export type HeadlessModelAction =
       type: "finish_candidate";
       summary: string;
       verification?: string;
+      evidence?: AgentFinishEvidence;
     }
   | {
       type: "answer";
@@ -64,7 +66,7 @@ export type HeadlessModelAction =
     };
 
 export type RunContextBundle = {
-  observations: string[];
+  observations: unknown[];
   run: AgentRun;
   runContextSummary: RunContextSummary;
   steering: string[];
@@ -109,6 +111,7 @@ export type VerifierPort = {
     changedFiles: string[];
     deletedFiles: string[];
     externalEffects: string[];
+    finishEvidence?: AgentFinishEvidence;
     noOpReason?: string;
     packageChanged: boolean;
     readSnapshots?: AgentReadSnapshot[];
@@ -205,6 +208,7 @@ type RunDriveState = {
   expectedFileEvidenceAutoReadPaths: string[];
   expectedFileEvidenceAutoVerifyKey?: string;
   finishSummary?: string;
+  finishEvidence?: AgentFinishEvidence;
   latestReportId?: string;
   observations: unknown[];
   packageChanged: boolean;
@@ -229,6 +233,9 @@ type LoopGuardState = {
 };
 
 type ProgressGuardState = {
+  observedDiagnosticFingerprints: string[];
+  observedReadEvidenceFingerprints: string[];
+  observedSearchEvidenceFingerprints: string[];
   lastReadOnlyActionFingerprint?: string;
   readOnlyRescuedFingerprint?: string;
   readOnlyNoProgressCount: number;
@@ -448,7 +455,7 @@ export class RunController {
         manifest: runWithManifest.manifest,
         action,
         changedFiles: [...state.changedFiles],
-        recentObservations: context.observations.slice(-8),
+        recentObservations: context.observations.slice(-8).map(stringifyPayload),
         steering: context.steering,
       });
 
@@ -492,6 +499,8 @@ export class RunController {
 
       if (action.type === "finish_candidate") {
         state.finishSummary = action.summary;
+        state.finishEvidence = normalizeFinishEvidence(action.evidence);
+        appendFinishEvidenceToWorkingState(state, state.finishEvidence);
         run = await this.verifyAndAdvance(run, state, { final: true });
         continue;
       }
@@ -516,7 +525,7 @@ export class RunController {
     state.consecutiveModelValidationFailures += 1;
     const consecutiveFailures = state.consecutiveModelValidationFailures;
     state.observations.push(
-      JSON.stringify(buildModelValidationObservation(action, consecutiveFailures)),
+      buildModelValidationObservation(action, consecutiveFailures),
     );
 
     run = await this.ports.runStore.recordProgress(
@@ -693,7 +702,7 @@ export class RunController {
 
     if (!policyDecision.allowed) {
       state.observations.push(
-        JSON.stringify(buildPolicyDeniedObservation(run, action, policyDecision.reason)),
+        buildPolicyDeniedObservation(run, action, policyDecision.reason),
       );
       state.workingState.currentBlocker = {
         code: "POLICY_DENIED",
@@ -802,7 +811,7 @@ export class RunController {
     ) {
       state.preflightAutoReadFingerprints.push(actionFingerprint);
       state.observations.push(
-        JSON.stringify(buildPreflightAutoReadObservation(action, preflightReadPaths)),
+        buildPreflightAutoReadObservation(action, preflightReadPaths),
       );
       state.workingState.currentBlocker = {
         code: "MUST_READ_BEFORE_WRITE",
@@ -856,6 +865,9 @@ export class RunController {
       signal,
       tool: action.tool,
     });
+    const readOnlyInformationGain = tool.readOnly
+      ? consumeReadOnlyInformationGain(state, action.tool, result)
+      : false;
     run = await this.refreshRunRequests(run);
 
     if (run.cancelRequested || run.status === "cancelled") {
@@ -911,7 +923,7 @@ export class RunController {
         },
       },
     );
-    state.observations.push(JSON.stringify(buildToolObservation(action.tool, result)));
+    state.observations.push(buildToolObservation(action.tool, result));
 
     const autoReadRun = await this.maybeAutoReadMissingExpectedFiles(
       nextRun,
@@ -932,6 +944,7 @@ export class RunController {
 
     const progressSignal = await this.handleToolProgressSignal(nextRun, state, {
       actionFingerprint,
+      hasInformationGain: readOnlyInformationGain,
       readOnlyCount: tool.readOnly ? 1 : 0,
       resetReadOnlyStall: !tool.readOnly || mutationDelta > 0,
     });
@@ -1086,6 +1099,9 @@ export class RunController {
         }),
       ),
     );
+    const readOnlyInformationGain = results.some((result, index) =>
+      consumeReadOnlyInformationGain(state, actions[index]!.tool, result),
+    );
 
     run = await this.refreshRunRequests(run);
 
@@ -1119,7 +1135,7 @@ export class RunController {
         state.readSnapshots,
         result.workspaceEffects?.readSnapshots ?? [],
       );
-      state.observations.push(JSON.stringify(buildToolObservation(action.tool, result)));
+      state.observations.push(buildToolObservation(action.tool, result));
 
       await this.ports.eventStore.append({
         artifactIds: result.artifactIds,
@@ -1178,6 +1194,7 @@ export class RunController {
         calls: actions,
         type: "tool_calls",
       }),
+      hasInformationGain: readOnlyInformationGain,
       readOnlyCount: results.length,
       resetReadOnlyStall: results.some((result) => result.status !== "success"),
     });
@@ -1235,7 +1252,7 @@ export class RunController {
       ...missingExpectedFiles,
     ]);
     state.observations.push(
-      JSON.stringify(buildExpectedFileAutoReadObservation(missingExpectedFiles)),
+      buildExpectedFileAutoReadObservation(missingExpectedFiles),
     );
 
     await this.ports.eventStore.append({
@@ -1276,9 +1293,10 @@ export class RunController {
       changedFiles: [...state.changedFiles],
       deletedFiles: [...state.deletedFiles],
       externalEffects: [...state.externalEffects],
+      finishEvidence: state.finishEvidence,
       noOpReason: hasImplementationProgress(run, state)
         ? undefined
-        : state.finishSummary,
+        : state.finishEvidence?.noOpReason,
       packageChanged: state.packageChanged,
       readSnapshots: [...state.readSnapshots],
       run,
@@ -1303,7 +1321,7 @@ export class RunController {
       timestamp: report.createdAt,
       payload: { reportId: report.id, status: report.status },
     });
-    state.observations.push(JSON.stringify(buildVerificationObservation(report)));
+    state.observations.push(buildVerificationObservation(report));
 
     if (report.status === "passed") {
       state.pendingEvidenceVerification = undefined;
@@ -1521,14 +1539,15 @@ export class RunController {
       state.steeringWatermark,
     );
 
-    const observations = [
+    const observations: unknown[] = [
       ...buildBaselineDiagnosticObservations(run, state),
-      ...state.observations.map(stringifyPayload),
+      ...state.observations,
     ];
+    const summaryObservations = observations.map(stringifyPayload);
     state.runContextSummary = await this.refreshRunContextSummary(
       run,
       state,
-      observations,
+      summaryObservations,
       signal,
     );
     state.workingState = buildCurrentWorkingState(run, state);
@@ -1614,7 +1633,7 @@ export class RunController {
 
     state.loopGuard.rescuedFingerprint = fingerprint;
     state.observations.push(
-      JSON.stringify(buildLoopRescueObservation(signal.summary, signal.details)),
+      buildLoopRescueObservation(signal.summary, signal.details),
     );
 
     return { rescued: true, run, stopped: false };
@@ -1625,6 +1644,7 @@ export class RunController {
     state: RunDriveState,
     signal: {
       actionFingerprint?: string;
+      hasInformationGain: boolean;
       readOnlyCount: number;
       resetReadOnlyStall: boolean;
     },
@@ -1636,6 +1656,13 @@ export class RunController {
 
     const fingerprint = signal.actionFingerprint ?? "read-only:unknown";
     state.progressGuard.readOnlyNoProgressCount += signal.readOnlyCount;
+
+    if (signal.hasInformationGain) {
+      state.progressGuard.lastReadOnlyActionFingerprint = fingerprint;
+      state.progressGuard.repeatedReadOnlyActionCount = 0;
+      state.progressGuard.readOnlyStallPostRescueCount = 0;
+      return { rescued: false, run, stopped: false };
+    }
 
     if (state.progressGuard.lastReadOnlyActionFingerprint !== fingerprint) {
       state.progressGuard.lastReadOnlyActionFingerprint = fingerprint;
@@ -1694,7 +1721,7 @@ export class RunController {
     state.progressGuard.readOnlyRescuedFingerprint = fingerprint;
     state.progressGuard.readOnlyStallPostRescueCount = 0;
     state.observations.push(
-      JSON.stringify(buildReadOnlyStallRescueObservation(state, fingerprint)),
+      buildReadOnlyStallRescueObservation(state, fingerprint),
     );
 
     return { rescued: true, run, stopped: false };
@@ -1820,6 +1847,7 @@ export class RunController {
           metadata.expectedFileEvidenceAutoReadPaths ?? [],
         expectedFileEvidenceAutoVerifyKey: metadata.expectedFileEvidenceAutoVerifyKey,
         finishSummary: metadata.finishSummary,
+        finishEvidence: metadata.finishEvidence,
         latestReportId: checkpoint.latestReportId,
         observations: [...checkpoint.observations],
         packageChanged: checkpoint.packageChanged,
@@ -1915,6 +1943,7 @@ function createEmptyDriveState(
     expectedFileEvidenceAutoReadPaths: [],
     expectedFileEvidenceAutoVerifyKey: undefined,
     finishSummary: undefined,
+    finishEvidence: undefined,
     observations: [...(initial.initialObservations ?? [])],
     packageChanged: false,
     pendingEvidenceVerification: undefined,
@@ -1958,6 +1987,9 @@ const RUN_CONTEXT_SUMMARY_LLM_OBSERVATION_DELTA = 8;
 
 function createEmptyProgressGuardState(): ProgressGuardState {
   return {
+    observedDiagnosticFingerprints: [],
+    observedReadEvidenceFingerprints: [],
+    observedSearchEvidenceFingerprints: [],
     lastReadOnlyActionFingerprint: undefined,
     readOnlyRescuedFingerprint: undefined,
     readOnlyNoProgressCount: 0,
@@ -1981,8 +2013,166 @@ function createEmptyWorkingState(objective: string): AgentWorkingState {
   };
 }
 
+function normalizeFinishEvidence(value: AgentFinishEvidence | undefined) {
+  if (!value) {
+    return undefined;
+  }
+
+  const evidence: AgentFinishEvidence = {};
+  const readFiles = uniqueStrings((value.readFiles ?? [])
+    .map(normalizeProjectPath)
+    .filter(Boolean));
+  const changedFiles = uniqueStrings((value.changedFiles ?? [])
+    .map(normalizeProjectPath)
+    .filter(Boolean));
+  const acceptanceEvidence = (value.acceptanceEvidence ?? [])
+    .map((item) => ({
+      criterionId: item.criterionId.trim(),
+      evidence: compactSummaryText(item.evidence, 600),
+    }))
+    .filter((item) => item.criterionId && item.evidence);
+
+  if (readFiles.length > 0) {
+    evidence.readFiles = readFiles;
+  }
+
+  if (changedFiles.length > 0) {
+    evidence.changedFiles = changedFiles;
+  }
+
+  if (value.noOpReason?.trim()) {
+    evidence.noOpReason = compactSummaryText(value.noOpReason, 600);
+  }
+
+  if (acceptanceEvidence.length > 0) {
+    evidence.acceptanceEvidence = acceptanceEvidence;
+  }
+
+  return Object.keys(evidence).length > 0 ? evidence : undefined;
+}
+
+function appendFinishEvidenceToWorkingState(
+  state: RunDriveState,
+  evidence: AgentFinishEvidence | undefined,
+) {
+  if (!evidence) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+  state.workingState.evidence.acceptanceEvidence = [
+    ...state.workingState.evidence.acceptanceEvidence,
+    ...(evidence.acceptanceEvidence ?? []).map((item) => ({
+      criterionId: item.criterionId,
+      evidence: item.evidence,
+      source: evidence.noOpReason ? "manual" : "changed_file",
+    })),
+  ].slice(-40);
+
+  if (evidence.changedFiles?.length) {
+    state.workingState.evidence.mutations = [
+      ...state.workingState.evidence.mutations,
+      ...evidence.changedFiles.map((path) => ({
+        path,
+        action: "finish_evidence",
+        summary: "Model cited this changed file as finish evidence.",
+        at: now,
+      })),
+    ].slice(-40);
+  }
+}
+
 function resetReadOnlyNoProgress(state: RunDriveState) {
   state.progressGuard = createEmptyProgressGuardState();
+}
+
+function consumeReadOnlyInformationGain(
+  state: RunDriveState,
+  tool: string,
+  result: ToolResult,
+) {
+  const structured = readStructuredObservation(result.structuredData);
+  const readFingerprints = [
+    ...(result.workspaceEffects?.readSnapshots ?? []).map((snapshot) =>
+      buildReadEvidenceFingerprint({
+        contentHash: snapshot.contentHash,
+        endLine: snapshot.endLine,
+        path: snapshot.path,
+        startLine: snapshot.startLine,
+      }),
+    ),
+    ...(structured?.evidence?.readFiles ?? []).map(buildReadEvidenceFingerprint),
+  ];
+  const searchFingerprints = (structured?.evidence?.searches ?? []).map((search) =>
+    [
+      search.tool || tool,
+      search.fingerprint,
+      search.resultCount ?? "unknown",
+      ...(search.newPaths ?? []).map(normalizeProjectPath).sort(),
+    ].join(":"),
+  );
+  const diagnosticFingerprints = structured?.error
+    ? (
+        structured.error.diagnostics?.length
+          ? structured.error.diagnostics.map((diagnostic) =>
+              [
+                structured.error?.code,
+                normalizeProjectPath(diagnostic.path ?? ""),
+                diagnostic.line ?? "",
+                diagnostic.column ?? "",
+                diagnostic.message,
+              ].join(":"),
+            )
+          : [[
+              structured.error.code,
+              structured.error.message,
+            ].join(":")]
+      )
+    : [];
+
+  return consumeNewFingerprints(
+    state.progressGuard.observedReadEvidenceFingerprints,
+    readFingerprints,
+  ) || consumeNewFingerprints(
+    state.progressGuard.observedSearchEvidenceFingerprints,
+    searchFingerprints,
+  ) || consumeNewFingerprints(
+    state.progressGuard.observedDiagnosticFingerprints,
+    diagnosticFingerprints,
+  );
+}
+
+function buildReadEvidenceFingerprint(input: {
+  contentHash?: string;
+  endLine?: number;
+  path: string;
+  startLine?: number;
+}) {
+  return [
+    normalizeProjectPath(input.path),
+    input.startLine ?? "full",
+    input.endLine ?? "full",
+    input.contentHash ?? "unknown",
+  ].join(":");
+}
+
+function consumeNewFingerprints(seen: string[], next: string[]) {
+  let gained = false;
+
+  for (const fingerprint of next.filter(Boolean)) {
+    if (seen.includes(fingerprint)) {
+      continue;
+    }
+
+    seen.push(fingerprint);
+    gained = true;
+  }
+
+  if (seen.length > 240) {
+    seen.splice(0, seen.length - 240);
+  }
+
+  return gained;
 }
 
 function getAutoReadableMissingExpectedFiles(
@@ -2886,6 +3076,15 @@ function classifyVerificationFailureCode(report: VerificationReport): AgentFailu
 }
 
 function buildToolObservation(tool: string, result: ToolResult) {
+  const structuredObservation = readStructuredObservation(result.structuredData);
+
+  if (structuredObservation) {
+    return {
+      ...structuredObservation,
+      tool: structuredObservation.tool ?? tool,
+    };
+  }
+
   const contentSource =
     typeof result.structuredData === "undefined"
       ? result.summary
@@ -2934,6 +3133,7 @@ type CheckpointDriveStateMetadata = {
   expectedFileEvidenceAutoReadPaths?: string[];
   expectedFileEvidenceAutoVerifyKey?: string;
   finishSummary?: string;
+  finishEvidence?: AgentFinishEvidence;
   loopGuard?: LoopGuardState;
   pendingEvidenceVerification?: PendingEvidenceVerificationState;
   pendingApprovalAction?: HeadlessToolCallAction;
@@ -2960,6 +3160,7 @@ function writeDriveStateMetadata(state: RunDriveState) {
       expectedFileEvidenceAutoReadPaths: state.expectedFileEvidenceAutoReadPaths,
       expectedFileEvidenceAutoVerifyKey: state.expectedFileEvidenceAutoVerifyKey,
       finishSummary: state.finishSummary,
+      finishEvidence: state.finishEvidence,
       loopGuard: state.loopGuard,
       pendingEvidenceVerification: state.pendingEvidenceVerification,
       pendingApprovalAction: state.pendingApprovalAction,
@@ -2999,6 +3200,10 @@ function buildCurrentWorkingState(
     evidence: {
       ...existing.evidence,
       readFiles: buildWorkingStateReadEvidence(state.readSnapshots),
+      searches: uniqueWorkingSearches([
+        ...existing.evidence.searches,
+        ...collectStructuredSearches(state.observations),
+      ]).slice(-40),
       diagnostics: uniqueWorkingDiagnostics([
         ...existing.evidence.diagnostics,
         ...collectStructuredDiagnostics(state.observations),
@@ -3084,6 +3289,37 @@ function collectStructuredDiagnostics(
           at,
         }];
   });
+}
+
+function collectStructuredSearches(
+  observations: unknown[],
+): AgentWorkingState["evidence"]["searches"] {
+  return observations.flatMap((observation) => {
+    const structured = readStructuredObservation(observation);
+    const searches = structured?.evidence?.searches ?? [];
+    const at = new Date().toISOString();
+
+    return searches.map((search) => ({
+      tool: search.tool,
+      fingerprint: search.fingerprint,
+      resultCount: search.resultCount,
+      newPaths: search.newPaths,
+      summary: search.summary,
+      at,
+    }));
+  });
+}
+
+function uniqueWorkingSearches(
+  searches: AgentWorkingState["evidence"]["searches"],
+) {
+  const byKey = new Map<string, AgentWorkingState["evidence"]["searches"][number]>();
+
+  for (const search of searches) {
+    byKey.set(`${search.tool}:${search.fingerprint}`, search);
+  }
+
+  return [...byKey.values()];
 }
 
 function readStructuredObservation(value: unknown): AgentStructuredObservation | null {
@@ -3228,6 +3464,7 @@ export function readRunDriveStateMetadata(plan: unknown): CheckpointDriveStateMe
       typeof metadataRecord.finishSummary === "string"
         ? metadataRecord.finishSummary
         : undefined,
+    finishEvidence: readFinishEvidence(metadataRecord.finishEvidence),
     loopGuard: readLoopGuardState(metadataRecord.loopGuard),
     pendingEvidenceVerification: readPendingEvidenceVerificationState(
       metadataRecord.pendingEvidenceVerification,
@@ -3266,6 +3503,28 @@ function readOptionalStringArray(value: unknown) {
     : undefined;
 }
 
+function readFinishEvidence(value: unknown): AgentFinishEvidence | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  return normalizeFinishEvidence({
+    readFiles: readOptionalStringArray(value.readFiles),
+    changedFiles: readOptionalStringArray(value.changedFiles),
+    noOpReason:
+      typeof value.noOpReason === "string" ? value.noOpReason : undefined,
+    acceptanceEvidence: Array.isArray(value.acceptanceEvidence)
+      ? value.acceptanceEvidence
+          .filter(isRecord)
+          .map((item) => ({
+            criterionId:
+              typeof item.criterionId === "string" ? item.criterionId : "",
+            evidence: typeof item.evidence === "string" ? item.evidence : "",
+          }))
+      : undefined,
+  });
+}
+
 function readLoopGuardState(value: unknown): LoopGuardState | undefined {
   if (!isRecord(value)) {
     return undefined;
@@ -3289,6 +3548,12 @@ function readProgressGuardState(value: unknown): ProgressGuardState | undefined 
   }
 
   return {
+    observedDiagnosticFingerprints:
+      readOptionalStringArray(value.observedDiagnosticFingerprints) ?? [],
+    observedReadEvidenceFingerprints:
+      readOptionalStringArray(value.observedReadEvidenceFingerprints) ?? [],
+    observedSearchEvidenceFingerprints:
+      readOptionalStringArray(value.observedSearchEvidenceFingerprints) ?? [],
     lastReadOnlyActionFingerprint:
       typeof value.lastReadOnlyActionFingerprint === "string"
         ? value.lastReadOnlyActionFingerprint

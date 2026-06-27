@@ -2078,9 +2078,15 @@ async function withSpecBlockDiagnosis(
         .getLatestVerificationReport(projectId, latestRun.id)
         .catch(() => null)
     : null;
+  const latestCheckpoint = latestRun?.id
+    ? await agentRuntimeApi
+        .getLatestCheckpoint(projectId, latestRun.id)
+        .catch(() => null)
+    : null;
   const blockDiagnosis = diagnoseSpecBlock({
     spec,
     revision,
+    latestCheckpoint,
     latestRun,
     latestVerificationReport,
     projectError: store.get().projectError,
@@ -3089,7 +3095,7 @@ function applyBlockDiagnosisScopeExpansion(
   const plan = spec.blockDiagnosis?.recommendedPlan;
 
   if (
-    plan?.action !== "expand_scope_and_retry" ||
+    plan?.action !== "expand_scope" ||
     plan.taskId !== taskId ||
     plan.extraAllowedPaths.length === 0
   ) {

@@ -1,4 +1,11 @@
-import type { AgentRun, VerificationReport } from "../agent-core/types";
+import type {
+  AgentFailureCode,
+  AgentRun,
+  AgentRunCheckpoint,
+  AgentWorkingState,
+  SuggestedAgentAction,
+  VerificationReport,
+} from "../agent-core/types";
 import type { DevelopmentSpec, SpecRevision, SpecTask } from "./types";
 
 export type SpecBlockKind =
@@ -12,12 +19,30 @@ export type SpecBlockKind =
   | "external_dependency_blocked";
 
 export type SpecRecoveryPlan =
-  | { action: "retry_task"; taskId: string; note: string }
-  | { action: "expand_scope_and_retry"; taskId: string; extraAllowedPaths: string[]; note: string }
-  | { action: "revise_spec"; feedback: string }
-  | { action: "retry_verification"; note: string }
-  | { action: "continue_in_chat"; reason: string }
-  | { action: "ask_user"; question: string };
+  | {
+      action: "retry_with_suggested_action";
+      taskId: string;
+      note: string;
+      suggestedAction?: SuggestedAgentAction;
+      targetedRetry?: boolean;
+    }
+  | {
+      action: "revise_spec";
+      feedback: string;
+      contractPatch?: Record<string, unknown>;
+    }
+  | {
+      action: "expand_scope";
+      taskId: string;
+      extraAllowedPaths: string[];
+      note: string;
+      contractPatch?: Record<string, unknown>;
+    }
+  | { action: "convert_to_repair_task"; taskId: string; note: string; contractPatch?: Record<string, unknown> }
+  | { action: "accept_noop"; reason: string }
+  | { action: "ignore_preexisting"; reason: string }
+  | { action: "manual_approval"; reason: string }
+  | { action: "cancel"; reason: string };
 
 export type SpecBlockDiagnosis = {
   kind: SpecBlockKind;
@@ -32,6 +57,7 @@ export function diagnoseSpecBlock(input: {
   spec: DevelopmentSpec;
   revision: SpecRevision;
   latestRun?: AgentRun | null;
+  latestCheckpoint?: AgentRunCheckpoint | null;
   latestVerificationReport?: VerificationReport | null;
   projectError?: string | null;
 }): SpecBlockDiagnosis {
@@ -41,6 +67,27 @@ export function diagnoseSpecBlock(input: {
   const failedRunId = input.latestRun?.id ?? failedTask?.runId ?? runningTask?.runId;
   const evidence = collectEvidence(input, failedTask, runningTask);
   const evidenceText = evidence.join("\n");
+  const currentBlocker = extractCurrentBlocker(input.latestCheckpoint);
+
+  if (currentBlocker) {
+    evidence.push(`currentBlocker: ${currentBlocker.code} ${currentBlocker.message}`);
+  }
+
+  if (currentBlocker) {
+    const blockerDiagnosis = diagnoseCurrentBlocker({
+      blocker: currentBlocker,
+      evidence,
+      evidenceText,
+      failedRunId,
+      failedTask,
+      failedTaskId,
+      revision: input.revision,
+    });
+
+    if (blockerDiagnosis) {
+      return blockerDiagnosis;
+    }
+  }
 
   if (hasScopeEvidence(evidenceText)) {
     return {
@@ -50,10 +97,15 @@ export function diagnoseSpecBlock(input: {
       failedRunId,
       evidence,
       recommendedPlan: {
-        action: "expand_scope_and_retry",
+        action: "expand_scope",
         taskId: failedTaskId ?? input.revision.tasks[0]?.id ?? "unknown-task",
         extraAllowedPaths: inferExtraAllowedPaths(evidenceText, failedTask),
         note: "Expand compiled allowed paths based on the failure evidence, then retry the task.",
+        contractPatch: {
+          scope: {
+            extraAllowedPaths: inferExtraAllowedPaths(evidenceText, failedTask),
+          },
+        },
       },
     };
   }
@@ -71,7 +123,7 @@ export function diagnoseSpecBlock(input: {
       failedRunId: failedTask?.runId ?? runningTask?.runId,
       evidence,
       recommendedPlan: {
-        action: "retry_task",
+        action: "retry_with_suggested_action",
         taskId: failedTaskId ?? input.revision.tasks[0]?.id ?? "unknown-task",
         note: "Runtime state is incomplete; reset and retry the affected task.",
       },
@@ -91,8 +143,8 @@ export function diagnoseSpecBlock(input: {
           failedRunId,
           evidence,
           recommendedPlan: {
-            action: "retry_task",
-            taskId: failedTaskId ?? retryTask?.id ?? input.revision.tasks[0]?.id ?? "unknown-task",
+              action: "retry_with_suggested_action",
+              taskId: failedTaskId ?? retryTask?.id ?? input.revision.tasks[0]?.id ?? "unknown-task",
             note: [
               `Final ${input.spec.finalVerification.command} failed with actionable build output.`,
               "Use this output as retry context:",
@@ -111,8 +163,8 @@ export function diagnoseSpecBlock(input: {
         failedRunId,
         evidence,
         recommendedPlan: {
-          action: "retry_verification",
-          note: "Retry final build/install verification before revising the plan.",
+          action: "ignore_preexisting",
+          reason: "Retry final build/install verification before revising the plan; current evidence looks environmental or pre-existing.",
         },
       };
     }
@@ -139,7 +191,8 @@ export function diagnoseSpecBlock(input: {
         failedRunId,
         evidence,
         recommendedPlan: {
-          action: "retry_verification",
+          action: "retry_with_suggested_action",
+          taskId: failedTaskId ?? selectRetryableTask(input.revision)?.id ?? "unknown-task",
           note: "Retry task/final verification after checking the latest task run reports.",
         },
       };
@@ -154,7 +207,7 @@ export function diagnoseSpecBlock(input: {
       failedRunId,
       evidence,
       recommendedPlan: {
-        action: "retry_task",
+        action: "retry_with_suggested_action",
         taskId: failedTaskId ?? selectRetryableTask(input.revision)?.id ?? "unknown-task",
         note: "Retry the failed task using the latest verification feedback.",
       },
@@ -185,7 +238,7 @@ export function diagnoseSpecBlock(input: {
     evidence,
     recommendedPlan: failedTask
       ? {
-          action: "retry_task",
+          action: "retry_with_suggested_action",
           taskId: failedTask.id,
           note: "Retry the stopped task with the retained failure context.",
         }
@@ -194,6 +247,183 @@ export function diagnoseSpecBlock(input: {
           feedback: "No retryable failed task was identified; revise the Spec plan.",
         },
   };
+}
+
+function diagnoseCurrentBlocker({
+  blocker,
+  evidence,
+  evidenceText,
+  failedRunId,
+  failedTask,
+  failedTaskId,
+  revision,
+}: {
+  blocker: NonNullable<AgentWorkingState["currentBlocker"]>;
+  evidence: string[];
+  evidenceText: string;
+  failedRunId?: string;
+  failedTask: SpecTask | null;
+  failedTaskId?: string;
+  revision: SpecRevision;
+}): SpecBlockDiagnosis | null {
+  const taskId = failedTaskId ?? failedTask?.id ?? revision.tasks[0]?.id ?? "unknown-task";
+
+  if (isScopeFailure(blocker.code)) {
+    const extraAllowedPaths = inferExtraAllowedPaths(
+      [evidenceText, blocker.message].join("\n"),
+      failedTask,
+    );
+
+    return {
+      kind: "scope_blocked",
+      summary: blocker.message || "Spec task is blocked by runtime path scope or permission limits.",
+      failedTaskId,
+      failedRunId,
+      evidence,
+      recommendedPlan: {
+        action: "expand_scope",
+        taskId,
+        extraAllowedPaths,
+        note: "Expand allowed paths or revise the Spec scope before retrying.",
+        contractPatch: {
+          scope: { extraAllowedPaths },
+        },
+      },
+    };
+  }
+
+  if (blocker.code === "APPROVAL_REQUIRED") {
+    return {
+      kind: "approval_blocked",
+      summary: blocker.message,
+      failedTaskId,
+      failedRunId,
+      evidence,
+      recommendedPlan: {
+        action: "manual_approval",
+        reason: blocker.message,
+      },
+    };
+  }
+
+  if (blocker.code === "TASK_CLASSIFICATION_MISMATCH") {
+    return {
+      kind: "plan_blocked",
+      summary: blocker.message,
+      failedTaskId,
+      failedRunId,
+      evidence,
+      recommendedPlan: {
+        action: "convert_to_repair_task",
+        taskId,
+        note: "The AgentRun contract was too read-only for the requested repair.",
+        contractPatch: { taskType: "component_edit", permissions: { fileWrite: true } },
+      },
+    };
+  }
+
+  if (
+    blocker.code === "BUILD_PREEXISTING_UNRELATED" ||
+    blocker.code === "STATIC_PREEXISTING_UNRELATED"
+  ) {
+    return {
+      kind: "verification_blocked",
+      summary: blocker.message,
+      failedTaskId,
+      failedRunId,
+      evidence,
+      recommendedPlan: {
+        action: "ignore_preexisting",
+        reason: blocker.message,
+      },
+    };
+  }
+
+  if (blocker.code === "LOOP_EXHAUSTED" || /loop_exhausted/i.test(blocker.message)) {
+    const suggestedFingerprint = blocker.suggestedAction
+      ? buildSuggestedActionFingerprint(blocker.suggestedAction)
+      : undefined;
+    const hasTargetedRetry =
+      Boolean(blocker.suggestedAction) &&
+      suggestedFingerprint !== blocker.fingerprint;
+
+    return {
+      kind: "runtime_blocked",
+      summary: blocker.message,
+      failedTaskId,
+      failedRunId,
+      evidence,
+      recommendedPlan: hasTargetedRetry
+        ? {
+            action: "retry_with_suggested_action",
+            taskId,
+            note: "Loop exhausted, but the runtime supplied a distinct targeted recovery action.",
+            suggestedAction: blocker.suggestedAction,
+            targetedRetry: true,
+          }
+        : {
+            action: "cancel",
+            reason: "Loop exhausted without a distinct targeted recovery action.",
+          },
+    };
+  }
+
+  if (
+    blocker.suggestedAction?.type === "finish_candidate" &&
+    blocker.suggestedAction.evidence?.noOpReason
+  ) {
+    return {
+      kind: "acceptance_blocked",
+      summary: blocker.message,
+      failedTaskId,
+      failedRunId,
+      evidence,
+      recommendedPlan: {
+        action: "accept_noop",
+        reason: blocker.suggestedAction.evidence.noOpReason,
+      },
+    };
+  }
+
+  if (blocker.suggestedAction) {
+    return {
+      kind: "runtime_blocked",
+      summary: blocker.message,
+      failedTaskId,
+      failedRunId,
+      evidence,
+      recommendedPlan: {
+        action: "retry_with_suggested_action",
+        taskId,
+        note: "Retry using the runtime-suggested recovery action.",
+        suggestedAction: blocker.suggestedAction,
+        targetedRetry: true,
+      },
+    };
+  }
+
+  if (blocker.code === "MISSING_ACCEPTANCE_EVIDENCE") {
+    return {
+      kind: "acceptance_blocked",
+      summary: blocker.message,
+      failedTaskId,
+      failedRunId,
+      evidence,
+      recommendedPlan: {
+        action: "revise_spec",
+        feedback: "Add or clarify acceptance evidence requirements before retrying.",
+      },
+    };
+  }
+
+  return null;
+}
+
+function isScopeFailure(code: AgentFailureCode) {
+  return code === "SPEC_SCOPE_INSUFFICIENT" ||
+    code === "OUTSIDE_ALLOWED_PATH" ||
+    code === "FORBIDDEN_PATH" ||
+    code === "POLICY_DENIED";
 }
 
 function selectFailedTask(revision: SpecRevision) {
@@ -206,6 +436,59 @@ function selectRetryableTask(revision: SpecRevision) {
   return revision.tasks.find((task) =>
     ["failed", "blocked", "cancelled"].includes(task.status),
   ) ?? revision.tasks.find((task) => task.status === "passed") ?? null;
+}
+
+function extractCurrentBlocker(checkpoint?: AgentRunCheckpoint | null) {
+  const plan = checkpoint?.plan;
+
+  if (!isRecord(plan)) {
+    return null;
+  }
+
+  const metadata = plan.__headlessRunController;
+
+  if (!isRecord(metadata) || !isRecord(metadata.workingState)) {
+    return null;
+  }
+
+  const blocker = metadata.workingState.currentBlocker;
+
+  if (
+    !isRecord(blocker) ||
+    typeof blocker.code !== "string" ||
+    typeof blocker.message !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    code: blocker.code as AgentFailureCode,
+    message: blocker.message,
+    fingerprint:
+      typeof blocker.fingerprint === "string" ? blocker.fingerprint : undefined,
+    suggestedAction: isRecord(blocker.suggestedAction)
+      ? blocker.suggestedAction as SuggestedAgentAction
+      : undefined,
+  };
+}
+
+function buildSuggestedActionFingerprint(action: SuggestedAgentAction) {
+  return `${action.type}:${stableJson(action)}`;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(",")}]`;
+  }
+
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
+  }
+
+  return JSON.stringify(value);
 }
 
 function collectEvidence(
@@ -234,6 +517,10 @@ function collectEvidence(
         ].join(" ")}`
       : "",
   ].filter(Boolean);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function hasScopeEvidence(text: string) {

@@ -6,6 +6,8 @@ import {
 } from "./prompts";
 import type { AgentStepContext, ModificationContext } from "./types";
 import { createTaskManifestFromContract } from "../../agent-core/manifest/taskManifest";
+import { compileTaskContract } from "../../agent-core/contract/taskContract";
+import type { TaskType } from "../../agent-core/types";
 
 const CHINESE_RULE =
   "If the latest request is primarily Chinese, use Simplified Chinese.";
@@ -64,16 +66,19 @@ describe("project prompts", () => {
     };
 
     expect(systemContent).toContain(
-      "Never include write_files, edit_file, delete_files, run_command, apply_supabase_schema, preview, or dev-server tools inside tool_calls.",
+      "Never include write_files, edit_file, delete_files, or run_command inside tool_calls.",
     );
     expect(userPayload.instructions).toContain(
-      "If using write_files, edit_file, delete_files, run_command, apply_supabase_schema, refresh_preview, start_dev_server, or stop_dev_server, return a single tool_call object, not tool_calls.",
+      "If using write_files, edit_file, delete_files, or run_command, return a single tool_call object, not tool_calls.",
     );
   });
 
   it("documents canonical Supabase schema column types", () => {
     const messages = buildAgentStepMessages(
-      createAgentStepContext(),
+      createAgentStepContext({
+        objective: "Create a multiplayer poker backend",
+        taskType: "backend_feature",
+      }),
       "Create a multiplayer poker backend",
     );
     const systemContent = String(messages[0].content);
@@ -209,6 +214,89 @@ describe("project prompts", () => {
       "Budget pressure is critical: do not perform broad searches or multi-step exploration.",
     );
   });
+
+  it("hides write tools for answer tasks unless classification changed", () => {
+    const messages = buildAgentStepMessages(
+      createAgentStepContext({
+        objective: "Explain the current status",
+        taskType: "answer",
+      }),
+      "Explain the current status",
+    );
+    const systemContent = String(messages[0].content);
+    const userPayload = JSON.parse(String(messages[1].content)) as {
+      instructions: string[];
+    };
+    const instructionText = userPayload.instructions.join("\n");
+
+    expect(systemContent).toContain("- read_files args");
+    expect(systemContent).toContain("- grep_files args");
+    expect(systemContent).not.toContain("- edit_file args");
+    expect(systemContent).not.toContain('"tool":"edit_file"');
+    expect(systemContent).not.toContain("run_command");
+    expect(instructionText).not.toContain("edit_file");
+    expect(instructionText).not.toContain("write_files");
+  });
+
+  it("restores write tools for answer tasks with classification mismatch blocker", () => {
+    const messages = buildAgentStepMessages(
+      createAgentStepContext({
+        objective: "Explain the current status",
+        taskType: "answer",
+        workingState: {
+          currentBlocker: {
+            code: "TASK_CLASSIFICATION_MISMATCH",
+            message: "The request needs a repair task instead of an answer.",
+            suggestedAction: {
+              args: {
+                path: "app/page.tsx",
+                old_string: "Broken",
+                new_string: "Fixed",
+                summary: "Fix copy",
+              },
+              tool: "edit_file",
+              type: "tool_call",
+            },
+          },
+          evidence: {
+            acceptanceEvidence: [],
+            diagnostics: [],
+            mutations: [],
+            readFiles: [],
+            searches: [],
+          },
+          objective: "Explain the current status",
+          repeatedActionCount: 0,
+        },
+      }),
+      "Fix the current status",
+    );
+    const systemContent = String(messages[0].content);
+
+    expect(systemContent).toContain("- edit_file args");
+    expect(systemContent).toContain(
+      "If workingState.currentBlocker.suggestedAction exists, treat it as the highest-priority next step",
+    );
+  });
+
+  it("hides backend schema guidance and preview tools when not relevant", () => {
+    const messages = buildAgentStepMessages(
+      createAgentStepContext({
+        objective: "Adjust the hero spacing",
+        taskType: "style_edit",
+      }),
+      "Adjust the hero spacing",
+    );
+    const systemContent = String(messages[0].content);
+
+    expect(systemContent).not.toContain(
+      "For apply_supabase_schema column dataType",
+    );
+    expect(systemContent).not.toContain("- apply_supabase_schema args");
+    expect(systemContent).not.toContain("- start_dev_server args");
+    expect(systemContent).not.toContain("Use preview/dev-server tools");
+    expect(systemContent).not.toContain("refresh_preview");
+  });
 });
 
 function createModificationContext(): ModificationContext {
@@ -220,7 +308,13 @@ function createModificationContext(): ModificationContext {
   };
 }
 
-function createAgentStepContext(): AgentStepContext {
+function createAgentStepContext(options: {
+  objective?: string;
+  taskType?: TaskType;
+  workingState?: AgentStepContext["workingState"];
+} = {}): AgentStepContext {
+  const objective = options.objective ?? "Demo request";
+
   return {
     backend: null,
     budgetState: {
@@ -240,29 +334,10 @@ function createAgentStepContext(): AgentStepContext {
     devServerStatus: "stopped",
     fileTree: "app/page.tsx",
     manifest: createTaskManifestFromContract({
-      contract: {
-        acceptanceCriteria: [],
-        budget: {
-          maxModelTurns: 10,
-          maxMutations: 4,
-          maxRepairCycles: 2,
-          maxToolCalls: 20,
-        },
-        objective: "Demo request",
-        permissions: {
-          databaseChange: "deny",
-          dependencyChange: "ask",
-          fileDelete: "ask",
-          fileWrite: true,
-          previewDeployment: "ask",
-          productionDeployment: "ask",
-        },
-        scope: {
-          allowedPaths: ["app/**"],
-          forbiddenPaths: [".env*"],
-        },
-        taskType: "component_edit",
-      },
+      contract: compileTaskContract({
+        objective,
+        taskType: options.taskType ?? "component_edit",
+      }),
       conversationId: "conversation-1",
       projectId: "project-1",
     }),
@@ -279,11 +354,12 @@ function createAgentStepContext(): AgentStepContext {
       importantFiles: [],
       latestFailures: [],
       nextStep: "Choose the smallest useful next step.",
-      objective: "Demo request",
+      objective,
       summarizedObservationCount: 0,
     },
     steering: [],
     taskLedger: null,
+    workingState: options.workingState,
     workingSummary: null,
   };
 }

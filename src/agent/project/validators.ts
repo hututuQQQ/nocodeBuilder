@@ -1,4 +1,5 @@
 import type { ProjectFileInput } from "../../services/projects";
+import type { AgentFinishEvidence } from "../../agent-core/types";
 import type {
   AgentSupabaseSchemaColumn,
   AgentSupabaseSchemaInput,
@@ -103,6 +104,7 @@ export function validateAgentStepResponse(
         typeof value.verification === "string" && value.verification.trim()
           ? value.verification.trim()
           : undefined,
+      evidence: validateFinishEvidence(value.evidence),
     };
   }
 
@@ -150,6 +152,82 @@ export function validateAgentStepResponse(
   }
 
   return validateAgentToolCall(value, policy);
+}
+
+function validateFinishEvidence(value: unknown): AgentFinishEvidence | undefined {
+  if (typeof value === "undefined") {
+    return undefined;
+  }
+
+  if (!isRecord(value)) {
+    throw new Error("Invalid model response: finish_candidate.evidence must be an object.");
+  }
+
+  const evidence: AgentFinishEvidence = {};
+  const readFiles = readStringArray(value.readFiles, "finish_candidate.evidence.readFiles");
+  const changedFiles = readStringArray(value.changedFiles, "finish_candidate.evidence.changedFiles");
+
+  if (readFiles.length > 0) {
+    evidence.readFiles = readFiles;
+  }
+
+  if (changedFiles.length > 0) {
+    evidence.changedFiles = changedFiles;
+  }
+
+  if (typeof value.noOpReason === "string" && value.noOpReason.trim()) {
+    evidence.noOpReason = value.noOpReason.trim();
+  }
+
+  if (typeof value.acceptanceEvidence !== "undefined") {
+    if (!Array.isArray(value.acceptanceEvidence)) {
+      throw new Error("Invalid model response: finish_candidate.evidence.acceptanceEvidence must be an array.");
+    }
+
+    const acceptanceEvidence = value.acceptanceEvidence.map((item) => {
+      if (!isRecord(item)) {
+        throw new Error("Invalid model response: finish_candidate.evidence.acceptanceEvidence entries must be objects.");
+      }
+
+      const criterionId =
+        typeof item.criterionId === "string" ? item.criterionId.trim() : "";
+      const itemEvidence =
+        typeof item.evidence === "string" ? item.evidence.trim() : "";
+
+      if (!criterionId || !itemEvidence) {
+        throw new Error("Invalid model response: finish_candidate.evidence.acceptanceEvidence requires criterionId and evidence.");
+      }
+
+      return {
+        criterionId,
+        evidence: itemEvidence,
+      };
+    });
+
+    if (acceptanceEvidence.length > 0) {
+      evidence.acceptanceEvidence = acceptanceEvidence;
+    }
+  }
+
+  return Object.keys(evidence).length > 0 ? evidence : undefined;
+}
+
+function readStringArray(value: unknown, fieldName: string) {
+  if (typeof value === "undefined") {
+    return [];
+  }
+
+  if (!Array.isArray(value)) {
+    throw new Error(`Invalid model response: ${fieldName} must be an array.`);
+  }
+
+  return value.map((item) => {
+    if (typeof item !== "string" || !item.trim()) {
+      throw new Error(`Invalid model response: ${fieldName} entries must be non-empty strings.`);
+    }
+
+    return item.trim();
+  });
 }
 
 function validateAgentToolCall(

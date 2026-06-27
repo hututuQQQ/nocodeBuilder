@@ -1,6 +1,7 @@
 import type {
   AgentReadSnapshot,
   AgentRun,
+  AgentFinishEvidence,
   PreviewDiagnostic,
   SiteSpec,
   TaskContract,
@@ -85,6 +86,7 @@ export type VerificationInput = {
   changedFiles: string[];
   deletedFiles?: string[];
   externalEffects?: string[];
+  finishEvidence?: AgentFinishEvidence;
   noOpReason?: string;
   packageChanged: boolean;
   approvedPackageChangeKeys?: string[];
@@ -1040,6 +1042,17 @@ function verifyAcceptanceCriteria(
   siteSpec: SiteSpec | null,
 ): VerificationCheck[] {
   return contract.acceptanceCriteria.map((criterion) => {
+    const explicitEvidence = findAcceptanceEvidence(input, criterion.id);
+
+    if (explicitEvidence) {
+      return passedCheck(
+        `acceptance:${criterion.id}`,
+        `Acceptance: ${criterion.id}`,
+        `Finish evidence: ${explicitEvidence}`,
+        criterion.required,
+      );
+    }
+
     if (criterion.id === "verifier-passed") {
       const technicalStatus = summarizeStatus(technicalChecks);
 
@@ -1101,6 +1114,12 @@ function collectRequestAddressedEvidence(
   allowExistingWorkspaceEvidence: boolean,
 ) {
   const changedFiles = input.changedFiles.map(normalizeProjectPath);
+  const citedChangedFiles = new Set(
+    (input.finishEvidence?.changedFiles ?? []).map(normalizeProjectPath),
+  );
+  const changedEvidence = citedChangedFiles.size > 0
+    ? changedFiles.filter((path) => citedChangedFiles.has(path))
+    : changedFiles;
   const expectedFiles = getExpectedFiles(contract);
   if (expectedFiles.length > 0) {
     const evidencePaths = collectTaskEvidencePaths(contract, input);
@@ -1115,8 +1134,9 @@ function collectRequestAddressedEvidence(
     return "AnswerVerifier produced a non-empty answer for the read-only task.";
   }
 
-  if (input.noOpReason?.trim()) {
-    return `No-op conclusion supplied: ${input.noOpReason.trim()}`;
+  const noOpReason = input.finishEvidence?.noOpReason ?? input.noOpReason;
+  if (noOpReason?.trim()) {
+    return `No-op conclusion supplied: ${noOpReason.trim()}`;
   }
 
   const externalEffects = (input.externalEffects ?? [])
@@ -1126,13 +1146,13 @@ function collectRequestAddressedEvidence(
     return `External tool evidence: ${externalEffects.slice(-3).join(" ")}`;
   }
 
-  if (changedFiles.length === 0) {
+  if (changedEvidence.length === 0) {
     return allowExistingWorkspaceEvidence
       ? collectExistingWorkspaceEvidence(contract, input.readSnapshots ?? [], siteSpec)
       : null;
   }
 
-  const scopeEvidence = changedFiles.some((path) =>
+  const scopeEvidence = changedEvidence.some((path) =>
     contract.scope.allowedPaths.some((pattern) =>
       matchesProjectPathPattern(path, pattern),
     ),
@@ -1147,7 +1167,7 @@ function collectRequestAddressedEvidence(
     const componentSourcePaths = siteSpec
       ? collectComponentSourcePaths(siteSpec, componentIds)
       : new Set<string>();
-    const matchingChangedFile = changedFiles.find((path) => componentSourcePaths.has(path));
+    const matchingChangedFile = changedEvidence.find((path) => componentSourcePaths.has(path));
 
     return matchingChangedFile
       ? `Changed ${matchingChangedFile} for scoped component(s): ${componentIds.join(", ")}.`
@@ -1159,14 +1179,14 @@ function collectRequestAddressedEvidence(
     const pageSourcePaths = siteSpec
       ? collectPageSourcePaths(siteSpec, pages)
       : new Set<string>();
-    const matchingChangedFile = changedFiles.find((path) => pageSourcePaths.has(path));
+    const matchingChangedFile = changedEvidence.find((path) => pageSourcePaths.has(path));
 
     return matchingChangedFile
       ? `Changed ${matchingChangedFile} for scoped page(s): ${pages.join(", ")}.`
       : null;
   }
 
-  return `Changed ${changedFiles.length} task-scoped file(s).`;
+  return `Changed ${changedEvidence.length} task-scoped file(s).`;
 }
 
 function describeMissingRequestAddressedEvidence(
@@ -1206,7 +1226,7 @@ function collectTaskEvidencePaths(
 ) {
   return uniqueStrings([
     ...input.changedFiles.map(normalizeProjectPath),
-    ...(input.readSnapshots ?? []).map((snapshot) => normalizeProjectPath(snapshot.path)),
+    ...collectCitedReadEvidencePaths(input),
   ]).filter((path) =>
     path &&
     !isInvalidProjectPath(path) &&
@@ -1215,6 +1235,27 @@ function collectTaskEvidencePaths(
     ) &&
     !isPathForbidden(path, contract.scope.forbiddenPaths),
   );
+}
+
+function collectCitedReadEvidencePaths(input: VerificationInput) {
+  const actualReadPaths = (input.readSnapshots ?? [])
+    .map((snapshot) => normalizeProjectPath(snapshot.path));
+  const citedReadFiles = new Set(
+    (input.finishEvidence?.readFiles ?? []).map(normalizeProjectPath),
+  );
+
+  if (citedReadFiles.size === 0) {
+    return actualReadPaths;
+  }
+
+  return actualReadPaths.filter((path) => citedReadFiles.has(path));
+}
+
+function findAcceptanceEvidence(input: VerificationInput, criterionId: string) {
+  return input.finishEvidence?.acceptanceEvidence
+    ?.find((item) => item.criterionId === criterionId)
+    ?.evidence
+    .trim();
 }
 
 function findMissingExpectedFiles(expectedFiles: string[], evidencePaths: string[]) {

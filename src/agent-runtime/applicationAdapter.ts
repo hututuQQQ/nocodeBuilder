@@ -41,6 +41,7 @@ import { isTerminalAgentRunStatus, RunStateMachine } from "../agent-core/runtime
 import type {
   AgentApproval,
   AgentEvent,
+  AgentFinishEvidence,
   AgentStructuredObservation,
   AgentRunFailureKind,
   AgentRun,
@@ -769,6 +770,7 @@ async function verifyRunPort({
     changedFiles: string[];
     deletedFiles: string[];
     externalEffects: string[];
+    finishEvidence?: AgentFinishEvidence;
     noOpReason?: string;
     packageChanged: boolean;
     readSnapshots?: AgentRunCheckpoint["readSnapshots"];
@@ -823,6 +825,7 @@ async function verifyRunPort({
     changedFiles: input.changedFiles,
     deletedFiles: input.deletedFiles,
     externalEffects: input.externalEffects,
+    finishEvidence: input.finishEvidence,
     noOpReason: input.noOpReason,
     packageChanged: input.packageChanged,
     previewUrl: store.get().previewUrl,
@@ -1830,7 +1833,49 @@ function appendContextReportLog(store: StoreAccess, context: AgentStepContext) {
   );
 }
 
-function toAgentObservation(value: string, step: number): AgentObservation {
+function toAgentObservation(value: unknown, step: number): AgentObservation {
+  if (isStructuredObservation(value)) {
+    return {
+      content: typeof value.summary === "string" ? value.summary : undefined,
+      ok: value.ok,
+      step,
+      structuredData: value,
+      summary: value.summary,
+      tool: value.tool ?? "observation",
+    };
+  }
+
+  if (isRecord(value)) {
+    const parsed = value as Partial<AgentObservation>;
+
+    if (
+      typeof parsed.summary === "string" &&
+      typeof parsed.tool === "string" &&
+      typeof parsed.ok === "boolean"
+    ) {
+      return {
+        content: typeof parsed.content === "string" ? parsed.content : undefined,
+        ok: parsed.ok,
+        step,
+        structuredData: extractStructuredObservation(parsed),
+        summary: parsed.summary,
+        tool: parsed.tool,
+      };
+    }
+  }
+
+  if (typeof value !== "string") {
+    const content = stringifyObservationPayload(value);
+
+    return {
+      content,
+      ok: true,
+      step,
+      summary: content,
+      tool: "observation",
+    };
+  }
+
   try {
     const parsed = JSON.parse(value) as Partial<AgentObservation>;
 
@@ -1908,6 +1953,18 @@ function extractStructuredObservation(
   }
 
   return undefined;
+}
+
+function stringifyObservationPayload(value: unknown) {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function buildAgentDiagnostics(projectError: string | null, terminalLogs: string[]) {
