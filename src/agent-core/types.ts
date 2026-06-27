@@ -31,6 +31,154 @@ export type AgentRunFailureKind =
   | "context_budget"
   | "loop_exhausted";
 
+export type AgentFailureCode =
+  | "MODEL_PROTOCOL_ERROR"
+  | "INVALID_TOOL"
+  | "POLICY_DENIED"
+  | "APPROVAL_REQUIRED"
+  | "APPROVAL_DENIED"
+  | "FORBIDDEN_PATH"
+  | "OUTSIDE_ALLOWED_PATH"
+  | "TASK_DRIFT"
+  | "PREMATURE_ANSWER"
+  | "MUST_READ_BEFORE_WRITE"
+  | "STALE_READ"
+  | "OLD_STRING_NOT_FOUND"
+  | "IDENTICAL_EDIT"
+  | "COMMAND_FAILED"
+  | "PACKAGE_INVALID"
+  | "BUILD_REGRESSION"
+  | "BUILD_PREEXISTING_UNRELATED"
+  | "STATIC_REGRESSION"
+  | "STATIC_PREEXISTING_UNRELATED"
+  | "PREVIEW_UNAVAILABLE"
+  | "PREVIEW_REGRESSION"
+  | "MISSING_EXPECTED_FILE_EVIDENCE"
+  | "MISSING_ACCEPTANCE_EVIDENCE"
+  | "NO_INFORMATION_GAIN"
+  | "REPEATED_ACTION"
+  | "TASK_CLASSIFICATION_MISMATCH"
+  | "SPEC_SCOPE_INSUFFICIENT"
+  | "LOOP_EXHAUSTED"
+  | "UNKNOWN_RUNTIME_FAILURE";
+
+export type SuggestedAgentAction =
+  | {
+      type: "tool_call";
+      tool: string;
+      args: Record<string, unknown>;
+      rationale?: string;
+    }
+  | {
+      type: "finish_candidate";
+      summary: string;
+      verification?: string;
+    }
+  | {
+      type: "answer";
+      message: string;
+    }
+  | {
+      type: "revise_contract";
+      reason: string;
+      patch: Record<string, unknown>;
+    }
+  | {
+      type: "request_approval";
+      reason: string;
+    }
+  | {
+      type: "blocker";
+      reason: string;
+      recoveryOptions: string[];
+    };
+
+export type AgentStructuredObservation = {
+  ok: boolean;
+  tool?: string;
+  summary: string;
+  error?: {
+    code: AgentFailureCode;
+    message: string;
+    retryable: boolean;
+    fingerprint?: string;
+    suggestedAction?: SuggestedAgentAction;
+    relatedFiles?: string[];
+    diagnostics?: Array<{
+      path?: string;
+      line?: number;
+      column?: number;
+      message: string;
+    }>;
+  };
+  evidence?: {
+    readFiles?: Array<{
+      path: string;
+      startLine?: number;
+      endLine?: number;
+      contentHash?: string;
+    }>;
+    changedFiles?: string[];
+    deletedFiles?: string[];
+    command?: string;
+    commandSuccess?: boolean;
+    previewUrl?: string | null;
+    acceptanceCriteriaIds?: string[];
+  };
+};
+
+export type AgentEvidenceLedger = {
+  readFiles: Array<{
+    path: string;
+    contentHash: string;
+    ranges: Array<{ startLine: number; endLine: number }>;
+    readAt: string;
+    reason?: string;
+  }>;
+  searches: Array<{
+    tool: "grep_files" | "glob_files" | "list_files" | string;
+    fingerprint: string;
+    resultCount?: number;
+    newPaths?: string[];
+    summary: string;
+    at: string;
+  }>;
+  diagnostics: Array<{
+    source: "baseline" | "tool" | "verifier" | "preview" | "command" | "model" | "runtime";
+    code?: AgentFailureCode;
+    path?: string;
+    line?: number;
+    column?: number;
+    message: string;
+    at: string;
+  }>;
+  mutations: Array<{
+    path: string;
+    action: "edit" | "write" | "delete" | "schema" | "tokens" | string;
+    summary: string;
+    at: string;
+  }>;
+  acceptanceEvidence: Array<{
+    criterionId: string;
+    evidence: string;
+    source: "changed_file" | "read_file" | "command" | "preview" | "manual" | string;
+  }>;
+};
+
+export type AgentWorkingState = {
+  objective: string;
+  currentBlocker?: {
+    code: AgentFailureCode;
+    message: string;
+    fingerprint?: string;
+    suggestedAction?: SuggestedAgentAction;
+  };
+  lastActionFingerprint?: string;
+  repeatedActionCount: number;
+  evidence: AgentEvidenceLedger;
+  nextStepHint?: string;
+};
+
 export type AcceptanceCriterion = {
   id: string;
   description: string;
@@ -194,8 +342,10 @@ export type AgentApproval = {
 
 export type AgentReadSnapshot = {
   contentHash: string;
+  endLine?: number;
   path: string;
   readAt: string;
+  startLine?: number;
 };
 
 export type AgentRunCheckpoint = {
@@ -278,6 +428,9 @@ export type VerificationCheck = {
   status: VerificationCheckStatus;
   summary: string;
   required?: boolean;
+  severity?: "blocking" | "warning" | "info";
+  classification?: "newly_introduced" | "pre_existing" | "unknown_baseline" | "not_applicable";
+  relatedToChangedFiles?: boolean;
   artifactIds?: string[];
   details?: unknown;
 };

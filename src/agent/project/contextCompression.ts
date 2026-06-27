@@ -92,8 +92,9 @@ export function compressAgentStepContext(context: AgentStepContext): AgentStepCo
           objective: compactText(context.taskLedger.objective, 420),
           pending: compactTextArray(context.taskLedger.pending, 8, 260),
           risks: compactTextArray(context.taskLedger.risks, 8, 320),
-        }
+      }
       : null,
+    workingState: compactWorkingState(context.workingState),
     workingSummary: context.workingSummary
       ? {
           ...context.workingSummary,
@@ -391,6 +392,7 @@ function createMinimalContextForHardCap(context: AgentStepContext): AgentStepCon
       : undefined,
     steering: context.steering.slice(-3).map((item) => compactText(item, 220)),
     taskLedger: null,
+    workingState: compactWorkingState(context.workingState),
     workingSummary: null,
   };
 }
@@ -427,6 +429,46 @@ function selectPromptObservations(observations: AgentObservation[]) {
   }
 
   return Array.from(selected.values()).sort((left, right) => left.step - right.step);
+}
+
+function compactWorkingState(
+  workingState: AgentStepContext["workingState"],
+): AgentStepContext["workingState"] {
+  if (!workingState) {
+    return undefined;
+  }
+
+  return {
+    ...workingState,
+    currentBlocker: workingState.currentBlocker
+      ? {
+          ...workingState.currentBlocker,
+          message: compactText(workingState.currentBlocker.message, 600),
+        }
+      : undefined,
+    evidence: {
+      readFiles: workingState.evidence.readFiles.slice(-24),
+      searches: workingState.evidence.searches.slice(-12).map((search) => ({
+        ...search,
+        summary: compactText(search.summary, 260),
+      })),
+      diagnostics: workingState.evidence.diagnostics.slice(-16).map((diagnostic) => ({
+        ...diagnostic,
+        message: compactText(diagnostic.message, 360),
+      })),
+      mutations: workingState.evidence.mutations.slice(-16).map((mutation) => ({
+        ...mutation,
+        summary: compactText(mutation.summary, 260),
+      })),
+      acceptanceEvidence: workingState.evidence.acceptanceEvidence.slice(-12).map((evidence) => ({
+        ...evidence,
+        evidence: compactText(evidence.evidence, 320),
+      })),
+    },
+    nextStepHint: workingState.nextStepHint
+      ? compactText(workingState.nextStepHint, 360)
+      : undefined,
+  };
 }
 
 function compactBackendContext(context: AgentStepContext["backend"]) {

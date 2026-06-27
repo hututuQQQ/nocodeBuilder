@@ -323,6 +323,129 @@ describe("agentToolExecutor update_design_tokens", () => {
       path: "app/page.tsx",
     });
   });
+
+  it("replaces a previously read line range", async () => {
+    const content = "line 1\nline 2\nline 3\nline 4";
+    const runState = createAgentRunState();
+    fake.readFile.mockResolvedValue(content);
+    mockWriteAgentFilesAsChangeRecord(content);
+
+    await executeAgentTool(
+      createFakeStore(),
+      createProject(),
+      {
+        args: { limit: 3, offset: 1, paths: ["app/page.tsx"] },
+        rationale: "Read range",
+        tool: "read_files",
+        type: "tool_call",
+      },
+      1,
+      runState,
+    );
+    const result = await executeAgentTool(
+      createFakeStore(),
+      createProject(),
+      {
+        args: {
+          endLine: 3,
+          newContent: "line two\nline three",
+          path: "app/page.tsx",
+          startLine: 2,
+          summary: "Replace middle lines",
+        },
+        rationale: "Replace range",
+        tool: "replace_file_range",
+        type: "tool_call",
+      },
+      2,
+      runState,
+    );
+    const writtenFiles = fake.writeAgentFiles.mock.calls[0]?.[2] as Array<{
+      content: string;
+      path: string;
+    }>;
+
+    expect(result.observation.ok).toBe(true);
+    expect(writtenFiles[0]).toEqual({
+      content: "line 1\nline two\nline three\nline 4",
+      path: "app/page.tsx",
+    });
+  });
+
+  it("returns structured MUST_READ_BEFORE_WRITE when editing before reading", async () => {
+    fake.readFile.mockResolvedValue("const a = 1;");
+
+    const result = await executeAgentTool(
+      createFakeStore(),
+      createProject(),
+      {
+        args: {
+          new_string: "const a = 2;",
+          old_string: "const a = 1;",
+          path: "app/page.tsx",
+          summary: "Update constant",
+        },
+        rationale: "Edit page",
+        tool: "edit_file",
+        type: "tool_call",
+      },
+      1,
+      createAgentRunState(),
+    );
+
+    expect(result.observation.ok).toBe(false);
+    expect(result.observation.structuredData?.error).toMatchObject({
+      code: "MUST_READ_BEFORE_WRITE",
+      suggestedAction: {
+        tool: "read_files",
+      },
+    });
+  });
+
+  it("returns structured STALE_READ when the file changes after reading", async () => {
+    const runState = createAgentRunState();
+    fake.readFile.mockResolvedValueOnce("const a = 1;");
+
+    await executeAgentTool(
+      createFakeStore(),
+      createProject(),
+      {
+        args: { paths: ["app/page.tsx"] },
+        rationale: "Read page",
+        tool: "read_files",
+        type: "tool_call",
+      },
+      1,
+      runState,
+    );
+
+    fake.readFile.mockResolvedValueOnce("const a = 9;");
+    const result = await executeAgentTool(
+      createFakeStore(),
+      createProject(),
+      {
+        args: {
+          new_string: "const a = 2;",
+          old_string: "const a = 1;",
+          path: "app/page.tsx",
+          summary: "Update constant",
+        },
+        rationale: "Edit page",
+        tool: "edit_file",
+        type: "tool_call",
+      },
+      2,
+      runState,
+    );
+
+    expect(result.observation.ok).toBe(false);
+    expect(result.observation.structuredData?.error).toMatchObject({
+      code: "STALE_READ",
+      suggestedAction: {
+        tool: "read_files",
+      },
+    });
+  });
 });
 
 function updateDesignTokensStep(): AgentToolCallStep {

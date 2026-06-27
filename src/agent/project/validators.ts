@@ -233,6 +233,49 @@ function validateAgentToolCall(
           summary: validateSummaryArg(args.summary, "Edited project file."),
         },
       };
+    case "replace_file_range": {
+      const startLine = validateOptionalInteger(
+        args.startLine,
+        "replace_file_range.startLine",
+        1,
+        20_000,
+      );
+      const endLine = validateOptionalInteger(
+        args.endLine,
+        "replace_file_range.endLine",
+        1,
+        20_000,
+      );
+
+      if (startLine === undefined || endLine === undefined) {
+        throw new Error(
+          "Invalid model response: replace_file_range.startLine and endLine are required.",
+        );
+      }
+
+      if (endLine < startLine) {
+        throw new Error(
+          "Invalid model response: replace_file_range.endLine must be greater than or equal to startLine.",
+        );
+      }
+
+      return {
+        type: "tool_call",
+        tool,
+        rationale,
+        args: {
+          path: validateSinglePath(args.path, "replace_file_range.path", policy),
+          startLine,
+          endLine,
+          newContent: validateStringArg(
+            args.newContent,
+            "replace_file_range.newContent",
+            100_000,
+          ),
+          summary: validateSummaryArg(args.summary, "Replaced project file range."),
+        },
+      };
+    }
     case "write_files":
       return {
         type: "tool_call",

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+﻿import { describe, expect, it } from "vitest";
 import { compileTaskContract } from "../contract/taskContract";
 import { normalizeApprovalHash } from "../policy/policyEngine";
 import type {
@@ -97,8 +97,8 @@ describe("Headless RunController", () => {
     expect(run.status).toBe("completed");
     expect(run.repairCycles).toBe(1);
     expect(run.modelTurns).toBe(3);
-    expect(run.toolCalls).toBe(2);
-    expect(ports.contexts[1]?.observations).toContain("Build failed");
+    expect(run.toolCalls).toBe(3);
+    expect(ports.contexts[1]?.observations.join("\n")).toContain("Build failed");
     expect(ports.events.map((event) => event.type)).toContain("verification.completed");
     expect(ports.events.map((event) => event.type)).toContain("run.completed");
   });
@@ -243,7 +243,7 @@ describe("Headless RunController", () => {
     const completed = await controller.resume("run-approval");
 
     expect(completed.status).toBe("completed");
-    expect(completed.toolCalls).toBe(1);
+    expect(completed.toolCalls).toBe(2);
     expect(ports.verificationRequests[0]?.changedFiles).toContain("components/Old.tsx");
     expect(ports.verificationRequests[0]?.deletedFiles).toEqual(["components/Old.tsx"]);
     expect(ports.events.map((event) => event.type)).toContain("approval.resolved");
@@ -274,7 +274,7 @@ describe("Headless RunController", () => {
     const waitingAgain = await controller.resume("run-approval-consume");
 
     expect(waitingAgain.status).toBe("waiting_approval");
-    expect(waitingAgain.toolCalls).toBe(1);
+    expect(waitingAgain.toolCalls).toBe(2);
     expect(ports.approvalRecords).toHaveLength(2);
   });
 
@@ -304,7 +304,7 @@ describe("Headless RunController", () => {
     const waitingB = await controller.resume("run-approval-repeat");
 
     expect(waitingB.status).toBe("waiting_approval");
-    expect(waitingB.toolCalls).toBe(1);
+    expect(waitingB.toolCalls).toBe(2);
     expect(approvalA.consumedAt).toBeDefined();
     expect(ports.approvalRecords).toHaveLength(2);
     const approvalB = ports.approvalRecords[1]!;
@@ -315,11 +315,17 @@ describe("Headless RunController", () => {
     const completed = await controller.resume("run-approval-repeat");
 
     expect(completed.status).toBe("completed");
-    expect(completed.toolCalls).toBe(2);
+    expect(completed.toolCalls).toBe(3);
     expect(approvalB.consumedAt).toBeDefined();
     expect(ports.events.filter((event) => event.type === "approval.consumed"))
       .toHaveLength(2);
-    expect(ports.events.filter((event) => event.type === "tool.completed"))
+    expect(ports.events.filter((event) =>
+      event.type === "tool.completed" &&
+      event.payload &&
+      typeof event.payload === "object" &&
+      "tool" in event.payload &&
+      event.payload.tool === "delete_files",
+    ))
       .toHaveLength(2);
   });
 
@@ -553,7 +559,7 @@ describe("Headless RunController", () => {
       initialEvents: [
         {
           id: "event-steering",
-          payload: { content: "不要修改数据库" },
+          payload: { content: "Do not modify the database." },
           runId: "run-steering",
           sequence: 1,
           timestamp: "2026-01-01T00:00:00.000Z",
@@ -573,7 +579,7 @@ describe("Headless RunController", () => {
     });
 
     expect(run.status).toBe("completed");
-    expect(ports.contexts[0]?.steering).toContain("不要修改数据库");
+    expect(ports.contexts[0]?.steering).toContain("Do not modify the database.");
     expect(ports.contexts[0]?.run.contract.permissions.databaseChange).toBe("deny");
   });
 
@@ -730,7 +736,7 @@ describe("Headless RunController", () => {
     const readObservation = JSON.stringify({
       files: [
         {
-          content: "const [error, setError] = useState(''); return <p>网络错误，请重试</p>;",
+          content: "const [error, setError] = useState(''); return <p>缃戠粶閿欒锛岃閲嶈瘯</p>;",
           path: "components/Lobby.tsx",
         },
       ],
@@ -1001,7 +1007,13 @@ describe("Headless RunController", () => {
 
     expect(run.status).toBe("budget_exceeded");
     expect(run.mutationCount).toBe(1);
-    expect(ports.events.filter((event) => event.type === "tool.completed")).toHaveLength(1);
+    expect(ports.events.filter((event) =>
+      event.type === "tool.completed" &&
+      event.payload &&
+      typeof event.payload === "object" &&
+      "tool" in event.payload &&
+      event.payload.tool === "edit_file",
+    )).toHaveLength(1);
   });
 
   it("keeps answer tasks read-only when the model tries to write after inspection", async () => {
@@ -1024,7 +1036,7 @@ describe("Headless RunController", () => {
         },
         {
           type: "answer",
-          message: "注册失败是因为 profiles.user_id 没有被写入。",
+          message: "Registration fails because profiles.user_id is not populated.",
         },
       ],
       verificationStatuses: ["passed"],
@@ -1032,7 +1044,7 @@ describe("Headless RunController", () => {
     const controller = new RunController(ports);
     const contract = compileTaskContract({
       objective:
-        "为什么注册不了。null value in column \"user_id\" of relation \"profiles\" violates not-null constraint。",
+        "Explain why registration fails: null value in column \"user_id\" violates not-null constraint. No changes.",
     });
 
     const run = await controller.start({
@@ -1054,8 +1066,8 @@ describe("Headless RunController", () => {
     )).toBe(false);
     expect(ports.events.map((event) => event.type)).toContain("policy.denied");
     expect(ports.events.filter((event) => event.type === "tool.completed")).toHaveLength(1);
-    expect(ports.contexts[2]?.observations).toContain(
-      "Policy denied edit_file: This task contract does not permit file writes.",
+    expect(ports.contexts[2]?.observations.join("\n")).toContain(
+      "\"code\":\"POLICY_DENIED\"",
     );
   });
 
@@ -1105,7 +1117,7 @@ describe("Headless RunController", () => {
 
     expect(run.status).toBe("budget_exceeded");
     expect(run.modelTurns).toBe(1);
-    expect(run.toolCalls).toBe(1);
+    expect(run.toolCalls).toBe(2);
   });
 
   it("stops repeated verification failures after one loop rescue", async () => {
@@ -1177,13 +1189,13 @@ describe("Headless RunController", () => {
     });
   });
 
-  it("stops read-only no-progress loops after one focused rescue", async () => {
+  it("stops repeated identical read-only actions after one focused rescue", async () => {
     const readActions: HeadlessModelAction[] = Array.from(
-      { length: 20 },
-      (_, index) => ({
+      { length: 6 },
+      () => ({
         type: "tool_call",
         tool: "read_files",
-        args: { paths: [`app/read-${index}.tsx`] },
+        args: { paths: ["app/repeated.tsx"] },
       }),
     );
     const ports = createFakePorts({
@@ -1198,15 +1210,6 @@ describe("Headless RunController", () => {
         maxToolCalls: 40,
         maxMutations: 8,
         maxRepairCycles: 8,
-      },
-      source: {
-        acceptanceCriteriaIds: ["criterion-1"],
-        expectedFiles: ["app/page.tsx", "components/Panel.tsx"],
-        mode: "spec",
-        requirementIds: ["story-1"],
-        revisionId: "revision-1",
-        specId: "spec-1",
-        taskId: "task-1",
       },
     };
 
@@ -1229,13 +1232,40 @@ describe("Headless RunController", () => {
 
     expect(run.status).toBe("budget_exceeded");
     expect(run.modelTurns).toBeLessThan(contract.budget.maxModelTurns);
-    expect(run.toolCalls).toBeLessThan(contract.budget.maxToolCalls);
+    expect(run.toolCalls).toBe(4);
     expect(rescueCheckpoint).toBeDefined();
     expect(rescueContext).toBeDefined();
     expect(terminalEvent?.payload).toMatchObject({
       failureKind: "loop_exhausted",
       reason: expect.stringContaining("Read-only exploration repeated"),
     });
+  });
+
+  it("does not treat different read-only files as a stall", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "tool_call", tool: "read_files", args: { paths: ["app/a.tsx"] } },
+        { type: "tool_call", tool: "read_files", args: { paths: ["app/b.tsx"] } },
+        { type: "tool_call", tool: "read_files", args: { paths: ["app/c.tsx"] } },
+        { type: "finish_candidate", summary: "Finished inspection" },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    const controller = new RunController(ports);
+
+    const run = await controller.start({
+      contract: compileTaskContract({ objective: "Inspect several files" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-different-reads",
+    });
+
+    expect(run.status).toBe("completed");
+    expect(ports.checkpointRecords.some((checkpoint) =>
+      checkpoint.observations.some((observation) =>
+        String(observation).includes("REPEATED_ACTION"),
+      ),
+    )).toBe(false);
   });
 
   it("auto-verifies after read-only evidence satisfies missing expected files", async () => {
@@ -2144,22 +2174,42 @@ function createFakePorts({
       },
     },
     tools: {
-      execute: async ({ tool }): Promise<ToolResult> => ({
-        artifactIds: [],
-        retryable: false,
-        status: "success",
-        summary: `${tool} succeeded`,
-        workspaceEffects:
-          tool === "edit_file"
-            ? { changedFiles: ["app/page.tsx"], packageChanged: false }
-            : tool === "delete_files"
-              ? {
-                  changedFiles: [],
-                  deletedFiles: ["components/Old.tsx"],
-                  packageChanged: false,
-                }
-            : undefined,
-      }),
+      execute: async ({ args, tool }): Promise<ToolResult> => {
+        const paths = isRecord(args) && Array.isArray(args.paths)
+          ? args.paths.filter((path): path is string => typeof path === "string")
+          : isRecord(args) && typeof args.path === "string"
+            ? [args.path]
+            : [];
+
+        return {
+          artifactIds: [],
+          retryable: false,
+          status: "success",
+          summary: `${tool} succeeded`,
+          workspaceEffects:
+            tool === "edit_file" || tool === "replace_file_range"
+              ? { changedFiles: paths.length > 0 ? paths : ["app/page.tsx"], packageChanged: false }
+              : tool === "delete_files"
+                ? {
+                    changedFiles: [],
+                    deletedFiles: paths.length > 0 ? paths : ["components/Old.tsx"],
+                    packageChanged: false,
+                  }
+                : tool === "read_files"
+                  ? {
+                      changedFiles: [],
+                      packageChanged: false,
+                      readSnapshots: paths.map((path) => ({
+                        contentHash: `${path.length}:test`,
+                        path,
+                        readAt: "2026-01-01T00:00:00.000Z",
+                        startLine: 1,
+                        endLine: 200,
+                      })),
+                    }
+                  : undefined,
+        };
+      },
     },
     verifier: {
       verify: async (input): Promise<VerificationReport> => {
@@ -2211,6 +2261,9 @@ function createModelValidationAction(
     type: "model_validation_error",
     validationError,
   };
+}
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function createPausedRun(runId: string, contract: TaskContract): AgentRun {

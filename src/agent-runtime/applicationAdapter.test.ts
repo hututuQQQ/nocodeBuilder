@@ -669,9 +669,9 @@ describe("Application runtime adapter", () => {
     expect(run).toMatchObject({
       repairCycles: 1,
       status: "completed",
-      toolCalls: 2,
+      toolCalls: 3,
     });
-    expect(fake.toolNames).toEqual(["edit_file", "edit_file"]);
+    expect(fake.toolNames).toEqual(["read_files", "edit_file", "edit_file"]);
   });
 
   it("replays the exact approved action after approval resolution", async () => {
@@ -709,7 +709,7 @@ describe("Application runtime adapter", () => {
 
     expect(completed).toBe(true);
     expect(run.status).toBe("completed");
-    expect(fake.toolNames).toEqual(["delete_files"]);
+    expect(fake.toolNames).toEqual(["read_files", "delete_files"]);
   });
 
   it("sets currentAgentApproval immediately when approval is requested", async () => {
@@ -1388,23 +1388,6 @@ describe("Application runtime adapter", () => {
           summary: "Update copy",
         },
       },
-      {
-        type: "tool_call",
-        tool: "read_files",
-        rationale: "Re-read",
-        args: { paths: ["app/page.tsx"] },
-      },
-      {
-        type: "tool_call",
-        tool: "edit_file",
-        rationale: "Edit after fresh read",
-        args: {
-          new_string: "Hello",
-          old_string: "Hi",
-          path: "app/page.tsx",
-          summary: "Update copy",
-        },
-      },
       { type: "finish_candidate", summary: "Edited after fresh read" },
     ];
     fake.verificationStatuses = ["passed", "passed"];
@@ -1414,7 +1397,7 @@ describe("Application runtime adapter", () => {
     });
 
     expect(result).toBe(true);
-    expect(fake.toolNames).toEqual(["edit_file", "read_files", "edit_file"]);
+    expect(fake.toolNames).toEqual(["read_files", "edit_file"]);
     expect(fake.checkpoints.some((checkpoint) => checkpoint.readSnapshots.length === 0)).toBe(true);
   });
 

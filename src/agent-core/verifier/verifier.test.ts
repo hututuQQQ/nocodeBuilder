@@ -373,6 +373,124 @@ describe("AgentVerifier", () => {
     });
   });
 
+  it("does not block on pre-existing unrelated build failures", async () => {
+    const run = createRun("Change hero copy", "copy_edit");
+    const verifier = new AgentVerifier({
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+      }),
+      runCommand: async (command) =>
+        command === "npm run build"
+          ? {
+              command,
+              exitCode: 1,
+              output: "./lib/legacy.ts:10:2\nType error: legacy failure",
+              success: false,
+            }
+          : null,
+    });
+
+    const report = await verifier.verify({
+      baselineCommandResults: {
+        build: {
+          command: "npm run build",
+          exitCode: 1,
+          output: "./lib/legacy.ts:10:2\nType error: legacy failure",
+          success: false,
+        },
+      },
+      changedFiles: ["app/page.tsx"],
+      packageChanged: false,
+      run,
+    });
+
+    expect(report.status).toBe("passed");
+    expect(report.checks.find((check) => check.id === "build")).toMatchObject({
+      classification: "pre_existing",
+      severity: "warning",
+      status: "inconclusive",
+    });
+  });
+
+  it("blocks pre-existing failures that overlap changed files", async () => {
+    const run = createRun("Change hero copy", "copy_edit");
+    const verifier = new AgentVerifier({
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+      }),
+      runCommand: async (command) =>
+        command === "npm run build"
+          ? {
+              command,
+              exitCode: 1,
+              output: "./app/page.tsx:12:3\nType error: changed file failure",
+              success: false,
+            }
+          : null,
+    });
+
+    const report = await verifier.verify({
+      baselineCommandResults: {
+        build: {
+          command: "npm run build",
+          exitCode: 1,
+          output: "./app/page.tsx:12:3\nType error: changed file failure",
+          success: false,
+        },
+      },
+      changedFiles: ["app/page.tsx"],
+      packageChanged: false,
+      run,
+    });
+
+    expect(report.status).toBe("failed");
+    expect(report.checks.find((check) => check.id === "build")).toMatchObject({
+      classification: "pre_existing",
+      relatedToChangedFiles: true,
+      severity: "blocking",
+    });
+  });
+
+  it("skips preview startup for small edit tasks when no preview is running", async () => {
+    const run = createRun("Change hero copy", "copy_edit");
+    let startedPreview = false;
+    const verifier = new AgentVerifier({
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+      }),
+      runCommand: async (command) =>
+        command === "npm run build"
+          ? { command, exitCode: 0, output: "ok", success: true }
+          : null,
+      startPreview: async () => {
+        startedPreview = true;
+        return "http://localhost:3000";
+      },
+    });
+
+    const report = await verifier.verify({
+      changedFiles: ["app/page.tsx"],
+      packageChanged: false,
+      run,
+    });
+
+    expect(startedPreview).toBe(false);
+    expect(report.status).toBe("passed");
+    expect(report.checks.find((check) => check.id === "preview")).toMatchObject({
+      status: "skipped",
+      required: false,
+    });
+  });
+
   it("includes concise command diagnostics in repair feedback", async () => {
     const run = createRun("Build the site", "full_site");
     const verifier = new AgentVerifier({

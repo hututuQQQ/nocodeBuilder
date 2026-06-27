@@ -111,4 +111,25 @@ describe("TaskContract", () => {
 
     expect(contract.taskType).toBe("backend_feature");
   });
+
+  it("treats bug and failure reports as repair tasks instead of answers", () => {
+    expect(compileTaskContract({
+      objective: "Why can users not register? null value in column user_id violates not-null constraint",
+    }).taskType).toBe("backend_feature");
+    expect(compileTaskContract({
+      objective: "preview white screen, help me fix it",
+    }).taskType).toBe("component_edit");
+    expect(compileTaskContract({
+      objective: "build failed: Type error in app/page.tsx",
+    }).taskType).toBe("component_edit");
+  });
+
+  it("keeps explicit no-change bug explanations read-only", () => {
+    const contract = compileTaskContract({
+      objective: "Explain why registration fails, no changes",
+    });
+
+    expect(contract.taskType).toBe("answer");
+    expect(contract.permissions.fileWrite).toBe(false);
+  });
 });

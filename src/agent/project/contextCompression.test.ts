@@ -260,6 +260,73 @@ describe("agent context compression", () => {
     expect(compressed.specContext?.requirements.map((item) => item.id))
       .toContain("story-linked");
   });
+
+  it("retains workingState blocker code and suggestedAction under hard caps", () => {
+    const context = createAgentStepContext({
+      observations: Array.from({ length: 40 }, (_, index) => ({
+        content: `large observation ${index} ${"x".repeat(10_000)}`,
+        ok: index % 9 !== 0,
+        step: index + 1,
+        summary: `Observation ${index}`,
+        tool: "read_files",
+      })),
+      workingState: {
+        objective: "Repair stale edit",
+        repeatedActionCount: 2,
+        currentBlocker: {
+          code: "OLD_STRING_NOT_FOUND",
+          message: `old_string not found ${"x".repeat(10_000)}`,
+          fingerprint: "edit_file:app/page.tsx",
+          suggestedAction: {
+            type: "tool_call",
+            tool: "read_files",
+            args: { paths: ["app/page.tsx"] },
+            rationale: "Refresh exact content.",
+          },
+        },
+        evidence: {
+          acceptanceEvidence: [],
+          diagnostics: [
+            {
+              at: "2026-01-01T00:00:00.000Z",
+              code: "OLD_STRING_NOT_FOUND",
+              line: 12,
+              column: 3,
+              message: "edit_file old_string was not found",
+              path: "app/page.tsx",
+              source: "tool",
+            },
+          ],
+          mutations: [],
+          readFiles: [
+            {
+              contentHash: "10:abcd",
+              path: "app/page.tsx",
+              ranges: [{ startLine: 1, endLine: 80 }],
+              readAt: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+          searches: [],
+        },
+        nextStepHint: "Read app/page.tsx before editing.",
+      },
+    });
+
+    const compressed = compressAgentStepContext(context);
+
+    expect(compressed.workingState?.currentBlocker).toMatchObject({
+      code: "OLD_STRING_NOT_FOUND",
+      suggestedAction: {
+        type: "tool_call",
+        tool: "read_files",
+      },
+    });
+    expect(compressed.workingState?.evidence.diagnostics[0]).toMatchObject({
+      path: "app/page.tsx",
+      line: 12,
+      column: 3,
+    });
+  });
 });
 
 function createAgentStepContext(

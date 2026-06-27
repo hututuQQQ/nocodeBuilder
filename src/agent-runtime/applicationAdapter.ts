@@ -41,6 +41,7 @@ import { isTerminalAgentRunStatus, RunStateMachine } from "../agent-core/runtime
 import type {
   AgentApproval,
   AgentEvent,
+  AgentStructuredObservation,
   AgentRunFailureKind,
   AgentRun,
   AgentRunCheckpoint,
@@ -768,6 +769,7 @@ async function verifyRunPort({
     changedFiles: string[];
     deletedFiles: string[];
     externalEffects: string[];
+    noOpReason?: string;
     packageChanged: boolean;
     readSnapshots?: AgentRunCheckpoint["readSnapshots"];
     run: AgentRun;
@@ -821,6 +823,7 @@ async function verifyRunPort({
     changedFiles: input.changedFiles,
     deletedFiles: input.deletedFiles,
     externalEffects: input.externalEffects,
+    noOpReason: input.noOpReason,
     packageChanged: input.packageChanged,
     previewUrl: store.get().previewUrl,
     readSnapshots: input.readSnapshots,
@@ -971,6 +974,7 @@ async function buildAgentStepContext({
           pending: [],
           risks: [],
         },
+    workingState: context.workingState,
     workingSummary: dynamicContext.workingSummary,
   };
 
@@ -1215,6 +1219,12 @@ async function restoreAdapterState(
         session.runState.readFiles.set(snapshot.path, {
           content,
           contentHash: snapshot.contentHash,
+          ranges: [
+            {
+              endLine: snapshot.endLine ?? countLines(content),
+              startLine: snapshot.startLine ?? 1,
+            },
+          ],
           path: snapshot.path,
           readAt: snapshot.readAt,
         });
@@ -1338,11 +1348,18 @@ function persistRuntimeCurrentConversation(
 }
 
 function collectReadSnapshots(runState: AgentRunState) {
-  return Array.from(runState.readFiles.values()).map((file) => ({
-    contentHash: file.contentHash,
-    path: file.path,
-    readAt: file.readAt,
-  }));
+  return Array.from(runState.readFiles.values()).flatMap((file) => {
+    const ranges = Array.isArray(file.ranges) ? file.ranges : [];
+
+    return (ranges.length > 0 ? ranges : [{ endLine: undefined, startLine: undefined }])
+      .map((range) => ({
+        contentHash: file.contentHash,
+        endLine: range.endLine,
+        path: file.path,
+        readAt: file.readAt,
+        startLine: range.startLine,
+      }));
+  });
 }
 
 async function validateReadSnapshotsForProject(
@@ -1826,6 +1843,7 @@ function toAgentObservation(value: string, step: number): AgentObservation {
         content: typeof parsed.content === "string" ? parsed.content : undefined,
         ok: parsed.ok,
         step,
+        structuredData: extractStructuredObservation(parsed),
         summary: parsed.summary,
         tool: parsed.tool,
       };
@@ -1841,6 +1859,55 @@ function toAgentObservation(value: string, step: number): AgentObservation {
     summary: value,
     tool: "observation",
   };
+}
+
+function isStructuredObservation(value: unknown): value is AgentStructuredObservation {
+  return (
+    isRecord(value) &&
+    typeof value.ok === "boolean" &&
+    typeof value.summary === "string" &&
+    (
+      typeof value.error === "undefined" ||
+      (
+        isRecord(value.error) &&
+        typeof value.error.code === "string" &&
+        typeof value.error.message === "string"
+      )
+    )
+  );
+}
+
+function extractStructuredObservation(
+  value: Partial<AgentObservation>,
+): AgentStructuredObservation | undefined {
+  if (isStructuredObservation(value.structuredData)) {
+    return value.structuredData;
+  }
+
+  if (isStructuredObservation(value)) {
+    return value;
+  }
+
+  if (typeof value.content === "string") {
+    try {
+      const parsed = JSON.parse(value.content) as unknown;
+
+      if (isStructuredObservation(parsed)) {
+        return parsed;
+      }
+
+      if (
+        isRecord(parsed) &&
+        isStructuredObservation(parsed.structuredData)
+      ) {
+        return parsed.structuredData;
+      }
+    } catch {
+      return undefined;
+    }
+  }
+
+  return undefined;
 }
 
 function buildAgentDiagnostics(projectError: string | null, terminalLogs: string[]) {
@@ -1894,6 +1961,10 @@ function hashText(content: string) {
   }
 
   return `${content.length}:${(hash >>> 0).toString(16)}`;
+}
+
+function countLines(content: string) {
+  return content.split(/\r\n|\r|\n/).length;
 }
 
 function delay(milliseconds: number) {

@@ -68,7 +68,7 @@ describe("checkRunDrift", () => {
     expect(result.suggestedAction).toBe("block_plan");
   });
 
-  it("blocks finish candidates without linked acceptance criteria evidence", () => {
+  it("allows finish candidates through to verifier even without linked acceptance evidence", () => {
     const result = checkRunDrift({
       manifest: createManifest(),
       action: {
@@ -79,9 +79,7 @@ describe("checkRunDrift", () => {
       recentObservations: [],
     });
 
-    expect(result.ok).toBe(false);
-    expect(result.reason).toContain("linked acceptance criteria");
-    expect(result.suggestedAction).toBe("block_plan");
+    expect(result.ok).toBe(true);
   });
 
   it("allows finish candidates when changed task files provide acceptance evidence", () => {

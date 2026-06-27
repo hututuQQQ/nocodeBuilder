@@ -41,6 +41,7 @@ describe("Core tool registry", () => {
   it("limits parallel calls to read-only tools", () => {
     expect(() => assertReadOnlyBatch(["read_files", "grep_files"])).not.toThrow();
     expect(() => assertReadOnlyBatch(["read_files", "edit_file"])).toThrow(/read-only/);
+    expect(() => assertReadOnlyBatch(["read_files", "replace_file_range"])).toThrow(/read-only/);
   });
 
   it("keeps registry, model actions, validator, and executor tool sets aligned", () => {
@@ -98,6 +99,14 @@ function sampleArgsForTool(tool: string) {
         old_string: "old",
         path: "app/page.tsx",
         summary: "Edit page",
+      };
+    case "replace_file_range":
+      return {
+        endLine: 3,
+        newContent: "replacement",
+        path: "app/page.tsx",
+        startLine: 2,
+        summary: "Replace range",
       };
     case "find_site_node":
       return { textHint: "pricing" };

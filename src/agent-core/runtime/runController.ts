@@ -2,10 +2,14 @@ import type {
   AgentApproval,
   AgentApprovalDecision,
   AgentEvent,
+  AgentFailureCode,
   AgentReadSnapshot,
   AgentRun,
   AgentRunCheckpoint,
+  AgentStructuredObservation,
+  AgentWorkingState,
   RunContextSummary,
+  SuggestedAgentAction,
   TaskContract,
   ToolResult,
   VerificationReport,
@@ -64,6 +68,7 @@ export type RunContextBundle = {
   run: AgentRun;
   runContextSummary: RunContextSummary;
   steering: string[];
+  workingState: AgentWorkingState;
   workspaceFingerprint: string;
 };
 
@@ -104,6 +109,7 @@ export type VerifierPort = {
     changedFiles: string[];
     deletedFiles: string[];
     externalEffects: string[];
+    noOpReason?: string;
     packageChanged: boolean;
     readSnapshots?: AgentReadSnapshot[];
     run: AgentRun;
@@ -205,6 +211,7 @@ type RunDriveState = {
   pendingEvidenceVerification?: PendingEvidenceVerificationState;
   pendingApprovalAction?: HeadlessToolCallAction;
   plan: unknown;
+  preflightAutoReadFingerprints: string[];
   readSnapshots: AgentRunCheckpoint["readSnapshots"];
   repairFeedback: string[];
   consecutiveModelValidationFailures: number;
@@ -213,6 +220,7 @@ type RunDriveState = {
   progressGuard: ProgressGuardState;
   runContextSummary: RunContextSummary;
   steeringWatermark: number;
+  workingState: AgentWorkingState;
 };
 
 type LoopGuardState = {
@@ -221,7 +229,10 @@ type LoopGuardState = {
 };
 
 type ProgressGuardState = {
+  lastReadOnlyActionFingerprint?: string;
+  readOnlyRescuedFingerprint?: string;
   readOnlyNoProgressCount: number;
+  repeatedReadOnlyActionCount: number;
   readOnlyStallPostRescueCount: number;
   readOnlyStallRescued: boolean;
 };
@@ -453,6 +464,7 @@ export class RunController {
 
       state.consecutiveDriftFailures = 0;
       state.consecutiveModelValidationFailures = 0;
+      state.workingState.lastActionFingerprint = buildActionFingerprint(action);
       run = await this.ports.runStore.recordProgress(
         run,
         { modelTurns: run.modelTurns + 1 },
@@ -681,8 +693,14 @@ export class RunController {
 
     if (!policyDecision.allowed) {
       state.observations.push(
-        `Policy denied ${action.tool}: ${policyDecision.reason}`,
+        JSON.stringify(buildPolicyDeniedObservation(run, action, policyDecision.reason)),
       );
+      state.workingState.currentBlocker = {
+        code: "POLICY_DENIED",
+        message: policyDecision.reason,
+        fingerprint: buildActionFingerprint(action),
+        suggestedAction: inferPolicyDeniedSuggestedAction(run, action, policyDecision.reason),
+      };
       await this.ports.eventStore.append({
         runId: run.id,
         type: "policy.denied",
@@ -728,6 +746,7 @@ export class RunController {
       return waitingRun;
     }
 
+    const actionFingerprint = buildActionFingerprint(action);
     const toolCallId = createId("tool-call");
 
     if (approvedAuthorization) {
@@ -771,6 +790,48 @@ export class RunController {
           },
         });
         await this.saveCheckpoint(run, state, "approval-claim-failed");
+        return run;
+      }
+    }
+
+    const preflightReadPaths = getPreflightReadBeforeWritePaths(action, state);
+
+    if (
+      preflightReadPaths.length > 0 &&
+      !state.preflightAutoReadFingerprints.includes(actionFingerprint)
+    ) {
+      state.preflightAutoReadFingerprints.push(actionFingerprint);
+      state.observations.push(
+        JSON.stringify(buildPreflightAutoReadObservation(action, preflightReadPaths)),
+      );
+      state.workingState.currentBlocker = {
+        code: "MUST_READ_BEFORE_WRITE",
+        message: `${action.tool} requires current read evidence before mutation.`,
+        fingerprint: actionFingerprint,
+        suggestedAction: {
+          type: "tool_call",
+          tool: "read_files",
+          args: { paths: preflightReadPaths },
+          rationale: "Runtime preflight is refreshing files before mutation.",
+        },
+      };
+      await this.saveCheckpoint(run, state, `preflight-read:${action.tool}`);
+      run = await this.executeToolBatch(
+        run,
+        preflightReadPaths.map((path) => ({
+          tool: "read_files",
+          args: { paths: [path] },
+          rationale: "Read current file contents before retrying the mutation.",
+        })),
+        state,
+        signal,
+      );
+
+      if (
+        isTerminalAgentRunStatus(run.status) ||
+        run.status === "waiting_approval" ||
+        run.status === "paused"
+      ) {
         return run;
       }
     }
@@ -870,6 +931,7 @@ export class RunController {
     }
 
     const progressSignal = await this.handleToolProgressSignal(nextRun, state, {
+      actionFingerprint,
       readOnlyCount: tool.readOnly ? 1 : 0,
       resetReadOnlyStall: !tool.readOnly || mutationDelta > 0,
     });
@@ -1112,6 +1174,10 @@ export class RunController {
     }
 
     const progressSignal = await this.handleToolProgressSignal(nextRun, state, {
+      actionFingerprint: buildActionFingerprint({
+        calls: actions,
+        type: "tool_calls",
+      }),
       readOnlyCount: results.length,
       resetReadOnlyStall: results.some((result) => result.status !== "success"),
     });
@@ -1210,6 +1276,9 @@ export class RunController {
       changedFiles: [...state.changedFiles],
       deletedFiles: [...state.deletedFiles],
       externalEffects: [...state.externalEffects],
+      noOpReason: hasImplementationProgress(run, state)
+        ? undefined
+        : state.finishSummary,
       packageChanged: state.packageChanged,
       readSnapshots: [...state.readSnapshots],
       run,
@@ -1462,12 +1531,14 @@ export class RunController {
       observations,
       signal,
     );
+    state.workingState = buildCurrentWorkingState(run, state);
 
     return {
       observations,
       run,
       runContextSummary: state.runContextSummary,
       steering,
+      workingState: state.workingState,
       workspaceFingerprint: await this.ports.workspace.fingerprint(),
     };
   }
@@ -1553,6 +1624,7 @@ export class RunController {
     run: AgentRun,
     state: RunDriveState,
     signal: {
+      actionFingerprint?: string;
       readOnlyCount: number;
       resetReadOnlyStall: boolean;
     },
@@ -1562,9 +1634,34 @@ export class RunController {
       return { rescued: false, run, stopped: false };
     }
 
+    const fingerprint = signal.actionFingerprint ?? "read-only:unknown";
     state.progressGuard.readOnlyNoProgressCount += signal.readOnlyCount;
 
+    if (state.progressGuard.lastReadOnlyActionFingerprint !== fingerprint) {
+      state.progressGuard.lastReadOnlyActionFingerprint = fingerprint;
+      state.progressGuard.repeatedReadOnlyActionCount = signal.readOnlyCount;
+      state.progressGuard.readOnlyStallPostRescueCount = 0;
+      return { rescued: false, run, stopped: false };
+    }
+
+    state.progressGuard.repeatedReadOnlyActionCount += signal.readOnlyCount;
+
     if (state.progressGuard.readOnlyStallRescued) {
+      if (
+        state.progressGuard.readOnlyRescuedFingerprint === fingerprint
+      ) {
+        const stoppedRun = await this.commit(
+          run,
+          this.machine.transition(run, {
+            budget: "maxModelTurns",
+            failureKind: "loop_exhausted",
+            reason: READ_ONLY_STALL_EXHAUSTED_REASON,
+            type: "budget_exceeded",
+          }),
+        );
+        return { rescued: false, run: stoppedRun, stopped: true };
+      }
+
       state.progressGuard.readOnlyStallPostRescueCount += signal.readOnlyCount;
 
       if (
@@ -1587,16 +1684,17 @@ export class RunController {
     }
 
     if (
-      state.progressGuard.readOnlyNoProgressCount <
-        getReadOnlyNoProgressThreshold(run)
+      state.progressGuard.repeatedReadOnlyActionCount <
+        REPEATED_READ_ONLY_ACTION_RESCUE_THRESHOLD
     ) {
       return { rescued: false, run, stopped: false };
     }
 
     state.progressGuard.readOnlyStallRescued = true;
+    state.progressGuard.readOnlyRescuedFingerprint = fingerprint;
     state.progressGuard.readOnlyStallPostRescueCount = 0;
     state.observations.push(
-      JSON.stringify(buildReadOnlyStallRescueObservation(state)),
+      JSON.stringify(buildReadOnlyStallRescueObservation(state, fingerprint)),
     );
 
     return { rescued: true, run, stopped: false };
@@ -1728,6 +1826,8 @@ export class RunController {
         pendingEvidenceVerification: metadata.pendingEvidenceVerification,
         pendingApprovalAction: metadata.pendingApprovalAction,
         plan: metadata.userPlan,
+        preflightAutoReadFingerprints:
+          metadata.preflightAutoReadFingerprints ?? [],
         readSnapshots,
         repairFeedback: [...checkpoint.repairFeedback],
         consecutiveModelValidationFailures:
@@ -1741,6 +1841,7 @@ export class RunController {
           createEmptyRunContextSummary(run.contract.objective),
         ),
         steeringWatermark: checkpoint.steeringWatermark,
+        workingState: metadata.workingState ?? createEmptyWorkingState(run.contract.objective),
       },
     };
   }
@@ -1818,6 +1919,7 @@ function createEmptyDriveState(
     packageChanged: false,
     pendingEvidenceVerification: undefined,
     plan: null,
+    preflightAutoReadFingerprints: [],
     readSnapshots: [],
     repairFeedback: [],
     consecutiveModelValidationFailures: 0,
@@ -1826,6 +1928,7 @@ function createEmptyDriveState(
     progressGuard: createEmptyProgressGuardState(),
     runContextSummary: createEmptyRunContextSummary(),
     steeringWatermark: 0,
+    workingState: createEmptyWorkingState(""),
   };
 }
 
@@ -1843,8 +1946,7 @@ function ensureRunManifest(run: AgentRun): AgentRun & { manifest: TaskManifest }
 }
 
 const MAX_MODEL_VALIDATION_OBSERVATIONS = 2;
-const READ_ONLY_NO_PROGRESS_MIN_THRESHOLD = 10;
-const READ_ONLY_NO_PROGRESS_MAX_THRESHOLD = 16;
+const REPEATED_READ_ONLY_ACTION_RESCUE_THRESHOLD = 3;
 const READ_ONLY_STALL_RESCUE_GRACE = 3;
 const EXPECTED_FILE_AUTO_READ_AFTER_READ_ONLY_COUNT = 2;
 const LOOP_EXHAUSTED_REASON =
@@ -1856,9 +1958,26 @@ const RUN_CONTEXT_SUMMARY_LLM_OBSERVATION_DELTA = 8;
 
 function createEmptyProgressGuardState(): ProgressGuardState {
   return {
+    lastReadOnlyActionFingerprint: undefined,
+    readOnlyRescuedFingerprint: undefined,
     readOnlyNoProgressCount: 0,
+    repeatedReadOnlyActionCount: 0,
     readOnlyStallPostRescueCount: 0,
     readOnlyStallRescued: false,
+  };
+}
+
+function createEmptyWorkingState(objective: string): AgentWorkingState {
+  return {
+    objective,
+    repeatedActionCount: 0,
+    evidence: {
+      acceptanceEvidence: [],
+      diagnostics: [],
+      mutations: [],
+      readFiles: [],
+      searches: [],
+    },
   };
 }
 
@@ -1989,6 +2108,20 @@ function buildModelValidationObservation(
         ? `Invalid response preview:\n${action.invalidResponsePreview}`
         : "",
     ].filter(Boolean).join("\n"),
+    error: {
+      code: "MODEL_PROTOCOL_ERROR" as const,
+      fingerprint: buildFailureFingerprint("model_validation", action.validationError),
+      message: action.validationError,
+      retryable: consecutiveFailures <= MAX_MODEL_VALIDATION_OBSERVATIONS,
+      suggestedAction: {
+        type: "blocker" as const,
+        reason: "The model response did not match the required JSON protocol.",
+        recoveryOptions: [
+          "Return one corrected JSON response.",
+          "Use only supported tool names and arguments.",
+        ],
+      },
+    },
     ok: false,
     summary,
     tool: "model_validation",
@@ -2062,7 +2195,10 @@ function buildBaselineDiagnosticObservations(
   });
 }
 
-function buildReadOnlyStallRescueObservation(state: RunDriveState) {
+function buildReadOnlyStallRescueObservation(
+  state: RunDriveState,
+  repeatedFingerprint: string,
+) {
   const readCount = state.progressGuard.readOnlyNoProgressCount;
   const changedFiles = [...state.changedFiles].slice(-8);
   const latestFailures = state.runContextSummary.latestFailures.slice(-3);
@@ -2075,6 +2211,9 @@ function buildReadOnlyStallRescueObservation(state: RunDriveState) {
     content: [
       "Read-only exploration is repeating without implementation progress.",
       "This is the final automatic rescue attempt for this no-progress pattern.",
+      `Failure code: REPEATED_ACTION.`,
+      `Repeated action fingerprint: ${repeatedFingerprint}.`,
+      `Forbidden repeated action: do not repeat this exact fingerprint again.`,
       `Consecutive read-only tool calls without progress: ${readCount}.`,
       changedFiles.length > 0
         ? `Changed files already available: ${changedFiles.join(", ")}.`
@@ -2086,6 +2225,21 @@ function buildReadOnlyStallRescueObservation(state: RunDriveState) {
     ].filter(Boolean).join("\n"),
     ok: false,
     summary: `Loop rescue: ${summary}`,
+    error: {
+      code: "REPEATED_ACTION" as const,
+      fingerprint: repeatedFingerprint,
+      message: summary,
+      retryable: true,
+      suggestedAction: {
+        type: "blocker" as const,
+        reason: "The same read-only action repeated without new evidence.",
+        recoveryOptions: [
+          "Use a different targeted read/search.",
+          "Apply a focused edit from retained evidence.",
+          "Return finish_candidate if the request is already satisfied.",
+        ],
+      },
+    },
     tool: "loop_rescue",
   };
 }
@@ -2183,6 +2337,179 @@ function buildFailureFingerprint(kind: string, details: string) {
     .slice(0, 900)}`;
 }
 
+export function buildActionFingerprint(action: HeadlessModelAction): string {
+  if (action.type === "tool_call") {
+    return `tool_call:${action.tool}:${stableJson(action.args)}`;
+  }
+
+  if (action.type === "tool_calls") {
+    return `tool_calls:${action.calls
+      .map((call) => `${call.tool}:${stableJson(call.args)}`)
+      .sort()
+      .join("|")}`;
+  }
+
+  if (action.type === "finish_candidate") {
+    return `finish_candidate:${compactSummaryText(action.summary, 300)}`;
+  }
+
+  if (action.type === "answer") {
+    return `answer:${compactSummaryText(action.message, 300)}`;
+  }
+
+  return `model_validation:${compactSummaryText(action.validationError, 300)}`;
+}
+
+function getPreflightReadBeforeWritePaths(
+  action: HeadlessToolCallAction,
+  state: RunDriveState,
+) {
+  const readPaths = new Set(state.readSnapshots.map((snapshot) =>
+    normalizeProjectPath(snapshot.path),
+  ));
+
+  return collectReadBeforeWriteTargetPaths(action)
+    .map(normalizeProjectPath)
+    .filter((path) => path && !readPaths.has(path));
+}
+
+function collectReadBeforeWriteTargetPaths(action: HeadlessToolCallAction) {
+  if (!isRecord(action.args)) {
+    return [];
+  }
+
+  if (
+    (action.tool === "edit_file" || action.tool === "replace_file_range") &&
+    typeof action.args.path === "string"
+  ) {
+    return [action.args.path];
+  }
+
+  if (action.tool === "delete_files" && Array.isArray(action.args.paths)) {
+    return action.args.paths.filter((path): path is string => typeof path === "string");
+  }
+
+  return [];
+}
+
+function buildPreflightAutoReadObservation(
+  action: HeadlessToolCallAction,
+  paths: string[],
+): AgentStructuredObservation {
+  return {
+    ok: true,
+    tool: "runtime_preflight",
+    summary: `Runtime preflight auto-reading before ${action.tool}: ${paths.join(", ")}`,
+    error: {
+      code: "MUST_READ_BEFORE_WRITE",
+      message: `${action.tool} requires fresh file evidence before mutation.`,
+      retryable: true,
+      fingerprint: buildActionFingerprint(action),
+      relatedFiles: paths,
+      suggestedAction: {
+        type: "tool_call",
+        tool: "read_files",
+        args: { paths },
+        rationale: "Read target file contents before retrying the mutation.",
+      },
+    },
+    evidence: {
+      readFiles: paths.map((path) => ({ path })),
+    },
+  };
+}
+
+function buildPolicyDeniedObservation(
+  run: AgentRun,
+  action: HeadlessToolCallAction,
+  reason: string,
+): AgentStructuredObservation {
+  const relatedFiles = collectTargetResources(action.args).map(normalizeProjectPath);
+
+  return {
+    ok: false,
+    tool: "policy",
+    summary: `Policy denied ${action.tool}: ${reason}`,
+    error: {
+      code: inferPolicyDeniedCode(reason),
+      message: reason,
+      retryable: true,
+      fingerprint: buildActionFingerprint(action),
+      relatedFiles,
+      suggestedAction: inferPolicyDeniedSuggestedAction(run, action, reason),
+    },
+  };
+}
+
+function inferPolicyDeniedCode(reason: string): AgentFailureCode {
+  if (/forbidden/i.test(reason)) {
+    return "FORBIDDEN_PATH";
+  }
+
+  if (/outside|scope|allowed/i.test(reason)) {
+    return "OUTSIDE_ALLOWED_PATH";
+  }
+
+  if (/approval/i.test(reason)) {
+    return "APPROVAL_REQUIRED";
+  }
+
+  return "POLICY_DENIED";
+}
+
+function inferPolicyDeniedSuggestedAction(
+  run: AgentRun,
+  _action: HeadlessToolCallAction,
+  reason: string,
+): SuggestedAgentAction {
+  if (
+    run.contract.taskType === "answer" &&
+    !run.contract.permissions.fileWrite &&
+    /(write|edit|delete|file)/i.test(reason)
+  ) {
+    return {
+      type: "revise_contract",
+      reason: "The task is classified as answer/read-only but the attempted action needs file writes.",
+      patch: {
+        taskType: "component_edit",
+        permissions: { fileWrite: true },
+      },
+    };
+  }
+
+  if (/approval/i.test(reason)) {
+    return {
+      type: "request_approval",
+      reason,
+    };
+  }
+
+  return {
+    type: "blocker",
+    reason,
+    recoveryOptions: [
+      "Choose a path inside allowed scope.",
+      "Revise or expand the task contract/spec scope.",
+      "Stop instead of retrying the denied action.",
+    ],
+  };
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(",")}]`;
+  }
+
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
+  }
+
+  return JSON.stringify(value);
+}
+
 function createEmptyRunContextSummary(objective = ""): RunContextSummary {
   return {
     changedFiles: [],
@@ -2195,24 +2522,6 @@ function createEmptyRunContextSummary(objective = ""): RunContextSummary {
     objective,
     summarizedObservationCount: 0,
   };
-}
-
-function getReadOnlyNoProgressThreshold(run: AgentRun) {
-  const expectedFiles = run.contract.source?.expectedFiles?.length ?? 0;
-  const expectedFileAllowance =
-    expectedFiles > 0
-      ? expectedFiles * 3 + 4
-      : READ_ONLY_NO_PROGRESS_MIN_THRESHOLD;
-  const budgetAwareAllowance = Math.max(
-    6,
-    Math.floor(run.contract.budget.maxModelTurns * 0.4),
-  );
-
-  return Math.min(
-    READ_ONLY_NO_PROGRESS_MAX_THRESHOLD,
-    Math.max(READ_ONLY_NO_PROGRESS_MIN_THRESHOLD, expectedFileAllowance),
-    budgetAwareAllowance,
-  );
 }
 
 function buildDeterministicRunContextSummary({
@@ -2501,6 +2810,8 @@ function buildVerificationObservation(report: VerificationReport) {
       ? "Verification passed."
       : `Verification ${report.status}: ${failedOrMissing.slice(0, 3).join(" ")}`;
 
+  const code = classifyVerificationFailureCode(report);
+
   return {
     content: [
       `Verification report ${report.id}: ${report.status}.`,
@@ -2511,10 +2822,67 @@ function buildVerificationObservation(report: VerificationReport) {
         ? `Repair or missing evidence: ${failedOrMissing.join(" ")}`
         : "",
     ].filter(Boolean).join("\n"),
+    error: report.status === "passed"
+      ? undefined
+      : {
+          code,
+          fingerprint: buildFailureFingerprint(
+            "verification",
+            buildVerificationFailureDetails(report),
+          ),
+          message: failedOrMissing.slice(0, 3).join(" ") ||
+            `Verification ${report.status}.`,
+          retryable: true,
+          suggestedAction: {
+            type: "tool_call" as const,
+            tool: "read_files",
+            args: {
+              paths: uniqueStrings(
+                report.checks.flatMap((check) =>
+                  extractLikelyFilePaths([
+                    check.summary,
+                    typeof check.details === "string" ? check.details : stringifyPayload(check.details),
+                  ].join("\n")),
+                ),
+              ).slice(0, 4),
+            },
+            rationale: "Refresh files named in verifier diagnostics before repairing.",
+          },
+        },
     ok: report.status === "passed",
     summary: compactSummaryText(summary, 420),
     tool: "verification",
   };
+}
+
+function classifyVerificationFailureCode(report: VerificationReport): AgentFailureCode {
+  const text = [
+    ...report.newlyIntroducedFailures,
+    ...report.missingEvidence,
+    ...report.repairFeedback,
+  ].join("\n");
+
+  if (/expected file evidence/i.test(text)) {
+    return "MISSING_EXPECTED_FILE_EVIDENCE";
+  }
+
+  if (/acceptance/i.test(text)) {
+    return "MISSING_ACCEPTANCE_EVIDENCE";
+  }
+
+  if (/build/i.test(text)) {
+    return /pre-existing/i.test(text)
+      ? "BUILD_PREEXISTING_UNRELATED"
+      : "BUILD_REGRESSION";
+  }
+
+  if (/preview/i.test(text)) {
+    return /unavailable|did not produce/i.test(text)
+      ? "PREVIEW_UNAVAILABLE"
+      : "PREVIEW_REGRESSION";
+  }
+
+  return "UNKNOWN_RUNTIME_FAILURE";
 }
 
 function buildToolObservation(tool: string, result: ToolResult) {
@@ -2569,9 +2937,11 @@ type CheckpointDriveStateMetadata = {
   loopGuard?: LoopGuardState;
   pendingEvidenceVerification?: PendingEvidenceVerificationState;
   pendingApprovalAction?: HeadlessToolCallAction;
+  preflightAutoReadFingerprints?: string[];
   progressGuard?: ProgressGuardState;
   runContextSummary?: RunContextSummary;
   userPlan: unknown;
+  workingState?: AgentWorkingState;
 };
 
 const DRIVE_STATE_PLAN_KEY = "__headlessRunController";
@@ -2593,10 +2963,221 @@ function writeDriveStateMetadata(state: RunDriveState) {
       loopGuard: state.loopGuard,
       pendingEvidenceVerification: state.pendingEvidenceVerification,
       pendingApprovalAction: state.pendingApprovalAction,
+      preflightAutoReadFingerprints: state.preflightAutoReadFingerprints,
       progressGuard: state.progressGuard,
       runContextSummary: state.runContextSummary,
+      workingState: state.workingState,
     },
   };
+}
+
+function buildCurrentWorkingState(
+  run: AgentRun,
+  state: RunDriveState,
+): AgentWorkingState {
+  const existing = state.workingState ?? createEmptyWorkingState(run.contract.objective);
+  const latestStructuredFailure = [...state.observations]
+    .reverse()
+    .map(readStructuredObservation)
+    .find((observation) => observation?.error);
+  const currentBlocker = latestStructuredFailure?.error
+    ? {
+        code: latestStructuredFailure.error.code,
+        message: latestStructuredFailure.error.message,
+        fingerprint: latestStructuredFailure.error.fingerprint,
+        suggestedAction: latestStructuredFailure.error.suggestedAction,
+      }
+    : existing.currentBlocker;
+
+  return {
+    ...existing,
+    objective: run.contract.objective,
+    currentBlocker,
+    repeatedActionCount:
+      state.progressGuard.repeatedReadOnlyActionCount ||
+      existing.repeatedActionCount,
+    evidence: {
+      ...existing.evidence,
+      readFiles: buildWorkingStateReadEvidence(state.readSnapshots),
+      diagnostics: uniqueWorkingDiagnostics([
+        ...existing.evidence.diagnostics,
+        ...collectStructuredDiagnostics(state.observations),
+      ]).slice(-40),
+      mutations: uniqueWorkingMutations([
+        ...existing.evidence.mutations,
+        ...[...state.changedFiles].map((path) => ({
+          action: "edit",
+          at: run.updatedAt,
+          path,
+          summary: "File changed during this run.",
+        })),
+        ...[...state.deletedFiles].map((path) => ({
+          action: "delete",
+          at: run.updatedAt,
+          path,
+          summary: "File deleted during this run.",
+        })),
+      ]).slice(-40),
+    },
+    nextStepHint: state.runContextSummary.nextStep,
+  };
+}
+
+function buildWorkingStateReadEvidence(snapshots: AgentReadSnapshot[]) {
+  const byPath = new Map<string, AgentWorkingState["evidence"]["readFiles"][number]>();
+
+  for (const snapshot of snapshots) {
+    const existing = byPath.get(snapshot.path);
+    const range = {
+      startLine: snapshot.startLine ?? 1,
+      endLine: snapshot.endLine ?? Number.MAX_SAFE_INTEGER,
+    };
+
+    if (!existing) {
+      byPath.set(snapshot.path, {
+        path: snapshot.path,
+        contentHash: snapshot.contentHash,
+        ranges: [range],
+        readAt: snapshot.readAt,
+      });
+      continue;
+    }
+
+    existing.ranges = mergeLineRanges([...existing.ranges, range]);
+    if (snapshot.readAt > existing.readAt) {
+      existing.readAt = snapshot.readAt;
+      existing.contentHash = snapshot.contentHash;
+    }
+  }
+
+  return [...byPath.values()].slice(-80);
+}
+
+function collectStructuredDiagnostics(
+  observations: unknown[],
+): AgentWorkingState["evidence"]["diagnostics"] {
+  return observations.flatMap((observation) => {
+    const structured = readStructuredObservation(observation);
+
+    if (!structured?.error) {
+      return [];
+    }
+
+    const at = new Date().toISOString();
+    const diagnostics: AgentWorkingState["evidence"]["diagnostics"] =
+      structured.error.diagnostics?.map((diagnostic) => ({
+      source: "tool" as const,
+      code: structured.error?.code,
+      path: diagnostic.path,
+      line: diagnostic.line,
+      column: diagnostic.column,
+      message: diagnostic.message,
+      at,
+    })) ?? [];
+
+    return diagnostics.length > 0
+      ? diagnostics
+      : [{
+          source: "runtime" as const,
+          code: structured.error.code,
+          message: structured.error.message,
+          at,
+        }];
+  });
+}
+
+function readStructuredObservation(value: unknown): AgentStructuredObservation | null {
+  const parsed = typeof value === "string" ? parseObservationRecord(value) : value;
+
+  if (!isRecord(parsed)) {
+    return null;
+  }
+
+  if (isRecord(parsed.structuredData)) {
+    return readStructuredObservation(parsed.structuredData);
+  }
+
+  if (
+    typeof parsed.ok === "boolean" &&
+    typeof parsed.summary === "string" &&
+    (
+      typeof parsed.error === "undefined" ||
+      (
+        isRecord(parsed.error) &&
+        typeof parsed.error.code === "string" &&
+        typeof parsed.error.message === "string"
+      )
+    )
+  ) {
+    return parsed as AgentStructuredObservation;
+  }
+
+  if (typeof parsed.content === "string") {
+    return readStructuredObservation(parsed.content);
+  }
+
+  return null;
+}
+
+function uniqueWorkingDiagnostics(
+  diagnostics: AgentWorkingState["evidence"]["diagnostics"],
+) {
+  const seen = new Set<string>();
+
+  return diagnostics.filter((diagnostic) => {
+    const key = [
+      diagnostic.source,
+      diagnostic.code,
+      diagnostic.path,
+      diagnostic.line,
+      diagnostic.column,
+      diagnostic.message,
+    ].join(":");
+
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
+}
+
+function uniqueWorkingMutations(
+  mutations: AgentWorkingState["evidence"]["mutations"],
+) {
+  const seen = new Set<string>();
+
+  return mutations.filter((mutation) => {
+    const key = `${mutation.action}:${mutation.path}:${mutation.summary}`;
+
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
+}
+
+function mergeLineRanges(ranges: Array<{ endLine: number; startLine: number }>) {
+  const sorted = ranges
+    .filter((range) => range.startLine > 0 && range.endLine >= range.startLine)
+    .sort((left, right) => left.startLine - right.startLine);
+  const merged: Array<{ endLine: number; startLine: number }> = [];
+
+  for (const range of sorted) {
+    const previous = merged[merged.length - 1];
+
+    if (!previous || range.startLine > previous.endLine + 1) {
+      merged.push({ ...range });
+      continue;
+    }
+
+    previous.endLine = Math.max(previous.endLine, range.endLine);
+  }
+
+  return merged;
 }
 
 export function readRunDriveStateMetadata(plan: unknown): CheckpointDriveStateMetadata {
@@ -2654,8 +3235,12 @@ export function readRunDriveStateMetadata(plan: unknown): CheckpointDriveStateMe
     pendingApprovalAction: isHeadlessToolCallAction(metadataRecord.pendingApprovalAction)
       ? metadataRecord.pendingApprovalAction
       : undefined,
+    preflightAutoReadFingerprints: readOptionalStringArray(
+      metadataRecord.preflightAutoReadFingerprints,
+    ),
     progressGuard: readProgressGuardState(metadataRecord.progressGuard),
     runContextSummary: readRunContextSummary(metadataRecord.runContextSummary),
+    workingState: readWorkingState(metadataRecord.workingState),
     userPlan: "userPlan" in record ? record.userPlan : null,
   };
 }
@@ -2704,8 +3289,18 @@ function readProgressGuardState(value: unknown): ProgressGuardState | undefined 
   }
 
   return {
+    lastReadOnlyActionFingerprint:
+      typeof value.lastReadOnlyActionFingerprint === "string"
+        ? value.lastReadOnlyActionFingerprint
+        : undefined,
+    readOnlyRescuedFingerprint:
+      typeof value.readOnlyRescuedFingerprint === "string"
+        ? value.readOnlyRescuedFingerprint
+        : undefined,
     readOnlyNoProgressCount:
       readNonNegativeInteger(value.readOnlyNoProgressCount) ?? 0,
+    repeatedReadOnlyActionCount:
+      readNonNegativeInteger(value.repeatedReadOnlyActionCount) ?? 0,
     readOnlyStallPostRescueCount:
       readNonNegativeInteger(value.readOnlyStallPostRescueCount) ?? 0,
     readOnlyStallRescued: value.readOnlyStallRescued === true,
@@ -2732,6 +3327,58 @@ function readPendingEvidenceVerificationState(
     missingExpectedFiles,
     reason,
   };
+}
+
+function readWorkingState(value: unknown): AgentWorkingState | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const fallback = createEmptyWorkingState(
+    typeof value.objective === "string" ? value.objective : "",
+  );
+  const evidence = isRecord(value.evidence) ? value.evidence : {};
+
+  return {
+    objective:
+      typeof value.objective === "string" ? value.objective : fallback.objective,
+    currentBlocker: readWorkingStateBlocker(value.currentBlocker),
+    lastActionFingerprint:
+      typeof value.lastActionFingerprint === "string"
+        ? value.lastActionFingerprint
+        : undefined,
+    repeatedActionCount:
+      readNonNegativeInteger(value.repeatedActionCount) ?? 0,
+    evidence: {
+      readFiles: readWorkingStateArray(evidence.readFiles),
+      searches: readWorkingStateArray(evidence.searches),
+      diagnostics: readWorkingStateArray(evidence.diagnostics),
+      mutations: readWorkingStateArray(evidence.mutations),
+      acceptanceEvidence: readWorkingStateArray(evidence.acceptanceEvidence),
+    },
+    nextStepHint:
+      typeof value.nextStepHint === "string" ? value.nextStepHint : undefined,
+  };
+}
+
+function readWorkingStateBlocker(value: unknown): AgentWorkingState["currentBlocker"] {
+  if (!isRecord(value) || typeof value.code !== "string" || typeof value.message !== "string") {
+    return undefined;
+  }
+
+  return {
+    code: value.code as AgentFailureCode,
+    message: value.message,
+    fingerprint:
+      typeof value.fingerprint === "string" ? value.fingerprint : undefined,
+    suggestedAction: isRecord(value.suggestedAction)
+      ? value.suggestedAction as SuggestedAgentAction
+      : undefined,
+  };
+}
+
+function readWorkingStateArray(value: unknown): never[] {
+  return Array.isArray(value) ? value as never[] : [];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
