@@ -18,8 +18,11 @@ const MOJIBAKE_PATTERN = new RegExp(
     "\u938c",
     "\u6d63",
     "\u7487",
+    "\u74ba",
     "\u7f01",
     "\u6168",
+    "\u9420",
+    "\ufffd",
   ].join("|"),
 );
 

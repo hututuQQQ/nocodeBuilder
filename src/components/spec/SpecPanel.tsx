@@ -423,7 +423,7 @@ function RequirementsView({ revision }: { revision: SpecRevision }) {
           title={t("spec.acceptanceCriteria")}
           items={revision.requirements.acceptanceCriteria.map(
             (criterion) =>
-              `${criterion.required ? t("common.required") : t("common.optional")} 璺?${criterion.description}`,
+              `${criterion.required ? t("common.required") : t("common.optional")}: ${criterion.description}`,
           )}
         />
         <ListBlock title={t("spec.constraints")} items={revision.requirements.constraints} />
@@ -455,12 +455,12 @@ function DesignView({ revision }: { revision: SpecRevision }) {
       <div className="mt-3 grid gap-3 lg:grid-cols-2">
         <ListBlock
           title={t("spec.pages")}
-          items={revision.design.pages.map((page) => `${page.route} 璺?${page.purpose}`)}
+          items={revision.design.pages.map((page) => `${page.route}: ${page.purpose}`)}
         />
         <ListBlock
           title={t("spec.components")}
           items={revision.design.components.map(
-            (component) => `${component.name} 璺?${component.responsibility}`,
+            (component) => `${component.name}: ${component.responsibility}`,
           )}
         />
         <ListBlock title={t("spec.dataModel")} items={revision.design.dataModel} />
