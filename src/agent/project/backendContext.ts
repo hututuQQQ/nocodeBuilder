@@ -70,7 +70,7 @@ export type ProjectBackendContext = {
 export type SupabaseBackendContext = {
   configured: boolean;
   env: {
-    anonKey: "NEXT_PUBLIC_SUPABASE_ANON_KEY";
+    publishableKey: "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY";
     dbUrl: "SUPABASE_DB_URL";
     schema: "SUPABASE_SCHEMA";
     secretKey: "SUPABASE_SECRET_KEY";
@@ -81,7 +81,7 @@ export type SupabaseBackendContext = {
   schemaLoadError?: string;
   schemaLoadStatus: "loaded" | "not_configured" | "skipped" | "unavailable";
   status: {
-    anonKeyConfigured: boolean;
+    publishableKeyConfigured: boolean;
     dbUrlConfigured: boolean;
     secretKeyConfigured: boolean;
     urlConfigured: boolean;
@@ -120,7 +120,7 @@ export async function buildProjectBackendContext(
   const supabase: SupabaseBackendContext = {
     configured: Boolean(config),
     env: {
-      anonKey: "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+      publishableKey: "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
       dbUrl: "SUPABASE_DB_URL",
       schema: "SUPABASE_SCHEMA",
       secretKey: "SUPABASE_SECRET_KEY",
@@ -134,7 +134,7 @@ export async function buildProjectBackendContext(
     schema: config?.schema ?? "public",
     schemaLoadStatus: config ? "skipped" : "not_configured",
     status: {
-      anonKeyConfigured: Boolean(config?.anonKey.trim()),
+      publishableKeyConfigured: Boolean(config?.publishableKey.trim()),
       dbUrlConfigured: Boolean(config?.dbUrl.trim()),
       secretKeyConfigured: Boolean(config?.secretKey.trim()),
       urlConfigured: Boolean(config?.url.trim()),

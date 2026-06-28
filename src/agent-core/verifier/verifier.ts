@@ -924,8 +924,8 @@ export function verifyScope(
   if (
     normalizedChangedFiles.some(
       (path) =>
-        path === ".aibuilder" ||
-        path.startsWith(".aibuilder/") ||
+        path === ".nocodebuilder" ||
+        path.startsWith(".nocodebuilder/") ||
         path.startsWith(".env") ||
         path.includes("/.env"),
     )

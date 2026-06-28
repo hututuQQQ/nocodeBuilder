@@ -5,7 +5,7 @@ use std::{
 
 use serde_json::Value;
 
-const APP_STORAGE_DIR_NAME: &str = "AIWebBuilder";
+const APP_STORAGE_DIR_NAME: &str = "nocodeBuilder";
 const APP_STORAGE_STATE_DIR: &str = "state";
 
 #[tauri::command]

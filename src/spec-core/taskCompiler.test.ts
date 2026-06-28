@@ -29,7 +29,7 @@ describe("compileSpecTaskContract", () => {
       specId: spec.id,
       taskId: task.id,
     });
-    expect(contract.scope.forbiddenPaths).toContain(".aibuilder/**");
+    expect(contract.scope.forbiddenPaths).toContain(".nocodebuilder/**");
   });
 
   it("rejects unknown task scoped criteria before execution", () => {

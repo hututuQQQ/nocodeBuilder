@@ -8,7 +8,7 @@ use chrono::Utc;
 use super::metadata::read_metadata;
 
 pub const FRAMEWORK: &str = "next-app-router";
-const WORKSPACE_DIR_NAME: &str = "AIBuilderProjects";
+const WORKSPACE_DIR_NAME: &str = "nocodeBuilderProjects";
 
 pub(crate) fn resolve_project_dir(project_id: &str) -> Result<PathBuf, String> {
     validate_project_id(project_id)?;

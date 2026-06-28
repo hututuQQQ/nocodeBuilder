@@ -15,7 +15,7 @@ use crate::projects::resolve_project_dir;
 
 const AGENT_DB_FILE: &str = "agent.sqlite";
 const ARTIFACTS_DIR: &str = "artifacts";
-const METADATA_DIR: &str = ".aibuilder";
+const METADATA_DIR: &str = ".nocodebuilder";
 const SITE_SPEC_FILE: &str = "site-spec.json";
 const SOURCE_MAP_FILE: &str = "source-map.json";
 const SCHEMA_VERSION: i64 = 5;
@@ -817,7 +817,6 @@ async fn init_database(pool: &SqlitePool) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|error| format!("agent-storage: failed to create runs table: {error}"))?;
-    migrate_agent_run_columns(pool).await?;
 
     sqlx::query(
         r#"
@@ -878,7 +877,6 @@ async fn init_database(pool: &SqlitePool) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|error| format!("agent-storage: failed to create approvals table: {error}"))?;
-    migrate_approval_columns(pool).await?;
 
     sqlx::query(
         r#"
@@ -921,7 +919,6 @@ async fn init_database(pool: &SqlitePool) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|error| format!("agent-storage: failed to create checkpoints table: {error}"))?;
-    migrate_checkpoint_columns(pool).await?;
 
     sqlx::query(
         r#"
@@ -1395,9 +1392,7 @@ fn row_to_run(row: sqlx::sqlite::SqliteRow) -> Result<AgentRunRecord, String> {
         .map_err(|error| format!("agent-storage: invalid contract json: {error}"))?;
     let contract = serde_json::from_str(&contract_json)
         .map_err(|error| format!("agent-storage: failed to parse contract json: {error}"))?;
-    let manifest_json: String = row
-        .try_get("manifest_json")
-        .unwrap_or_else(|_| fallback_manifest_json(&contract));
+    let manifest_json: String = row.try_get("manifest_json").map_err(row_error)?;
     let manifest = serde_json::from_str(&manifest_json)
         .map_err(|error| format!("agent-storage: failed to parse manifest json: {error}"))?;
 
@@ -1438,57 +1433,6 @@ fn row_to_event(row: sqlx::sqlite::SqliteRow) -> Result<AgentEventRecord, String
             format!("agent-storage: failed to parse event artifact ids: {error}")
         })?,
     })
-}
-
-fn fallback_manifest_json(contract: &Value) -> String {
-    let objective = contract
-        .get("objective")
-        .and_then(Value::as_str)
-        .unwrap_or("Agent task");
-    let task_type = contract
-        .get("taskType")
-        .and_then(Value::as_str)
-        .unwrap_or("component_edit");
-    let allowed_paths = contract
-        .pointer("/scope/allowedPaths")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
-    let forbidden_paths = contract
-        .pointer("/scope/forbiddenPaths")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
-    let expected_files = contract
-        .pointer("/source/expectedFiles")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
-
-    json!({
-        "rawUserGoal": objective,
-        "mode": if contract.pointer("/source/mode").and_then(Value::as_str) == Some("spec") { "spec" } else { "chat" },
-        "projectGoal": objective,
-        "conversationId": "",
-        "projectId": "",
-        "runtimeContract": {
-            "taskType": task_type,
-            "compiledAllowedPaths": allowed_paths,
-            "forbiddenPaths": forbidden_paths,
-            "expectedFiles": expected_files,
-            "permissions": {
-                "fileWrite": contract.pointer("/permissions/fileWrite").and_then(Value::as_bool).unwrap_or(true),
-                "dependencyChange": contract.pointer("/permissions/dependencyChange").and_then(Value::as_str).unwrap_or("ask"),
-                "databaseChange": contract.pointer("/permissions/databaseChange").and_then(Value::as_str).unwrap_or("deny"),
-                "fileDelete": contract.pointer("/permissions/fileDelete").and_then(Value::as_str).unwrap_or("ask"),
-                "previewDeployment": "ask",
-                "productionDeployment": "ask"
-            }
-        },
-        "antiDriftRules": [
-            "TaskManifest is the source of truth.",
-            "Do not expand scope beyond compiledAllowedPaths."
-        ],
-        "knownRisks": []
-    })
-    .to_string()
 }
 
 fn row_to_report(row: sqlx::sqlite::SqliteRow) -> Result<VerificationReportRecord, String> {
@@ -1619,190 +1563,12 @@ fn row_to_checkpoint(row: sqlx::sqlite::SqliteRow) -> Result<AgentCheckpointReco
     })
 }
 
-async fn migrate_agent_run_columns(pool: &SqlitePool) -> Result<(), String> {
-    let has_is_write_run = table_has_column(pool, "agent_runs", "is_write_run").await?;
-    let has_manifest_json = table_has_column(pool, "agent_runs", "manifest_json").await?;
-
-    if !has_is_write_run {
-        sqlx::query("ALTER TABLE agent_runs ADD COLUMN is_write_run INTEGER NOT NULL DEFAULT 1")
-            .execute(pool)
-            .await
-            .map_err(|error| {
-                format!("agent-storage: failed to add run write-kind column: {error}")
-            })?;
-    }
-
-    if !has_manifest_json {
-        sqlx::query("ALTER TABLE agent_runs ADD COLUMN manifest_json TEXT NOT NULL DEFAULT '{}'")
-            .execute(pool)
-            .await
-            .map_err(|error| {
-                format!("agent-storage: failed to add run manifest column: {error}")
-            })?;
-    }
-
-    let rows = sqlx::query("SELECT id, contract_json FROM agent_runs")
-        .fetch_all(pool)
-        .await
-        .map_err(|error| format!("agent-storage: failed to read runs for migration: {error}"))?;
-
-    for row in rows {
-        let id: String = row.try_get("id").map_err(row_error)?;
-        let contract_json: String = row.try_get("contract_json").map_err(row_error)?;
-        let contract = serde_json::from_str::<Value>(&contract_json).unwrap_or(Value::Null);
-        sqlx::query("UPDATE agent_runs SET is_write_run = ?1 WHERE id = ?2")
-            .bind(bool_to_i64(is_write_task_contract(&contract)))
-            .bind(&id)
-            .execute(pool)
-            .await
-            .map_err(|error| {
-                format!("agent-storage: failed to backfill run write-kind: {error}")
-            })?;
-
-        sqlx::query(
-            "UPDATE agent_runs SET manifest_json = ?1 WHERE id = ?2 AND manifest_json = '{}'",
-        )
-        .bind(fallback_manifest_json(&contract))
-        .bind(&id)
-        .execute(pool)
-        .await
-        .map_err(|error| format!("agent-storage: failed to backfill run manifest: {error}"))?;
-    }
-
-    Ok(())
-}
-
-async fn migrate_approval_columns(pool: &SqlitePool) -> Result<(), String> {
-    let has_normalized_args_hash =
-        table_has_column(pool, "approvals", "normalized_args_hash").await?;
-    let has_created_at = table_has_column(pool, "approvals", "created_at").await?;
-    let has_consumed_at = table_has_column(pool, "approvals", "consumed_at").await?;
-    let has_consumed_tool_call_id =
-        table_has_column(pool, "approvals", "consumed_tool_call_id").await?;
-    let has_legacy_args_hash = table_has_column(pool, "approvals", "args_hash").await?;
-
-    if !has_normalized_args_hash {
-        sqlx::query("ALTER TABLE approvals ADD COLUMN normalized_args_hash TEXT")
-            .execute(pool)
-            .await
-            .map_err(|error| {
-                format!("agent-storage: failed to add approval normalized hash column: {error}")
-            })?;
-    }
-
-    if !has_created_at {
-        sqlx::query("ALTER TABLE approvals ADD COLUMN created_at TEXT")
-            .execute(pool)
-            .await
-            .map_err(|error| {
-                format!("agent-storage: failed to add approval created_at column: {error}")
-            })?;
-    }
-
-    if !has_consumed_at {
-        sqlx::query("ALTER TABLE approvals ADD COLUMN consumed_at TEXT")
-            .execute(pool)
-            .await
-            .map_err(|error| {
-                format!("agent-storage: failed to add approval consumed timestamp column: {error}")
-            })?;
-    }
-
-    if !has_consumed_tool_call_id {
-        sqlx::query("ALTER TABLE approvals ADD COLUMN consumed_tool_call_id TEXT")
-            .execute(pool)
-            .await
-            .map_err(|error| {
-                format!("agent-storage: failed to add approval consumed tool call column: {error}")
-            })?;
-    }
-
-    if has_legacy_args_hash {
-        sqlx::query(
-            r#"
-            UPDATE approvals
-            SET normalized_args_hash = args_hash
-            WHERE normalized_args_hash IS NULL OR normalized_args_hash = ''
-            "#,
-        )
-        .execute(pool)
-        .await
-        .map_err(|error| {
-            format!("agent-storage: failed to migrate approval args hashes: {error}")
-        })?;
-    }
-
-    sqlx::query(
-        r#"
-        UPDATE approvals
-        SET created_at = COALESCE(created_at, expires_at)
-        WHERE created_at IS NULL OR created_at = ''
-        "#,
-    )
-    .execute(pool)
-    .await
-    .map_err(|error| format!("agent-storage: failed to migrate approval timestamps: {error}"))?;
-
-    Ok(())
-}
-
-async fn migrate_checkpoint_columns(pool: &SqlitePool) -> Result<(), String> {
-    let has_deleted_files_json =
-        table_has_column(pool, "run_checkpoints", "deleted_files_json").await?;
-    let has_package_baseline_json =
-        table_has_column(pool, "run_checkpoints", "package_baseline_json").await?;
-
-    if !has_deleted_files_json {
-        sqlx::query(
-            "ALTER TABLE run_checkpoints ADD COLUMN deleted_files_json TEXT NOT NULL DEFAULT '[]'",
-        )
-        .execute(pool)
-        .await
-        .map_err(|error| {
-            format!("agent-storage: failed to add checkpoint deleted files column: {error}")
-        })?;
-    }
-
-    if !has_package_baseline_json {
-        sqlx::query("ALTER TABLE run_checkpoints ADD COLUMN package_baseline_json TEXT")
-            .execute(pool)
-            .await
-            .map_err(|error| {
-                format!("agent-storage: failed to add checkpoint package baseline column: {error}")
-            })?;
-    }
-
-    Ok(())
-}
-
 fn is_write_task_contract(contract: &Value) -> bool {
     contract
         .get("taskType")
         .and_then(Value::as_str)
         .map(|task_type| task_type != "answer")
         .unwrap_or(true)
-}
-
-async fn table_has_column(
-    pool: &SqlitePool,
-    table_name: &str,
-    column_name: &str,
-) -> Result<bool, String> {
-    let query = format!("PRAGMA table_info({table_name})");
-    let rows = sqlx::query(&query)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| format!("agent-storage: failed to inspect table columns: {error}"))?;
-
-    for row in rows {
-        let name: String = row.try_get("name").map_err(row_error)?;
-
-        if name == column_name {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
 }
 
 fn validate_approval_decision(decision: &str) -> Result<(), String> {
@@ -2039,7 +1805,7 @@ mod tests {
         let root = PathBuf::from("C:/example/project");
         let path = database_path_for_project_dir(&root).expect("path");
 
-        assert!(path.ends_with(Path::new(".aibuilder").join("agent.sqlite")));
+        assert!(path.ends_with(Path::new(".nocodebuilder").join("agent.sqlite")));
     }
 
     #[test]

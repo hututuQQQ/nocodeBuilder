@@ -87,7 +87,7 @@ export class PolicyEngine {
     ) {
       return {
         allowed: false,
-        reason: "Tool target is inside a forbidden path such as .aibuilder or .env.",
+        reason: "Tool target is inside a forbidden path such as .nocodebuilder or .env.",
       };
     }
 

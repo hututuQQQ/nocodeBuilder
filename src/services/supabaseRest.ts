@@ -327,7 +327,7 @@ export class SupabaseRestClient {
 
     if (!apiKey) {
       throw new SupabaseRestError(
-        "Enter SUPABASE_SECRET_KEY for the database dashboard. The public anon key is only for generated apps.",
+        "Enter SUPABASE_SECRET_KEY for the database dashboard. The publishable key is only for generated apps.",
         401,
       );
     }

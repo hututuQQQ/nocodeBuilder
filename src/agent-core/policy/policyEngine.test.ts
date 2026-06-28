@@ -14,7 +14,7 @@ describe("PolicyEngine", () => {
     });
     const tool = getCoreToolDefinition("write_files");
     const decision = new PolicyEngine().evaluate({
-      args: { files: [{ path: ".aibuilder/site-spec.json", content: "{}" }] },
+      args: { files: [{ path: ".nocodebuilder/site-spec.json", content: "{}" }] },
       run,
       tool: tool!,
     });
@@ -52,7 +52,7 @@ describe("PolicyEngine", () => {
     const tool = getCoreToolDefinition("write_files");
     const metadataDecision = new PolicyEngine().evaluate({
       args: {
-        files: [{ content: "{}", path: ".aibuilder/site-spec.json" }],
+        files: [{ content: "{}", path: ".nocodebuilder/site-spec.json" }],
         summary: "This summary mentions .env but is not itself a file path.",
       },
       run,
@@ -222,18 +222,30 @@ describe("PolicyEngine", () => {
   });
 
   it("keeps forbidden paths higher priority than allowed paths", () => {
-    const run = createScopedRun([".aibuilder/**", "app/**"]);
+    const run = createScopedRun([".nocodebuilder/**", "app/**"]);
     const tool = getCoreToolDefinition("write_files");
     const decision = new PolicyEngine().evaluate({
-      args: { files: [{ content: "{}", path: ".aibuilder/site-spec.json" }] },
+      args: { files: [{ content: "{}", path: ".nocodebuilder/site-spec.json" }] },
       run,
       tool: tool!,
     });
 
     expect(decision).toEqual({
       allowed: false,
-      reason: "Tool target is inside a forbidden path such as .aibuilder or .env.",
+      reason: "Tool target is inside a forbidden path such as .nocodebuilder or .env.",
     });
+  });
+
+  it("does not treat removed .aibuilder metadata paths as special", () => {
+    const run = createScopedRun([".aibuilder/**"]);
+    const tool = getCoreToolDefinition("write_files");
+    const decision = new PolicyEngine().evaluate({
+      args: { files: [{ content: "{}", path: ".aibuilder/state.json" }] },
+      run,
+      tool: tool!,
+    });
+
+    expect(decision.allowed).toBe(true);
   });
 
   it("normalizes paths before applying forbidden path checks", () => {

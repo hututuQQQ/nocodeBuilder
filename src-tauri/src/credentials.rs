@@ -1,6 +1,6 @@
 use keyring::{Entry, Error};
 
-const SERVICE_NAME: &str = "AI Web Builder";
+const SERVICE_NAME: &str = "nocodeBuilder";
 
 #[tauri::command]
 pub fn save_ai_provider_secret(provider: String, api_key: String) -> Result<(), String> {

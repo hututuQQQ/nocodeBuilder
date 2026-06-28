@@ -375,7 +375,7 @@ function createAgentStepContext(
       supabase: {
         configured: true,
         env: {
-          anonKey: "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+          publishableKey: "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
           dbUrl: "SUPABASE_DB_URL",
           schema: "SUPABASE_SCHEMA",
           secretKey: "SUPABASE_SECRET_KEY",
@@ -385,7 +385,7 @@ function createAgentStepContext(
         schema: "public",
         schemaLoadStatus: "loaded",
         status: {
-          anonKeyConfigured: true,
+          publishableKeyConfigured: true,
           dbUrlConfigured: true,
           secretKeyConfigured: true,
           urlConfigured: true,

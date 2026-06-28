@@ -166,7 +166,7 @@ Production: https://test-4hl6el33y-huwenlong-s-projects.vercel.app
             .duration_since(UNIX_EPOCH)
             .expect("system time should be valid")
             .as_nanos();
-        let project_dir = std::env::temp_dir().join(format!("ai-web-builder-vercel-test-{nonce}"));
+        let project_dir = std::env::temp_dir().join(format!("nocodebuilder-vercel-test-{nonce}"));
         let vercel_dir = project_dir.join(".vercel");
 
         fs::create_dir_all(&vercel_dir).expect("temp .vercel dir should be created");

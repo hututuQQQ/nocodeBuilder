@@ -32,7 +32,7 @@ const UI_INTENT_PATHS = [
 ];
 
 const FORBIDDEN_PATH_PATTERNS = [
-  ".aibuilder/**",
+  ".nocodebuilder/**",
   ".env",
   ".env.*",
   "node_modules/**",

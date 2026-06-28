@@ -6,7 +6,7 @@ export const PROJECT_ENV_PATH = ".env";
 export type ProjectSupabaseConfig = {
   provider: "supabase";
   url: string;
-  anonKey: string;
+  publishableKey: string;
   secretKey: string;
   dbUrl: string;
   schema: string;
@@ -14,7 +14,7 @@ export type ProjectSupabaseConfig = {
 };
 
 export type ProjectSupabaseConfigInput = {
-  anonKey: string;
+  publishableKey: string;
   dbUrl?: string;
   schema?: string;
   secretKey: string;
@@ -47,10 +47,8 @@ type EnvEntry =
   | { kind: "var"; key: string; value: string };
 
 const SUPABASE_URL_KEY = "NEXT_PUBLIC_SUPABASE_URL";
-const SUPABASE_ANON_KEY = "NEXT_PUBLIC_SUPABASE_ANON_KEY";
 const SUPABASE_PUBLISHABLE_KEY = "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY";
 const SUPABASE_SECRET_KEY = "SUPABASE_SECRET_KEY";
-const SUPABASE_SERVICE_ROLE_KEY = "SUPABASE_SERVICE_ROLE_KEY";
 const SUPABASE_DB_URL_KEY = "SUPABASE_DB_URL";
 const SUPABASE_SCHEMA_KEY = "SUPABASE_SCHEMA";
 const VERCEL_TOKEN_KEY = "VERCEL_TOKEN";
@@ -62,18 +60,18 @@ export async function loadProjectEnvConfig(projectId: string): Promise<ProjectEn
   const content = await readProjectEnvFile(projectId);
   const values = parseEnvValues(content);
   const supabaseUrl = values[SUPABASE_URL_KEY] ?? "";
-  const supabaseAnonKey = values[SUPABASE_ANON_KEY] ?? values[SUPABASE_PUBLISHABLE_KEY] ?? "";
-  const supabaseSecretKey = values[SUPABASE_SECRET_KEY] ?? values[SUPABASE_SERVICE_ROLE_KEY] ?? "";
+  const supabasePublishableKey = values[SUPABASE_PUBLISHABLE_KEY] ?? "";
+  const supabaseSecretKey = values[SUPABASE_SECRET_KEY] ?? "";
   const supabaseDbUrl = values[SUPABASE_DB_URL_KEY] ?? "";
   const vercelToken = values[VERCEL_TOKEN_KEY] ?? "";
 
   return {
     supabase:
-      supabaseUrl && (supabaseAnonKey || supabaseSecretKey)
+      supabaseUrl && (supabasePublishableKey || supabaseSecretKey)
         ? {
             provider: "supabase",
             url: normalizeUrl(supabaseUrl),
-            anonKey: supabaseAnonKey,
+            publishableKey: supabasePublishableKey,
             secretKey: supabaseSecretKey,
             dbUrl: supabaseDbUrl,
             schema: values[SUPABASE_SCHEMA_KEY] || "public",
@@ -103,7 +101,7 @@ export async function saveProjectSupabaseConfig(
   const nextConfig: ProjectSupabaseConfig = {
     provider: "supabase",
     url: normalizeUrl(config.url),
-    anonKey: config.anonKey.trim(),
+    publishableKey: config.publishableKey.trim(),
     secretKey: config.secretKey.trim(),
     dbUrl: config.dbUrl?.trim() ?? "",
     schema: config.schema?.trim() || "public",
@@ -111,7 +109,7 @@ export async function saveProjectSupabaseConfig(
   };
   const nextContent = upsertEnvValues(content, {
     [SUPABASE_URL_KEY]: nextConfig.url,
-    [SUPABASE_ANON_KEY]: nextConfig.anonKey,
+    [SUPABASE_PUBLISHABLE_KEY]: nextConfig.publishableKey,
     [SUPABASE_SECRET_KEY]: nextConfig.secretKey,
     [SUPABASE_DB_URL_KEY]: nextConfig.dbUrl,
     [SUPABASE_SCHEMA_KEY]: nextConfig.schema,

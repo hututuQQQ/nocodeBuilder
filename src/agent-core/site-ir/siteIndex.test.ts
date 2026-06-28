@@ -73,7 +73,7 @@ describe("Site IR index", () => {
     expect(root?.children?.find((node) => node.id === "home.hero.cta")?.type).toBe("button");
   });
 
-  it("marks untagged legacy pages as legacy/custom content", () => {
+  it("keeps untagged pages without synthetic child nodes", () => {
     const fileTree: FileTree = {
       name: "site",
       path: "",
@@ -93,16 +93,13 @@ describe("Site IR index", () => {
       projectName: "Site",
     });
 
-    const legacyNode = siteSpec.pages[0]?.nodes[0]?.children?.[0];
-    expect(legacyNode).toMatchObject({
-      id: "home.legacy.custom",
-      type: "legacy/custom",
-      label: "Legacy/custom content",
-    });
-    expect(sourceMap.entries.find((entry) => entry.nodeId === "home.legacy.custom")).toMatchObject({
+    const root = siteSpec.pages[0]?.nodes[0];
+    expect(root?.children).toEqual([]);
+    expect(sourceMap.entries.find((entry) => entry.nodeId === "home.root")).toMatchObject({
       path: "app/page.tsx",
       startLine: 1,
     });
+    expect(sourceMap.entries.some((entry) => entry.nodeId.includes("legacy"))).toBe(false);
   });
 
   it("rejects duplicate node ids", () => {
