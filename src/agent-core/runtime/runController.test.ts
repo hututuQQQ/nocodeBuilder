@@ -1295,6 +1295,88 @@ describe("Headless RunController", () => {
     });
   });
 
+  it("allows additional focused rescues for repeated spec verification failures after edits", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        {
+          type: "tool_call",
+          tool: "edit_file",
+          args: {
+            new_string: "Broken once",
+            old_string: "Hi",
+            path: "app/page.tsx",
+            summary: "First repair attempt",
+          },
+        },
+        {
+          type: "tool_call",
+          tool: "edit_file",
+          args: {
+            new_string: "Broken twice",
+            old_string: "Broken once",
+            path: "app/page.tsx",
+            summary: "Second repair attempt",
+          },
+        },
+        {
+          type: "tool_call",
+          tool: "edit_file",
+          args: {
+            new_string: "Broken third time",
+            old_string: "Broken twice",
+            path: "app/page.tsx",
+            summary: "Third repair attempt",
+          },
+        },
+        { type: "finish_candidate", summary: "Spec repair complete" },
+      ],
+      verificationStatuses: ["failed", "failed", "failed", "passed"],
+    });
+    const controller = new RunController(ports);
+    const contract: TaskContract = {
+      ...compileTaskContract({
+        objective: "Implement spec task with repeated build diagnostics",
+      }),
+      budget: {
+        maxModelTurns: 10,
+        maxToolCalls: 10,
+        maxMutations: 10,
+        maxRepairCycles: 10,
+      },
+      source: {
+        acceptanceCriteriaIds: ["criterion-1"],
+        expectedFiles: ["app/page.tsx"],
+        mode: "spec",
+        requirementIds: ["story-1"],
+        revisionId: "revision-1",
+        specId: "spec-1",
+        taskId: "task-1",
+      },
+    };
+
+    const run = await controller.start({
+      contract,
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-spec-loop-guard-grace",
+    });
+
+    expect(run.status).toBe("completed");
+    expect(run.modelTurns).toBeGreaterThan(2);
+    expect(
+      ports.events.some((event) =>
+        event.type === "run.budget_exceeded" &&
+        event.payload &&
+        typeof event.payload === "object" &&
+        "failureKind" in event.payload &&
+        event.payload.failureKind === "loop_exhausted",
+      ),
+    ).toBe(false);
+    expect(observationText(ports.contexts[2]?.observations)).toContain(
+      "automatic rescue attempt 1 of 3",
+    );
+  });
+
   it("stops repeated identical read-only actions after one focused rescue", async () => {
     const readActions: HeadlessModelAction[] = Array.from(
       { length: 6 },

@@ -229,6 +229,8 @@ type RunDriveState = {
 
 type LoopGuardState = {
   lastFingerprint?: string;
+  rescueCount?: number;
+  repeatedCount?: number;
   rescuedFingerprint?: string;
 };
 
@@ -1612,28 +1614,45 @@ export class RunController {
     },
   ): Promise<{ rescued: boolean; stopped: boolean; run: AgentRun }> {
     const fingerprint = buildFailureFingerprint(signal.kind, signal.details);
+    const maxRescueAttempts = getLoopRescueAttemptLimit(run, state, signal.kind);
 
     if (state.loopGuard.lastFingerprint !== fingerprint) {
       state.loopGuard.lastFingerprint = fingerprint;
+      state.loopGuard.repeatedCount = 1;
+      state.loopGuard.rescueCount = 0;
+      state.loopGuard.rescuedFingerprint = undefined;
       return { rescued: false, run, stopped: false };
     }
 
-    if (state.loopGuard.rescuedFingerprint === fingerprint) {
+    state.loopGuard.repeatedCount = (state.loopGuard.repeatedCount ?? 1) + 1;
+
+    const previousRescueCount = state.loopGuard.rescuedFingerprint === fingerprint
+      ? state.loopGuard.rescueCount ?? 1
+      : 0;
+
+    if (previousRescueCount >= maxRescueAttempts) {
       const stoppedRun = await this.commit(
         run,
         this.machine.transition(run, {
           budget: "maxModelTurns",
           failureKind: "loop_exhausted",
-          reason: LOOP_EXHAUSTED_REASON,
+          reason: buildLoopExhaustedReason(maxRescueAttempts),
           type: "budget_exceeded",
         }),
       );
       return { rescued: false, run: stoppedRun, stopped: true };
     }
 
+    const nextRescueCount = previousRescueCount + 1;
     state.loopGuard.rescuedFingerprint = fingerprint;
+    state.loopGuard.rescueCount = nextRescueCount;
     state.observations.push(
-      buildLoopRescueObservation(signal.summary, signal.details),
+      buildLoopRescueObservation({
+        details: signal.details,
+        maxRescueAttempts,
+        rescueAttempt: nextRescueCount,
+        summary: signal.summary,
+      }),
     );
 
     return { rescued: true, run, stopped: false };
@@ -1975,6 +1994,8 @@ function ensureRunManifest(run: AgentRun): AgentRun & { manifest: TaskManifest }
 }
 
 const MAX_MODEL_VALIDATION_OBSERVATIONS = 2;
+const DEFAULT_LOOP_RESCUE_ATTEMPTS = 1;
+const SPEC_VERIFICATION_LOOP_RESCUE_ATTEMPTS = 3;
 const REPEATED_READ_ONLY_ACTION_RESCUE_THRESHOLD = 3;
 const READ_ONLY_STALL_RESCUE_GRACE = 3;
 const EXPECTED_FILE_AUTO_READ_AFTER_READ_ONLY_COUNT = 2;
@@ -2318,14 +2339,47 @@ function buildModelValidationObservation(
   };
 }
 
-function buildLoopRescueObservation(summary: string, details: string) {
+function getLoopRescueAttemptLimit(
+  run: AgentRun,
+  state: RunDriveState,
+  kind: string,
+) {
+  if (
+    kind === "verification" &&
+    run.contract.source?.mode === "spec" &&
+    hasImplementationProgress(run, state)
+  ) {
+    return SPEC_VERIFICATION_LOOP_RESCUE_ATTEMPTS;
+  }
+
+  return DEFAULT_LOOP_RESCUE_ATTEMPTS;
+}
+
+function buildLoopExhaustedReason(maxRescueAttempts: number) {
+  if (maxRescueAttempts <= 1) {
+    return LOOP_EXHAUSTED_REASON;
+  }
+
+  return `The same failure repeated after ${maxRescueAttempts} focused rescue attempts, so the run stopped to avoid a token/context budget loop.`;
+}
+
+function buildLoopRescueObservation(input: {
+  details: string;
+  maxRescueAttempts: number;
+  rescueAttempt: number;
+  summary: string;
+}) {
+  const { details, maxRescueAttempts, rescueAttempt, summary } = input;
   const compactSummary = compactSummaryText(summary, 420);
   const compactDetails = compactSummaryText(details, 1_600);
+  const rescueLine = rescueAttempt >= maxRescueAttempts
+    ? "This is the final automatic rescue attempt for this failure fingerprint."
+    : `This is automatic rescue attempt ${rescueAttempt} of ${maxRescueAttempts} for this failure fingerprint.`;
 
   return {
     content: [
       "The same failure pattern repeated.",
-      "This is the final automatic rescue attempt for this failure fingerprint.",
+      rescueLine,
       `Failure summary: ${compactSummary}`,
       compactDetails ? `Failure details: ${compactDetails}` : "",
       "Change strategy now: do not repeat the previous action, do one focused repair using retained evidence, return finish_candidate if already fixed, or return a blocker answer if the missing information cannot be recovered from context.",
@@ -3535,6 +3589,8 @@ function readLoopGuardState(value: unknown): LoopGuardState | undefined {
       typeof value.lastFingerprint === "string"
         ? value.lastFingerprint
         : undefined,
+    rescueCount: readNonNegativeInteger(value.rescueCount),
+    repeatedCount: readNonNegativeInteger(value.repeatedCount),
     rescuedFingerprint:
       typeof value.rescuedFingerprint === "string"
         ? value.rescuedFingerprint
