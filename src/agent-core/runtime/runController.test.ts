@@ -1292,6 +1292,7 @@ describe("Headless RunController", () => {
     expect(rescueCheckpoint).toBeDefined();
     expect(terminalEvent?.payload).toMatchObject({
       failureKind: "loop_exhausted",
+      reason: expect.stringContaining("repeated-action loop"),
     });
   });
 

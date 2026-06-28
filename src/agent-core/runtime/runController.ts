@@ -2000,9 +2000,9 @@ const REPEATED_READ_ONLY_ACTION_RESCUE_THRESHOLD = 3;
 const READ_ONLY_STALL_RESCUE_GRACE = 3;
 const EXPECTED_FILE_AUTO_READ_AFTER_READ_ONLY_COUNT = 2;
 const LOOP_EXHAUSTED_REASON =
-  "The same failure repeated after one focused rescue attempt, so the run stopped to avoid a token/context budget loop.";
+  "The same failure repeated after one focused rescue attempt, so the run stopped to avoid a repeated-action loop.";
 const READ_ONLY_STALL_EXHAUSTED_REASON =
-  "Read-only exploration repeated after one focused rescue attempt without edits, verification, or finish, so the run stopped to avoid a token/context budget loop.";
+  "Read-only exploration repeated after one focused rescue attempt without edits, verification, or finish, so the run stopped to avoid a repeated-action loop.";
 const RUN_CONTEXT_SUMMARY_LLM_CHAR_THRESHOLD = 24_000;
 const RUN_CONTEXT_SUMMARY_LLM_OBSERVATION_DELTA = 8;
 
@@ -2360,7 +2360,7 @@ function buildLoopExhaustedReason(maxRescueAttempts: number) {
     return LOOP_EXHAUSTED_REASON;
   }
 
-  return `The same failure repeated after ${maxRescueAttempts} focused rescue attempts, so the run stopped to avoid a token/context budget loop.`;
+  return `The same failure repeated after ${maxRescueAttempts} focused rescue attempts, so the run stopped to avoid a repeated-action loop.`;
 }
 
 function buildLoopRescueObservation(input: {
