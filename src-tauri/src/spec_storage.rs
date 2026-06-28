@@ -227,10 +227,7 @@ fn replace_file_atomically(
 ) -> Result<(), String> {
     if !path.exists() {
         let move_result = if failure_injection == ReplaceFailureInjection::Replace {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "injected initial move failure",
-            ))
+            Err(std::io::Error::other("injected initial move failure"))
         } else {
             fs::rename(tmp_path, path)
         };
@@ -245,10 +242,7 @@ fn replace_file_atomically(
     }
 
     let backup_result = if failure_injection == ReplaceFailureInjection::Backup {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "injected backup failure",
-        ))
+        Err(std::io::Error::other("injected backup failure"))
     } else {
         fs::rename(path, backup_path)
     };
@@ -265,10 +259,7 @@ fn replace_file_atomically(
         failure_injection,
         ReplaceFailureInjection::Replace | ReplaceFailureInjection::Restore
     ) {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "injected replace failure",
-        ))
+        Err(std::io::Error::other("injected replace failure"))
     } else {
         fs::rename(tmp_path, path)
     };
@@ -280,10 +271,7 @@ fn replace_file_atomically(
         }
         Err(error) => {
             let restore_result = if failure_injection == ReplaceFailureInjection::Restore {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "injected restore failure",
-                ))
+                Err(std::io::Error::other("injected restore failure"))
             } else {
                 fs::rename(backup_path, path)
             };
@@ -310,7 +298,7 @@ fn spec_file_path(project_dir: &Path, spec_id: &str) -> Result<PathBuf, String> 
 }
 
 fn specs_dir(project_dir: &Path) -> PathBuf {
-    project_dir.join(".aibuilder").join(SPECS_DIR)
+    project_dir.join(".nocodebuilder").join(SPECS_DIR)
 }
 
 fn validate_spec_id(spec_id: &str) -> Result<(), String> {
@@ -498,7 +486,7 @@ mod tests {
 
             create_development_spec(project.id.clone(), spec).expect("create spec");
             let project_dir = projects::resolve_project_dir(&project.id).expect("project dir");
-            let conversations_dir = project_dir.join(".aibuilder").join("conversations");
+            let conversations_dir = project_dir.join(".nocodebuilder").join("conversations");
             fs::create_dir_all(&conversations_dir).expect("create conversations dir");
             fs::write(
                 conversations_dir.join(format!("{conversation_id}.json")),
@@ -566,7 +554,7 @@ mod tests {
 
             create_development_spec(project.id.clone(), spec).expect("create spec");
             let project_dir = projects::resolve_project_dir(&project.id).expect("project dir");
-            let conversations_dir = project_dir.join(".aibuilder").join("conversations");
+            let conversations_dir = project_dir.join(".nocodebuilder").join("conversations");
             fs::create_dir_all(&conversations_dir).expect("create conversations dir");
             fs::write(
                 conversations_dir.join("conv-attached.json"),

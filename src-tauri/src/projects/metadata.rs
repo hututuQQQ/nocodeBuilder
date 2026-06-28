@@ -8,7 +8,7 @@ use super::{
     workspace::{current_timestamp, FRAMEWORK},
 };
 
-pub const METADATA_DIR: &str = ".aibuilder";
+pub const METADATA_DIR: &str = ".nocodebuilder";
 const METADATA_FILE: &str = "project.json";
 
 pub fn read_metadata(project_dir: &Path) -> Result<ProjectInfo, String> {

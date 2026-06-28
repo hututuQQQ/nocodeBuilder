@@ -26,13 +26,13 @@ describe("checkRunDrift", () => {
 
   it.each([
     ".env",
-    ".aibuilder/state.json",
+    ".nocodebuilder/state.json",
     "node_modules/package/index.js",
   ])("blocks forbidden path %s before allowed-path evaluation", (path) => {
     const result = checkRunDrift({
       manifest: createManifest({
         compiledAllowedPaths: ["**"],
-        forbiddenPaths: [".env", ".env.*", ".aibuilder/**", "node_modules/**"],
+        forbiddenPaths: [".env", ".env.*", ".nocodebuilder/**", "node_modules/**"],
       }),
       action: {
         type: "tool_call",
@@ -184,7 +184,7 @@ function createManifest(patch: {
       forbiddenPaths: patch.forbiddenPaths ?? [
         ".env",
         ".env.*",
-        ".aibuilder/**",
+        ".nocodebuilder/**",
         "node_modules/**",
         ".git/**",
       ],

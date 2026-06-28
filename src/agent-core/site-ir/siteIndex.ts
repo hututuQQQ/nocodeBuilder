@@ -121,7 +121,7 @@ function createPageSpec(path: string, content?: string): PageSpec {
   const nodeId = `${pageId || "page"}.root`;
   const childNodes = content === undefined
     ? []
-    : extractDataNodesFromContent(path, content, nodeId, pageId || "page");
+    : extractDataNodesFromContent(path, content, nodeId);
   const lineCount = content ? content.split(/\r?\n/).length : undefined;
   const rootLine = content ? findDataNodeLine(content, nodeId) : undefined;
 
@@ -145,7 +145,6 @@ function extractDataNodesFromContent(
   path: string,
   content: string,
   parentId: string,
-  pageId: string,
 ): SiteNode[] {
   const nodes: SiteNode[] = [];
   const dataAttributePattern =
@@ -177,20 +176,7 @@ function extractDataNodesFromContent(
     });
   }
 
-  if (nodes.length > 0) {
-    return nodes;
-  }
-
-  return [
-    {
-      id: `${pageId}.legacy.custom`,
-      type: "legacy/custom",
-      label: "Legacy/custom content",
-      parentId,
-      source: { path, startLine: 1, endLine: content.split(/\r?\n/).length },
-      props: { reason: "No data-ncb-id attributes found." },
-    },
-  ];
+  return nodes;
 }
 
 function findDataNodeLine(content: string, nodeId: string) {

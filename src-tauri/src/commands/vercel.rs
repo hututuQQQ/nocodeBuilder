@@ -10,7 +10,7 @@ use crate::projects::resolve_project_dir;
 use super::{
     command_runner::run_command_blocking,
     command_whitelist::preferred_build_command,
-    events::{emit_status, redact_secrets, spawn_output_reader},
+    events::{emit_status, redact_secrets, spawn_output_reader, OutputReaderOptions},
     time::current_timestamp,
     types::{VercelDeployOptions, VercelDeploymentInfo, VercelUserInfo},
 };
@@ -58,17 +58,16 @@ pub async fn deploy_to_vercel(
     })
     .await
     .map_err(|error| format!("deploy: failed to join deploy task: {error}"))?
-    .map_err(|error| {
+    .inspect_err(|error| {
         emit_status(
             &app,
             &project_id,
             "vercel deploy",
             "failed",
             None,
-            Some(redact_secrets(&error, &[token_for_errors.as_str()])),
+            Some(redact_secrets(error, &[token_for_errors.as_str()])),
             None,
         );
-        error
     })
 }
 
@@ -107,31 +106,31 @@ fn run_vercel_deploy_blocking(
     let mut readers = Vec::new();
 
     if let Some(stdout) = stdout {
-        readers.push(spawn_output_reader(
-            app.clone(),
-            project_id.clone(),
-            command_label.clone(),
-            "stdout",
-            stdout,
-            Some(output.clone()),
-            None,
-            None,
-            Some(redactions.clone()),
-        ));
+        readers.push(spawn_output_reader(OutputReaderOptions {
+            app: app.clone(),
+            project_id: project_id.clone(),
+            command: command_label.clone(),
+            stream: "stdout",
+            reader: stdout,
+            output: Some(output.clone()),
+            url_sender: None,
+            url_state: None,
+            redactions: Some(redactions.clone()),
+        }));
     }
 
     if let Some(stderr) = stderr {
-        readers.push(spawn_output_reader(
-            app.clone(),
-            project_id.clone(),
-            command_label.clone(),
-            "stderr",
-            stderr,
-            Some(output.clone()),
-            None,
-            None,
-            Some(redactions.clone()),
-        ));
+        readers.push(spawn_output_reader(OutputReaderOptions {
+            app: app.clone(),
+            project_id: project_id.clone(),
+            command: command_label.clone(),
+            stream: "stderr",
+            reader: stderr,
+            output: Some(output.clone()),
+            url_sender: None,
+            url_state: None,
+            redactions: Some(redactions.clone()),
+        }));
     }
 
     let status = child

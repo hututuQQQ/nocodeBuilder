@@ -290,6 +290,6 @@ mod tests {
 
     #[test]
     fn rejects_metadata_writes() {
-        assert!(validate_relative_path(".aibuilder/project.json").is_err());
+        assert!(validate_relative_path(".nocodebuilder/project.json").is_err());
     }
 }

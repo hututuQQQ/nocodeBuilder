@@ -46,8 +46,8 @@ export function isPathForbidden(path: string, forbiddenPatterns: string[]) {
 
   return (
     isInvalidProjectPath(path) ||
-    normalized === ".aibuilder" ||
-    normalized.startsWith(".aibuilder/") ||
+    normalized === ".nocodebuilder" ||
+    normalized.startsWith(".nocodebuilder/") ||
     normalized.startsWith(".env") ||
     normalized.includes("/.env") ||
     forbiddenPatterns.some((pattern) =>

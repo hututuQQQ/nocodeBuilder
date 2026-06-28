@@ -3,7 +3,7 @@ use std::time::Duration;
 use reqwest::{header::HeaderName, Method, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{postgres::PgPoolOptions, Executor};
+use sqlx::{postgres::PgPoolOptions, AssertSqlSafe};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -144,10 +144,6 @@ pub async fn supabase_proxy_request(
         .header("Accept-Profile", schema.as_str())
         .header("Content-Profile", schema.as_str());
 
-    if is_legacy_jwt_key(&api_key) {
-        builder = builder.bearer_auth(api_key.as_str());
-    }
-
     for header in request.headers {
         if is_allowed_forward_header(&header.name) {
             builder = builder.header(header.name.as_str(), header.value.as_str());
@@ -194,21 +190,25 @@ pub async fn create_supabase_table(request: SupabaseCreateTableRequest) -> Resul
         .await
         .map_err(|error| format!("supabase: failed to start database transaction: {error}"))?;
 
-    tx.execute(create_schema_sql.as_str())
+    sqlx::query(audited_sql(&create_schema_sql))
+        .execute(&mut *tx)
         .await
         .map_err(|error| format!("supabase: failed to create schema: {error}"))?;
-    tx.execute(create_table_sql.as_str())
+    sqlx::query(audited_sql(&create_table_sql))
+        .execute(&mut *tx)
         .await
         .map_err(|error| format!("supabase: failed to create table: {error}"))?;
 
     if request.enable_rls {
         let enable_rls_sql = format!("alter table {qualified_table} enable row level security");
-        tx.execute(enable_rls_sql.as_str())
+        sqlx::query(audited_sql(&enable_rls_sql))
+            .execute(&mut *tx)
             .await
             .map_err(|error| format!("supabase: failed to enable RLS: {error}"))?;
     }
 
-    tx.execute("notify pgrst, 'reload schema'")
+    sqlx::query("notify pgrst, 'reload schema'")
+        .execute(&mut *tx)
         .await
         .map_err(|error| format!("supabase: failed to reload PostgREST schema cache: {error}"))?;
     tx.commit()
@@ -245,10 +245,12 @@ pub async fn drop_supabase_table(request: SupabaseDropTableRequest) -> Result<()
         quote_ident(&table_name)
     );
 
-    tx.execute(drop_sql.as_str())
+    sqlx::query(audited_sql(&drop_sql))
+        .execute(&mut *tx)
         .await
         .map_err(|error| format!("supabase: failed to drop table: {error}"))?;
-    tx.execute("notify pgrst, 'reload schema'")
+    sqlx::query("notify pgrst, 'reload schema'")
+        .execute(&mut *tx)
         .await
         .map_err(|error| format!("supabase: failed to reload PostgREST schema cache: {error}"))?;
     tx.commit()
@@ -283,12 +285,14 @@ pub async fn alter_supabase_table(request: SupabaseAlterTableRequest) -> Result<
         .map_err(|error| format!("supabase: failed to start database transaction: {error}"))?;
 
     for statement in statements {
-        tx.execute(statement.as_str())
+        sqlx::query(audited_sql(&statement))
+            .execute(&mut *tx)
             .await
             .map_err(|error| format!("supabase: failed to alter table: {error}"))?;
     }
 
-    tx.execute("notify pgrst, 'reload schema'")
+    sqlx::query("notify pgrst, 'reload schema'")
+        .execute(&mut *tx)
         .await
         .map_err(|error| format!("supabase: failed to reload PostgREST schema cache: {error}"))?;
     tx.commit()
@@ -296,6 +300,10 @@ pub async fn alter_supabase_table(request: SupabaseAlterTableRequest) -> Result<
         .map_err(|error| format!("supabase: failed to commit table changes: {error}"))?;
 
     Ok(())
+}
+
+fn audited_sql(sql: &str) -> AssertSqlSafe<&str> {
+    AssertSqlSafe(sql)
 }
 
 fn normalize_required(value: &str, message: &str) -> Result<String, String> {
@@ -376,10 +384,6 @@ fn is_local_http_url(url: &Url) -> bool {
     }
 
     matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
-}
-
-fn is_legacy_jwt_key(api_key: &str) -> bool {
-    api_key.starts_with("eyJ")
 }
 
 fn response_headers(headers: &reqwest::header::HeaderMap) -> Vec<SupabaseProxyHeader> {

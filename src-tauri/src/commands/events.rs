@@ -14,20 +14,34 @@ use super::{
 const COMMAND_OUTPUT_EVENT: &str = "command-output";
 const COMMAND_STATUS_EVENT: &str = "command-status";
 
-pub fn spawn_output_reader<R>(
-    app: AppHandle,
-    project_id: String,
-    command: String,
-    stream: &'static str,
-    reader: R,
-    output: Option<Arc<Mutex<String>>>,
-    url_sender: Option<mpsc::Sender<String>>,
-    url_state: Option<Arc<Mutex<Option<String>>>>,
-    redactions: Option<Arc<Vec<String>>>,
-) -> thread::JoinHandle<()>
+pub struct OutputReaderOptions<R> {
+    pub app: AppHandle,
+    pub project_id: String,
+    pub command: String,
+    pub stream: &'static str,
+    pub reader: R,
+    pub output: Option<Arc<Mutex<String>>>,
+    pub url_sender: Option<mpsc::Sender<String>>,
+    pub url_state: Option<Arc<Mutex<Option<String>>>>,
+    pub redactions: Option<Arc<Vec<String>>>,
+}
+
+pub fn spawn_output_reader<R>(options: OutputReaderOptions<R>) -> thread::JoinHandle<()>
 where
     R: Read + Send + 'static,
 {
+    let OutputReaderOptions {
+        app,
+        project_id,
+        command,
+        stream,
+        reader,
+        output,
+        url_sender,
+        url_state,
+        redactions,
+    } = options;
+
     thread::spawn(move || {
         let mut reader = BufReader::new(reader);
         let mut line = String::new();

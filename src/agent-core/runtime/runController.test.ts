@@ -239,6 +239,70 @@ describe("Headless RunController", () => {
     });
   });
 
+  it("does not emit empty read_files suggested actions for pathless expected-file failures", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "finish_candidate", summary: "Ready for verification" },
+        { type: "finish_candidate", summary: "Recovered from pathless blocker" },
+      ],
+      verificationStatuses: [],
+    });
+    let verificationCount = 0;
+    ports.verifier.verify = async (input): Promise<VerificationReport> => {
+      verificationCount += 1;
+
+      if (verificationCount === 1) {
+        return {
+          artifactIds: [],
+          checks: [
+            {
+              id: "acceptance:request-addressed",
+              required: true,
+              status: "inconclusive",
+              summary: "Expected file evidence is missing for the expected output.",
+              title: "Acceptance: request-addressed",
+            },
+          ],
+          createdAt: "2026-01-01T00:00:00.000Z",
+          id: "report-pathless-missing-evidence",
+          missingEvidence: [
+            "Expected file evidence is missing for the expected output.",
+          ],
+          newlyIntroducedFailures: [],
+          repairFeedback: [],
+          runId: input.run.id,
+          status: "inconclusive",
+        };
+      }
+
+      return {
+        artifactIds: [],
+        checks: [],
+        createdAt: "2026-01-01T00:00:00.000Z",
+        id: "report-pathless-passed",
+        missingEvidence: [],
+        newlyIntroducedFailures: [],
+        repairFeedback: [],
+        runId: input.run.id,
+        status: "passed",
+      };
+    };
+    const controller = new RunController(ports);
+
+    const run = await controller.start({
+      contract: compileTaskContract({ objective: "Verify pathless evidence" }),
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-pathless-suggested-action",
+    });
+
+    expect(run.status).toBe("completed");
+    expect(ports.contexts[1]?.workingState.currentBlocker?.suggestedAction)
+      .toMatchObject({
+        type: "blocker",
+      });
+  });
+
   it("auto-completes a Spec run after a passed tool verification", async () => {
     const specContract: TaskContract = {
       ...compileTaskContract({ objective: "Implement task file" }),
@@ -876,6 +940,62 @@ describe("Headless RunController", () => {
     expect(ports.contexts[0]?.runContextSummary.completed).toHaveLength(1);
   });
 
+  it("prioritizes the latest structured blocker over older loop rescue failures", async () => {
+    const contract = compileTaskContract({ objective: "Continue from missing evidence" });
+    const pausedRun = createPausedRun("run-current-blocker-summary", contract);
+    const ports = createFakePorts({
+      modelActions: [
+        { type: "finish_candidate", summary: "Continue after blocker context" },
+      ],
+      verificationStatuses: ["passed"],
+    });
+    ports.seedRun(pausedRun);
+    ports.seedCheckpoint({
+      id: "checkpoint-current-blocker-summary",
+      runId: pausedRun.id,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      workspaceFingerprint: "workspace:fingerprint",
+      plan: null,
+      observations: [
+        JSON.stringify({
+          content: "Read-only exploration repeated.",
+          ok: false,
+          summary: "Loop rescue: repeated read_files",
+          tool: "loop_rescue",
+        }),
+        JSON.stringify({
+          error: {
+            code: "MISSING_EXPECTED_FILE_EVIDENCE",
+            message: "Expected file evidence is still missing for: data/posts/seed.json.",
+            retryable: true,
+            suggestedAction: {
+              type: "blocker",
+              reason: "Create or update data/posts/seed.json.",
+              recoveryOptions: ["Create data/posts/seed.json."],
+            },
+          },
+          ok: false,
+          summary: "Expected file evidence is still missing for: data/posts/seed.json.",
+          tool: "expected_file_evidence",
+        }),
+      ],
+      changedFiles: [],
+      deletedFiles: [],
+      packageChanged: false,
+      readSnapshots: [],
+      repairFeedback: [],
+      steeringWatermark: 0,
+    });
+    const controller = new RunController(ports);
+
+    await controller.resume(pausedRun.id);
+
+    expect(ports.contexts[0]?.runContextSummary.latestFailures[0])
+      .toContain("Expected file evidence is still missing");
+    expect(ports.contexts[0]?.runContextSummary.nextStep)
+      .toContain("Resolve current blocker");
+  });
+
   it("summarizes successful structured observations without carrying raw file content", async () => {
     const contract = compileTaskContract({ objective: "Continue from read" });
     const pausedRun = createPausedRun("run-structured-summary", contract);
@@ -1292,7 +1412,90 @@ describe("Headless RunController", () => {
     expect(rescueCheckpoint).toBeDefined();
     expect(terminalEvent?.payload).toMatchObject({
       failureKind: "loop_exhausted",
+      reason: expect.stringContaining("repeated-action loop"),
     });
+  });
+
+  it("allows additional focused rescues for repeated spec verification failures after edits", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        {
+          type: "tool_call",
+          tool: "edit_file",
+          args: {
+            new_string: "Broken once",
+            old_string: "Hi",
+            path: "app/page.tsx",
+            summary: "First repair attempt",
+          },
+        },
+        {
+          type: "tool_call",
+          tool: "edit_file",
+          args: {
+            new_string: "Broken twice",
+            old_string: "Broken once",
+            path: "app/page.tsx",
+            summary: "Second repair attempt",
+          },
+        },
+        {
+          type: "tool_call",
+          tool: "edit_file",
+          args: {
+            new_string: "Broken third time",
+            old_string: "Broken twice",
+            path: "app/page.tsx",
+            summary: "Third repair attempt",
+          },
+        },
+        { type: "finish_candidate", summary: "Spec repair complete" },
+      ],
+      verificationStatuses: ["failed", "failed", "failed", "passed"],
+    });
+    const controller = new RunController(ports);
+    const contract: TaskContract = {
+      ...compileTaskContract({
+        objective: "Implement spec task with repeated build diagnostics",
+      }),
+      budget: {
+        maxModelTurns: 10,
+        maxToolCalls: 10,
+        maxMutations: 10,
+        maxRepairCycles: 10,
+      },
+      source: {
+        acceptanceCriteriaIds: ["criterion-1"],
+        expectedFiles: ["app/page.tsx"],
+        mode: "spec",
+        requirementIds: ["story-1"],
+        revisionId: "revision-1",
+        specId: "spec-1",
+        taskId: "task-1",
+      },
+    };
+
+    const run = await controller.start({
+      contract,
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-spec-loop-guard-grace",
+    });
+
+    expect(run.status).toBe("completed");
+    expect(run.modelTurns).toBeGreaterThan(2);
+    expect(
+      ports.events.some((event) =>
+        event.type === "run.budget_exceeded" &&
+        event.payload &&
+        typeof event.payload === "object" &&
+        "failureKind" in event.payload &&
+        event.payload.failureKind === "loop_exhausted",
+      ),
+    ).toBe(false);
+    expect(observationText(ports.contexts[2]?.observations)).toContain(
+      "automatic rescue attempt 1 of 3",
+    );
   });
 
   it("stops repeated identical read-only actions after one focused rescue", async () => {
@@ -1671,7 +1874,7 @@ describe("Headless RunController", () => {
 
     expect(run.status).toBe("completed");
     expect(verificationCount).toBe(2);
-    expect(ports.modelCalls).toBe(2);
+    expect(ports.modelCalls).toBe(1);
     expect(ports.events.filter((event) => event.type === "verification.completed"))
       .toHaveLength(2);
     expect(
@@ -1680,6 +1883,138 @@ describe("Headless RunController", () => {
         checkpoint.readSnapshots.some((snapshot) => snapshot.path === "components/Panel.tsx"),
       ),
     ).toBe(true);
+  });
+
+  it("auto-reads missing expected files after verification even after mutation progress", async () => {
+    const ports = createFakePorts({
+      modelActions: [
+        {
+          type: "tool_call",
+          tool: "write_files",
+          args: {
+            files: [{ content: "export default function Page() { return null; }", path: "app/page.tsx" }],
+            summary: "Update page",
+          },
+        },
+        { type: "finish_candidate", summary: "Should complete after auto evidence read" },
+      ],
+      verificationStatuses: [],
+    });
+    const readPaths: string[] = [];
+    let verificationCount = 0;
+    ports.tools.execute = async ({ args, tool }): Promise<ToolResult> => {
+      if (tool === "write_files") {
+        return {
+          artifactIds: [],
+          retryable: false,
+          status: "success",
+          summary: "Wrote app/page.tsx.",
+          workspaceEffects: {
+            changedFiles: ["app/page.tsx"],
+            packageChanged: false,
+          },
+        };
+      }
+
+      expect(tool).toBe("read_files");
+      const path = (args as { paths: string[] }).paths[0]!;
+      readPaths.push(path);
+      return {
+        artifactIds: [],
+        retryable: false,
+        status: "success",
+        structuredData: {
+          files: [{ content: "{\"posts\":[]}", path }],
+        },
+        summary: `Read ${path}`,
+        workspaceEffects: {
+          changedFiles: [],
+          packageChanged: false,
+          readSnapshots: [
+            {
+              contentHash: `hash:${path}`,
+              path,
+              readAt: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+        },
+      };
+    };
+    ports.verifier.verify = async (input): Promise<VerificationReport> => {
+      verificationCount += 1;
+
+      if (verificationCount === 1) {
+        return {
+          artifactIds: [],
+          checks: [
+            {
+              id: "acceptance:request-addressed",
+              required: true,
+              status: "inconclusive",
+              summary: "Expected file evidence is missing for: data/posts/seed.json.",
+              title: "Acceptance: request-addressed",
+            },
+          ],
+          createdAt: "2026-01-01T00:00:00.000Z",
+          id: "report-missing-seed",
+          missingEvidence: [
+            "Expected file evidence is missing for: data/posts/seed.json.",
+          ],
+          newlyIntroducedFailures: [],
+          repairFeedback: [],
+          runId: input.run.id,
+          status: "inconclusive",
+        };
+      }
+
+      expect(input.readSnapshots?.map((snapshot) => snapshot.path))
+        .toContain("data/posts/seed.json");
+
+      return {
+        artifactIds: [],
+        checks: [
+          {
+            id: "acceptance:request-addressed",
+            required: true,
+            status: "passed",
+            summary: "Expected file evidence was inspected.",
+            title: "Acceptance: request-addressed",
+          },
+        ],
+        createdAt: "2026-01-01T00:00:00.000Z",
+        id: "report-seed-passed",
+        missingEvidence: [],
+        newlyIntroducedFailures: [],
+        repairFeedback: [],
+        runId: input.run.id,
+        status: "passed",
+      };
+    };
+    const controller = new RunController(ports);
+    const contract: TaskContract = {
+      ...compileTaskContract({ objective: "Update page and seed posts" }),
+      source: {
+        acceptanceCriteriaIds: ["criterion-1"],
+        expectedFiles: ["app/page.tsx", "data/posts/seed.json"],
+        mode: "spec",
+        requirementIds: ["story-1"],
+        revisionId: "revision-1",
+        specId: "spec-1",
+        taskId: "task-1",
+      },
+    };
+
+    const run = await controller.start({
+      contract,
+      conversationId: "conversation-1",
+      projectId: "project-1",
+      runId: "run-auto-read-after-mutation",
+    });
+
+    expect(run.status).toBe("completed");
+    expect(readPaths).toEqual(["data/posts/seed.json"]);
+    expect(verificationCount).toBe(2);
+    expect(ports.modelCalls).toBe(1);
   });
 
   it("auto-verifies a spec run once all expected files are read before mutation", async () => {

@@ -92,7 +92,7 @@ export function validateAgentStepResponse(
     };
   }
 
-  if (value.type === "finish" || value.type === "finish_candidate") {
+  if (value.type === "finish_candidate") {
     if (typeof value.summary !== "string" || !value.summary.trim()) {
       throw new Error("Invalid model response: finish_candidate.summary is required.");
     }

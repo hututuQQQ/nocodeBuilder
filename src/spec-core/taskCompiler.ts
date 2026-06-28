@@ -3,6 +3,7 @@ import {
   compileTaskContract,
   validateTaskContract,
 } from "../agent-core/contract/taskContract";
+import { normalizeExpectedFiles } from "../agent-core/expectedFiles";
 import type { TaskManifest } from "../agent-core/manifest/taskManifest";
 import {
   isInvalidProjectPath,
@@ -32,7 +33,7 @@ const UI_INTENT_PATHS = [
 ];
 
 const FORBIDDEN_PATH_PATTERNS = [
-  ".aibuilder/**",
+  ".nocodebuilder/**",
   ".env",
   ".env.*",
   "node_modules/**",
@@ -72,6 +73,7 @@ export function compileSpecTaskContract({
     }
   }
 
+  const expectedFiles = normalizeExpectedFiles(task.expectedFiles);
   const allowedPaths = compileAllowedPathsForSpecTask({
     task,
     revision,
@@ -84,6 +86,7 @@ export function compileSpecTaskContract({
   const budget = budgetForSpecTask({
     base: base.budget,
     executionMode,
+    expectedFiles,
     spec,
     task,
     taskType: base.taskType,
@@ -100,7 +103,7 @@ export function compileSpecTaskContract({
     source: {
       acceptanceCriteriaIds: task.acceptanceCriteriaIds,
       executionMode,
-      expectedFiles: task.expectedFiles,
+      expectedFiles,
       mode: "spec",
       requirementIds: task.requirementIds,
       revisionId: revision.id,
@@ -125,6 +128,9 @@ export function compileSpecTaskManifest({
   spec: DevelopmentSpec;
   task: SpecTask;
 }): TaskManifest {
+  const expectedFiles = contract.source?.mode === "spec"
+    ? normalizeExpectedFiles(contract.source.expectedFiles)
+    : normalizeExpectedFiles(task.expectedFiles);
   const requirementIds = new Set(task.requirementIds);
   const acceptanceCriteriaIds = new Set(task.acceptanceCriteriaIds);
 
@@ -157,13 +163,13 @@ export function compileSpecTaskManifest({
         ...revision.design.technicalDecisions,
         ...revision.requirements.constraints.map((constraint) => `Constraint: ${constraint}`),
       ],
-      expectedFiles: task.expectedFiles,
+      expectedFiles,
     },
     runtimeContract: {
       taskType: contract.taskType,
       compiledAllowedPaths: contract.scope.allowedPaths,
       forbiddenPaths: contract.scope.forbiddenPaths,
-      expectedFiles: task.expectedFiles,
+      expectedFiles,
       permissions: {
         fileWrite: contract.permissions.fileWrite,
         dependencyChange: contract.permissions.dependencyChange,
@@ -211,7 +217,7 @@ export function compileAllowedPathsForSpecTask(input: {
   const paths = [
     ...input.baseAllowedPaths,
     ...input.task.allowedPaths,
-    ...input.task.expectedFiles,
+    ...normalizeExpectedFiles(input.task.expectedFiles),
     ...(input.existingRelevantPaths ?? []),
     ...(backendIntent ? BACKEND_INTENT_PATHS : []),
     ...(dependencyIntent ? DEPENDENCY_INTENT_PATHS : []),
@@ -231,17 +237,22 @@ export function compileAllowedPathsForSpecTask(input: {
 function budgetForSpecTask({
   base,
   executionMode,
+  expectedFiles,
   spec,
   task,
   taskType,
 }: {
   base: TaskContract["budget"];
   executionMode?: "generate" | "modify";
+  expectedFiles?: string[];
   spec: DevelopmentSpec;
   task: SpecTask;
   taskType: TaskContract["taskType"];
 }): TaskContract["budget"] {
-  const expectedFileCount = Math.max(1, task.expectedFiles.length);
+  const expectedFileCount = Math.max(
+    1,
+    (expectedFiles ?? normalizeExpectedFiles(task.expectedFiles)).length,
+  );
   const allowedPathCount = Math.max(1, task.allowedPaths.length);
   const acceptanceCriteriaCount = Math.max(1, task.acceptanceCriteriaIds.length);
   const surfaceArea = Math.max(

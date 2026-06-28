@@ -774,6 +774,58 @@ describe("AgentVerifier", () => {
       });
   });
 
+  it("ignores placeholder expected files when checking spec evidence", async () => {
+    const run = createRun("Implement seeded posts.", "backend_feature");
+    run.contract = {
+      ...run.contract,
+      source: {
+        acceptanceCriteriaIds: ["criterion-2"],
+        expectedFiles: ["data/posts/.gitkeep", "data/posts/seed.json"],
+        mode: "spec",
+        requirementIds: ["story-2"],
+        revisionId: "rev-1",
+        specId: "spec-1",
+        taskId: "task-6",
+      },
+    };
+    const verifier = new AgentVerifier({
+      httpProbe: async () => ({
+        ok: true,
+        status: 200,
+        summary: "ok",
+      }),
+      readFile: createReadFile({
+        "package.json": JSON.stringify({
+          scripts: { build: "next build" },
+          dependencies: { next: "15.0.0" },
+        }),
+      }),
+      runCommand: async (command) => ({
+        command,
+        exitCode: 0,
+        output: "ok",
+        success: true,
+      }),
+    });
+
+    const report = await verifier.verify({
+      changedFiles: [],
+      packageChanged: false,
+      previewUrl: "http://localhost:3000",
+      readSnapshots: [
+        {
+          contentHash: "hash-seed",
+          path: "data/posts/seed.json",
+          readAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      run,
+    });
+
+    expect(report.status).toBe("passed");
+    expect(report.missingEvidence.join("\n")).not.toContain(".gitkeep");
+  });
+
   it("does not pass a no-mutation spec task when inspected files miss expected files", async () => {
     const run = createRun("实现首页Lobby组件，通过API与Supabase交互存储房间信息。", "backend_feature");
     run.contract = {

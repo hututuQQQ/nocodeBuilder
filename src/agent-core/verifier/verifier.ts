@@ -15,6 +15,7 @@ import {
   matchesProjectPathPattern,
   normalizeProjectPath,
 } from "../pathScope";
+import { normalizeExpectedFiles } from "../expectedFiles";
 
 export type VerifierCommandResult = {
   command: string;
@@ -924,8 +925,8 @@ export function verifyScope(
   if (
     normalizedChangedFiles.some(
       (path) =>
-        path === ".aibuilder" ||
-        path.startsWith(".aibuilder/") ||
+        path === ".nocodebuilder" ||
+        path.startsWith(".nocodebuilder/") ||
         path.startsWith(".env") ||
         path.includes("/.env"),
     )
@@ -1216,7 +1217,7 @@ function describeMissingRequestAddressedEvidence(
 
 function getExpectedFiles(contract: TaskContract) {
   return contract.source?.mode === "spec"
-    ? (contract.source.expectedFiles ?? []).map(normalizeProjectPath)
+    ? normalizeExpectedFiles(contract.source.expectedFiles)
     : [];
 }
 
@@ -1292,7 +1293,7 @@ function collectExistingWorkspaceEvidence(
 
   const expectedFiles =
     contract.source?.mode === "spec"
-      ? (contract.source.expectedFiles ?? []).map(normalizeProjectPath)
+      ? normalizeExpectedFiles(contract.source.expectedFiles)
       : [];
   if (expectedFiles.length > 0) {
     const matchingExpectedFiles = readPaths.filter((path) =>

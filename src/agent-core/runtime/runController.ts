@@ -27,6 +27,7 @@ import {
   createTaskManifestFromContract,
   type TaskManifest,
 } from "../manifest/taskManifest";
+import { normalizeExpectedFiles } from "../expectedFiles";
 import { checkRunDrift, type DriftCheckResult } from "./driftGuard";
 import { isTerminalAgentRunStatus, RunStateMachine } from "./runStateMachine";
 
@@ -206,6 +207,7 @@ type RunDriveState = {
   deletedFiles: Set<string>;
   externalEffects: string[];
   expectedFileEvidenceAutoReadPaths: string[];
+  expectedFileEvidenceBlockerKey?: string;
   expectedFileEvidenceAutoVerifyKey?: string;
   finishSummary?: string;
   finishEvidence?: AgentFinishEvidence;
@@ -229,6 +231,8 @@ type RunDriveState = {
 
 type LoopGuardState = {
   lastFingerprint?: string;
+  rescueCount?: number;
+  repeatedCount?: number;
   rescuedFingerprint?: string;
 };
 
@@ -493,7 +497,7 @@ export class RunController {
       if (action.type === "answer") {
         state.answerMessage = action.message;
         state.observations.push(action.message);
-        run = await this.verifyAndAdvance(run, state, { final: true });
+        run = await this.verifyAndAdvance(run, state, { final: true }, signal);
         continue;
       }
 
@@ -501,7 +505,7 @@ export class RunController {
         state.finishSummary = action.summary;
         state.finishEvidence = normalizeFinishEvidence(action.evidence);
         appendFinishEvidenceToWorkingState(state, state.finishEvidence);
-        run = await this.verifyAndAdvance(run, state, { final: true });
+        run = await this.verifyAndAdvance(run, state, { final: true }, signal);
         continue;
       }
 
@@ -939,7 +943,7 @@ export class RunController {
     if (shouldAutoVerifyAfterEvidenceRead(nextRun, state, tool.readOnly, result)) {
       resetReadOnlyNoProgress(state);
       await this.saveCheckpoint(nextRun, state, "expected-file-evidence-collected");
-      return this.verifyAndAdvance(nextRun, state, { final: false });
+      return this.verifyAndAdvance(nextRun, state, { final: false }, signal);
     }
 
     const progressSignal = await this.handleToolProgressSignal(nextRun, state, {
@@ -974,7 +978,7 @@ export class RunController {
       tool.requiresVerification &&
       changed.length + deleted.length > 0
     ) {
-      return this.verifyAndAdvance(nextRun, state, { final: false });
+      return this.verifyAndAdvance(nextRun, state, { final: false }, signal);
     }
 
     if (nextRun.status !== "planning") {
@@ -1186,7 +1190,7 @@ export class RunController {
     })) {
       resetReadOnlyNoProgress(state);
       await this.saveCheckpoint(nextRun, state, "expected-file-evidence-collected");
-      return this.verifyAndAdvance(nextRun, state, { final: false });
+      return this.verifyAndAdvance(nextRun, state, { final: false }, signal);
     }
 
     const progressSignal = await this.handleToolProgressSignal(nextRun, state, {
@@ -1244,6 +1248,19 @@ export class RunController {
     );
 
     if (missingExpectedFiles.length === 0) {
+      const unresolvedMissingExpectedFiles = getMissingExpectedFilesForRun(run, state);
+
+      if (
+        state.pendingEvidenceVerification &&
+        unresolvedMissingExpectedFiles.length > 0
+      ) {
+        this.recordMissingExpectedFileBlocker(
+          state,
+          unresolvedMissingExpectedFiles,
+          state.pendingEvidenceVerification.reason,
+        );
+      }
+
       return null;
     }
 
@@ -1278,10 +1295,38 @@ export class RunController {
     );
   }
 
+  private recordMissingExpectedFileBlocker(
+    state: RunDriveState,
+    missingExpectedFiles: string[],
+    reason: string,
+  ) {
+    const key = missingExpectedFiles.map(normalizeProjectPath).sort().join("|");
+
+    if (!key || state.expectedFileEvidenceBlockerKey === key) {
+      return;
+    }
+
+    const observation = buildMissingExpectedFileBlockerObservation(
+      missingExpectedFiles,
+      reason,
+    );
+    state.expectedFileEvidenceBlockerKey = key;
+    state.observations.push(observation);
+    state.workingState.currentBlocker = observation.error
+      ? {
+          code: observation.error.code,
+          fingerprint: observation.error.fingerprint,
+          message: observation.error.message,
+          suggestedAction: observation.error.suggestedAction,
+        }
+      : state.workingState.currentBlocker;
+  }
+
   private async verifyAndAdvance(
     run: AgentRun,
     state: RunDriveState,
     options: { final: boolean },
+    signal?: AbortSignal,
   ): Promise<AgentRun> {
     run = await this.commit(run, this.machine.transition(run, { type: "enter_verifying" }));
     await this.saveCheckpoint(run, state, "verification-started");
@@ -1347,6 +1392,33 @@ export class RunController {
       state,
       report,
     );
+
+    if (state.pendingEvidenceVerification) {
+      const repairingRun = await this.commit(
+        run,
+        this.machine.transition(run, { type: "verification_failed", report }),
+      );
+
+      if (isTerminalAgentRunStatus(repairingRun.status)) {
+        await this.saveCheckpoint(repairingRun, state, "verification-failed");
+        return repairingRun;
+      }
+
+      const autoReadRun = await this.maybeAutoReadMissingExpectedFiles(
+        repairingRun,
+        state,
+        EXPECTED_FILE_AUTO_READ_AFTER_READ_ONLY_COUNT,
+        signal,
+      );
+
+      if (autoReadRun) {
+        return autoReadRun;
+      }
+
+      await this.saveCheckpoint(repairingRun, state, "verification-failed");
+      return repairingRun;
+    }
+
     const loopSignal = await this.handleLoopSignal(run, state, {
       details: buildVerificationFailureDetails(report),
       kind: "verification",
@@ -1612,28 +1684,45 @@ export class RunController {
     },
   ): Promise<{ rescued: boolean; stopped: boolean; run: AgentRun }> {
     const fingerprint = buildFailureFingerprint(signal.kind, signal.details);
+    const maxRescueAttempts = getLoopRescueAttemptLimit(run, state, signal.kind);
 
     if (state.loopGuard.lastFingerprint !== fingerprint) {
       state.loopGuard.lastFingerprint = fingerprint;
+      state.loopGuard.repeatedCount = 1;
+      state.loopGuard.rescueCount = 0;
+      state.loopGuard.rescuedFingerprint = undefined;
       return { rescued: false, run, stopped: false };
     }
 
-    if (state.loopGuard.rescuedFingerprint === fingerprint) {
+    state.loopGuard.repeatedCount = (state.loopGuard.repeatedCount ?? 1) + 1;
+
+    const previousRescueCount = state.loopGuard.rescuedFingerprint === fingerprint
+      ? state.loopGuard.rescueCount ?? 1
+      : 0;
+
+    if (previousRescueCount >= maxRescueAttempts) {
       const stoppedRun = await this.commit(
         run,
         this.machine.transition(run, {
           budget: "maxModelTurns",
           failureKind: "loop_exhausted",
-          reason: LOOP_EXHAUSTED_REASON,
+          reason: buildLoopExhaustedReason(maxRescueAttempts),
           type: "budget_exceeded",
         }),
       );
       return { rescued: false, run: stoppedRun, stopped: true };
     }
 
+    const nextRescueCount = previousRescueCount + 1;
     state.loopGuard.rescuedFingerprint = fingerprint;
+    state.loopGuard.rescueCount = nextRescueCount;
     state.observations.push(
-      buildLoopRescueObservation(signal.summary, signal.details),
+      buildLoopRescueObservation({
+        details: signal.details,
+        maxRescueAttempts,
+        rescueAttempt: nextRescueCount,
+        summary: signal.summary,
+      }),
     );
 
     return { rescued: true, run, stopped: false };
@@ -1941,6 +2030,7 @@ function createEmptyDriveState(
     deletedFiles: new Set(),
     externalEffects: [],
     expectedFileEvidenceAutoReadPaths: [],
+    expectedFileEvidenceBlockerKey: undefined,
     expectedFileEvidenceAutoVerifyKey: undefined,
     finishSummary: undefined,
     finishEvidence: undefined,
@@ -1975,13 +2065,15 @@ function ensureRunManifest(run: AgentRun): AgentRun & { manifest: TaskManifest }
 }
 
 const MAX_MODEL_VALIDATION_OBSERVATIONS = 2;
+const DEFAULT_LOOP_RESCUE_ATTEMPTS = 1;
+const SPEC_VERIFICATION_LOOP_RESCUE_ATTEMPTS = 3;
 const REPEATED_READ_ONLY_ACTION_RESCUE_THRESHOLD = 3;
 const READ_ONLY_STALL_RESCUE_GRACE = 3;
 const EXPECTED_FILE_AUTO_READ_AFTER_READ_ONLY_COUNT = 2;
 const LOOP_EXHAUSTED_REASON =
-  "The same failure repeated after one focused rescue attempt, so the run stopped to avoid a token/context budget loop.";
+  "The same failure repeated after one focused rescue attempt, so the run stopped to avoid a repeated-action loop.";
 const READ_ONLY_STALL_EXHAUSTED_REASON =
-  "Read-only exploration repeated after one focused rescue attempt without edits, verification, or finish, so the run stopped to avoid a token/context budget loop.";
+  "Read-only exploration repeated after one focused rescue attempt without edits, verification, or finish, so the run stopped to avoid a repeated-action loop.";
 const RUN_CONTEXT_SUMMARY_LLM_CHAR_THRESHOLD = 24_000;
 const RUN_CONTEXT_SUMMARY_LLM_OBSERVATION_DELTA = 8;
 
@@ -2180,12 +2272,16 @@ function getAutoReadableMissingExpectedFiles(
   state: RunDriveState,
   incomingReadOnlyCount: number,
 ) {
+  const hasPendingEvidenceVerification = Boolean(state.pendingEvidenceVerification);
+
   if (
     run.contract.source?.mode !== "spec" ||
     run.contract.taskType === "answer" ||
-    hasImplementationProgress(run, state) ||
-    state.progressGuard.readOnlyNoProgressCount + incomingReadOnlyCount <
-      EXPECTED_FILE_AUTO_READ_AFTER_READ_ONLY_COUNT
+    (
+      !hasPendingEvidenceVerification &&
+      state.progressGuard.readOnlyNoProgressCount + incomingReadOnlyCount <
+        EXPECTED_FILE_AUTO_READ_AFTER_READ_ONLY_COUNT
+    )
   ) {
     return [];
   }
@@ -2194,7 +2290,11 @@ function getAutoReadableMissingExpectedFiles(
     state.expectedFileEvidenceAutoReadPaths.map(normalizeProjectPath),
   );
 
-  return getMissingExpectedFilesForRun(run, state)
+  const missingExpectedFiles =
+    state.pendingEvidenceVerification?.missingExpectedFiles ??
+    getMissingExpectedFilesForRun(run, state);
+
+  return missingExpectedFiles
     .filter((path) =>
       !attempted.has(path) &&
       run.contract.scope.allowedPaths.some((pattern) =>
@@ -2318,14 +2418,47 @@ function buildModelValidationObservation(
   };
 }
 
-function buildLoopRescueObservation(summary: string, details: string) {
+function getLoopRescueAttemptLimit(
+  run: AgentRun,
+  state: RunDriveState,
+  kind: string,
+) {
+  if (
+    kind === "verification" &&
+    run.contract.source?.mode === "spec" &&
+    hasImplementationProgress(run, state)
+  ) {
+    return SPEC_VERIFICATION_LOOP_RESCUE_ATTEMPTS;
+  }
+
+  return DEFAULT_LOOP_RESCUE_ATTEMPTS;
+}
+
+function buildLoopExhaustedReason(maxRescueAttempts: number) {
+  if (maxRescueAttempts <= 1) {
+    return LOOP_EXHAUSTED_REASON;
+  }
+
+  return `The same failure repeated after ${maxRescueAttempts} focused rescue attempts, so the run stopped to avoid a repeated-action loop.`;
+}
+
+function buildLoopRescueObservation(input: {
+  details: string;
+  maxRescueAttempts: number;
+  rescueAttempt: number;
+  summary: string;
+}) {
+  const { details, maxRescueAttempts, rescueAttempt, summary } = input;
   const compactSummary = compactSummaryText(summary, 420);
   const compactDetails = compactSummaryText(details, 1_600);
+  const rescueLine = rescueAttempt >= maxRescueAttempts
+    ? "This is the final automatic rescue attempt for this failure fingerprint."
+    : `This is automatic rescue attempt ${rescueAttempt} of ${maxRescueAttempts} for this failure fingerprint.`;
 
   return {
     content: [
       "The same failure pattern repeated.",
-      "This is the final automatic rescue attempt for this failure fingerprint.",
+      rescueLine,
       `Failure summary: ${compactSummary}`,
       compactDetails ? `Failure details: ${compactDetails}` : "",
       "Change strategy now: do not repeat the previous action, do one focused repair using retained evidence, return finish_candidate if already fixed, or return a blocker answer if the missing information cannot be recovered from context.",
@@ -2449,6 +2582,41 @@ function buildExpectedFileAutoReadObservation(paths: string[]) {
   };
 }
 
+function buildMissingExpectedFileBlockerObservation(
+  paths: string[],
+  reason: string,
+): AgentStructuredObservation {
+  const relatedFiles = uniqueStrings(paths.map(normalizeProjectPath)).slice(0, 8);
+  const listedPaths = relatedFiles.join(", ");
+  const message = `Expected file evidence is still missing for: ${listedPaths}.`;
+
+  return {
+    error: {
+      code: "MISSING_EXPECTED_FILE_EVIDENCE",
+      fingerprint: buildFailureFingerprint("missing_expected_file", listedPaths),
+      message,
+      relatedFiles,
+      retryable: true,
+      suggestedAction: {
+        type: "blocker",
+        reason: message,
+        recoveryOptions: [
+          `Create or update the missing expected file(s): ${listedPaths}.`,
+          "Return finish_candidate with evidence if equivalent expected-file evidence already exists.",
+          "Ask for a spec revision if the expectedFiles list is wrong.",
+        ],
+      },
+    },
+    ok: false,
+    summary: [
+      message,
+      reason,
+      "Do not repeat unrelated reads. Create or update the missing expected file(s), cite existing matching evidence, return finish_candidate if already complete, or report a blocker if the spec expectedFiles are wrong.",
+    ].filter(Boolean).join(" "),
+    tool: "expected_file_evidence",
+  };
+}
+
 function buildPendingEvidenceVerificationState(
   run: AgentRun,
   state: RunDriveState,
@@ -2493,11 +2661,7 @@ function getMissingExpectedFilesForRun(run: AgentRun, state: RunDriveState) {
 
 function getExpectedFilesForRun(run: AgentRun) {
   return run.contract.source?.mode === "spec"
-    ? uniqueStrings(
-        (run.contract.source.expectedFiles ?? [])
-          .map(normalizeProjectPath)
-          .filter((path) => path && !isInvalidProjectPath(path)),
-      )
+    ? normalizeExpectedFiles(run.contract.source.expectedFiles)
     : [];
 }
 
@@ -2733,7 +2897,12 @@ function buildDeterministicRunContextSummary({
   const latestFailures = latest
     .filter(isFailureLikeObservation)
     .map((observation) => summarizeObservationForContext(observation, "failure"))
-    .slice(-6);
+    .slice(-6)
+    .reverse();
+  const latestStructuredFailure = [...latest]
+    .reverse()
+    .map(readStructuredObservation)
+    .find((observation) => observation?.error);
   const completed = latest
     .filter((observation) => !isFailureLikeObservation(observation))
     .map((observation) => summarizeObservationForContext(observation, "completed"))
@@ -2762,7 +2931,11 @@ function buildDeterministicRunContextSummary({
     deletedFiles: uniqueStrings(deletedFiles).slice(-40),
     importantFiles,
     latestFailures,
-    nextStep: deriveSummaryNextStep(latestFailures, changedFiles),
+    nextStep: deriveSummaryNextStep(
+      latestFailures,
+      changedFiles,
+      latestStructuredFailure?.error,
+    ),
     objective: compactSummaryText(current.objective || run.contract.objective, 500),
     summarizedObservationCount: observations.length,
     updatedAt: now,
@@ -2823,7 +2996,23 @@ function readRunContextSummary(value: unknown) {
     : undefined;
 }
 
-function deriveSummaryNextStep(latestFailures: string[], changedFiles: string[]) {
+function deriveSummaryNextStep(
+  latestFailures: string[],
+  changedFiles: string[],
+  currentBlocker?: AgentStructuredObservation["error"],
+) {
+  if (currentBlocker?.suggestedAction?.type === "tool_call") {
+    return `Follow current blocker suggested action: ${currentBlocker.suggestedAction.tool}.`;
+  }
+
+  if (currentBlocker?.suggestedAction?.type === "blocker") {
+    return `Resolve current blocker: ${currentBlocker.message}`;
+  }
+
+  if (currentBlocker) {
+    return `Repair current blocker: ${currentBlocker.message}`;
+  }
+
   if (latestFailures.length > 0) {
     return "Repair the latest failure using the retained error context and relevant files.";
   }
@@ -2910,11 +3099,13 @@ function parseObservationRecord(observation: string) {
 }
 
 function extractLikelyFilePaths(value: string) {
-  const matches = value.match(
-    /\b(?:app|components|lib|public|styles|src|pages|hooks|utils|server)\/[A-Za-z0-9._/@-]+/g,
+  const matches = value.matchAll(
+    /(?:^|[\s("'`])((?:app|components|data|hooks|lib|pages|public|server|src|styles|utils)\/(?:[A-Za-z0-9_@-]+\/)*\.?[A-Za-z0-9._@-]+)(?=$|[\s)"'`.,:;])/g,
   );
 
-  return matches ?? [];
+  return Array.from(matches, (match) => match[1]).filter(
+    (path): path is string => typeof path === "string" && path.length > 0,
+  );
 }
 
 function compactSummaryText(value: string, maxLength: number) {
@@ -3001,6 +3192,7 @@ function buildVerificationObservation(report: VerificationReport) {
       : `Verification ${report.status}: ${failedOrMissing.slice(0, 3).join(" ")}`;
 
   const code = classifyVerificationFailureCode(report);
+  const suggestedReadPaths = collectVerificationSuggestedReadPaths(report);
 
   return {
     content: [
@@ -3022,27 +3214,57 @@ function buildVerificationObservation(report: VerificationReport) {
           ),
           message: failedOrMissing.slice(0, 3).join(" ") ||
             `Verification ${report.status}.`,
+          relatedFiles: suggestedReadPaths,
           retryable: true,
-          suggestedAction: {
-            type: "tool_call" as const,
-            tool: "read_files",
-            args: {
-              paths: uniqueStrings(
-                report.checks.flatMap((check) =>
-                  extractLikelyFilePaths([
-                    check.summary,
-                    typeof check.details === "string" ? check.details : stringifyPayload(check.details),
-                  ].join("\n")),
-                ),
-              ).slice(0, 4),
-            },
-            rationale: "Refresh files named in verifier diagnostics before repairing.",
-          },
+          suggestedAction: buildVerificationSuggestedAction(
+            code,
+            suggestedReadPaths,
+          ),
         },
     ok: report.status === "passed",
     summary: compactSummaryText(summary, 420),
     tool: "verification",
   };
+}
+
+function collectVerificationSuggestedReadPaths(report: VerificationReport) {
+  return uniqueStrings([
+    ...report.missingEvidence.flatMap(extractLikelyFilePaths),
+    ...report.checks.flatMap((check) =>
+      extractLikelyFilePaths([
+        check.summary,
+        typeof check.details === "string" ? check.details : stringifyPayload(check.details),
+      ].join("\n")),
+    ),
+  ]).slice(0, 8);
+}
+
+function buildVerificationSuggestedAction(
+  code: AgentFailureCode,
+  paths: string[],
+): SuggestedAgentAction | undefined {
+  if (paths.length > 0) {
+    return {
+      type: "tool_call",
+      tool: "read_files",
+      args: { paths: paths.slice(0, 4) },
+      rationale: "Refresh files named in verifier diagnostics before repairing.",
+    };
+  }
+
+  if (code === "MISSING_EXPECTED_FILE_EVIDENCE") {
+    return {
+      type: "blocker",
+      reason: "Expected-file evidence is missing, but no concrete readable path was extracted from the verifier report.",
+      recoveryOptions: [
+        "Create or update the missing expected file named in the report.",
+        "Return finish_candidate with concrete read/changed file evidence if equivalent evidence already exists.",
+        "Ask for a spec revision if the expectedFiles list is wrong.",
+      ],
+    };
+  }
+
+  return undefined;
 }
 
 function classifyVerificationFailureCode(report: VerificationReport): AgentFailureCode {
@@ -3131,6 +3353,7 @@ type CheckpointDriveStateMetadata = {
   consecutiveModelValidationFailures?: number;
   externalEffects?: string[];
   expectedFileEvidenceAutoReadPaths?: string[];
+  expectedFileEvidenceBlockerKey?: string;
   expectedFileEvidenceAutoVerifyKey?: string;
   finishSummary?: string;
   finishEvidence?: AgentFinishEvidence;
@@ -3158,6 +3381,7 @@ function writeDriveStateMetadata(state: RunDriveState) {
       consecutiveModelValidationFailures: state.consecutiveModelValidationFailures,
       externalEffects: state.externalEffects,
       expectedFileEvidenceAutoReadPaths: state.expectedFileEvidenceAutoReadPaths,
+      expectedFileEvidenceBlockerKey: state.expectedFileEvidenceBlockerKey,
       expectedFileEvidenceAutoVerifyKey: state.expectedFileEvidenceAutoVerifyKey,
       finishSummary: state.finishSummary,
       finishEvidence: state.finishEvidence,
@@ -3456,6 +3680,10 @@ export function readRunDriveStateMetadata(plan: unknown): CheckpointDriveStateMe
     expectedFileEvidenceAutoReadPaths: readOptionalStringArray(
       metadataRecord.expectedFileEvidenceAutoReadPaths,
     ),
+    expectedFileEvidenceBlockerKey:
+      typeof metadataRecord.expectedFileEvidenceBlockerKey === "string"
+        ? metadataRecord.expectedFileEvidenceBlockerKey
+        : undefined,
     expectedFileEvidenceAutoVerifyKey:
       typeof metadataRecord.expectedFileEvidenceAutoVerifyKey === "string"
         ? metadataRecord.expectedFileEvidenceAutoVerifyKey
@@ -3535,6 +3763,8 @@ function readLoopGuardState(value: unknown): LoopGuardState | undefined {
       typeof value.lastFingerprint === "string"
         ? value.lastFingerprint
         : undefined,
+    rescueCount: readNonNegativeInteger(value.rescueCount),
+    repeatedCount: readNonNegativeInteger(value.repeatedCount),
     rescuedFingerprint:
       typeof value.rescuedFingerprint === "string"
         ? value.rescuedFingerprint

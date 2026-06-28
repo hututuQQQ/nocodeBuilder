@@ -18,7 +18,7 @@ const DEFAULT_ALLOWED_PATHS = [
 ];
 
 const DEFAULT_FORBIDDEN_PATHS = [
-  ".aibuilder/**",
+  ".nocodebuilder/**",
   ".env",
   ".env.*",
   "node_modules/**",

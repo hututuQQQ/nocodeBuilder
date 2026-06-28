@@ -10,7 +10,7 @@ use crate::projects::resolve_project_dir;
 
 use super::{
     command_whitelist::parse_allowed_command,
-    events::{emit_status, spawn_output_reader},
+    events::{emit_status, spawn_output_reader, OutputReaderOptions},
     process::spawn_child,
     time::current_timestamp,
     types::{AllowedCommand, CommandResult},
@@ -37,17 +37,16 @@ pub async fn run_command(
     })
     .await
     .map_err(|error| format!("command: failed to join command task: {error}"))?
-    .map_err(|error| {
+    .inspect_err(|error| {
         emit_status(
             &app,
             &project_id,
             &command_label,
             "failed",
             None,
-            Some(error.clone()),
+            Some(error.to_string()),
             None,
         );
-        error
     })
 }
 
@@ -77,31 +76,31 @@ pub(crate) fn run_command_blocking(
     let mut readers = Vec::new();
 
     if let Some(stdout) = stdout {
-        readers.push(spawn_output_reader(
-            app.clone(),
-            project_id.clone(),
-            command_label.clone(),
-            "stdout",
-            stdout,
-            Some(output.clone()),
-            None,
-            None,
-            None,
-        ));
+        readers.push(spawn_output_reader(OutputReaderOptions {
+            app: app.clone(),
+            project_id: project_id.clone(),
+            command: command_label.clone(),
+            stream: "stdout",
+            reader: stdout,
+            output: Some(output.clone()),
+            url_sender: None,
+            url_state: None,
+            redactions: None,
+        }));
     }
 
     if let Some(stderr) = stderr {
-        readers.push(spawn_output_reader(
-            app.clone(),
-            project_id.clone(),
-            command_label.clone(),
-            "stderr",
-            stderr,
-            Some(output.clone()),
-            None,
-            None,
-            None,
-        ));
+        readers.push(spawn_output_reader(OutputReaderOptions {
+            app: app.clone(),
+            project_id: project_id.clone(),
+            command: command_label.clone(),
+            stream: "stderr",
+            reader: stderr,
+            output: Some(output.clone()),
+            url_sender: None,
+            url_state: None,
+            redactions: None,
+        }));
     }
 
     let status = child

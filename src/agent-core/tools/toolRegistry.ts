@@ -183,8 +183,8 @@ const OUTPUT_SCHEMAS: Record<CoreToolName, RuntimeSchema> = {
 const TOOL_METADATA: Array<
   Omit<ToolDefinition, "inputSchema" | "outputSchema">
 > = [
-  legacyTool("list_files", "Inspect the project file tree.", true, true, "none", false, "never"),
-  legacyTool(
+  defineTool("list_files", "Inspect the project file tree.", true, true, "none", false, "never"),
+  defineTool(
     "read_files",
     "Read text files with optional 1-based line offset and line limit. Use before editing existing files.",
     true,
@@ -195,7 +195,7 @@ const TOOL_METADATA: Array<
     30_000,
     24_000,
   ),
-  legacyTool(
+  defineTool(
     "grep_files",
     "Search allowed project files for text. Returns path, line number, and matching context.",
     true,
@@ -204,8 +204,8 @@ const TOOL_METADATA: Array<
     false,
     "never",
   ),
-  legacyTool("glob_files", "Find allowed project files by glob pattern.", true, true, "none", false, "never"),
-  legacyTool(
+  defineTool("glob_files", "Find allowed project files by glob pattern.", true, true, "none", false, "never"),
+  defineTool(
     "edit_file",
     "Make a focused text replacement in a previously read file. old_string must match file.content exactly and be unique unless replace_all is true.",
     false,
@@ -214,7 +214,7 @@ const TOOL_METADATA: Array<
     true,
     "conditional",
   ),
-  legacyTool(
+  defineTool(
     "replace_file_range",
     "Replace a 1-based inclusive line range in a previously read file. Prefer this when diagnostics identify line numbers or exact old_string is brittle.",
     false,
@@ -223,7 +223,7 @@ const TOOL_METADATA: Array<
     true,
     "conditional",
   ),
-  legacyTool(
+  defineTool(
     "write_files",
     "Create files or overwrite complete file contents. Existing files must have been read first.",
     false,
@@ -232,7 +232,7 @@ const TOOL_METADATA: Array<
     true,
     "conditional",
   ),
-  legacyTool(
+  defineTool(
     "delete_files",
     "Delete files only when clearly needed. Existing files must have been read first.",
     false,
@@ -241,7 +241,7 @@ const TOOL_METADATA: Array<
     true,
     "always",
   ),
-  legacyTool(
+  defineTool(
     "run_command",
     "Run one allowed command. Do not pass package names to install commands; edit package.json with exact pinned dependencies instead.",
     false,
@@ -251,7 +251,7 @@ const TOOL_METADATA: Array<
     "conditional",
     120_000,
   ),
-  legacyTool(
+  defineTool(
     "apply_supabase_schema",
     "Create missing Supabase tables and add missing columns for the current project. Non-destructive; requires the project .env Supabase DB URL and secret key. Use canonical column types and safe defaultValue literals only.",
     false,
@@ -260,7 +260,7 @@ const TOOL_METADATA: Array<
     false,
     "conditional",
   ),
-  legacyTool(
+  defineTool(
     "start_dev_server",
     "Start the local preview server only when the user explicitly asks to preview or run the app.",
     false,
@@ -269,8 +269,8 @@ const TOOL_METADATA: Array<
     false,
     "never",
   ),
-  legacyTool("stop_dev_server", "Stop the local preview server.", false, false, "external_write", false, "never"),
-  legacyTool(
+  defineTool("stop_dev_server", "Stop the local preview server.", false, false, "external_write", false, "never"),
+  defineTool(
     "refresh_preview",
     "Refresh the preview iframe only when preview is already running and the user explicitly asks to refresh or inspect it.",
     false,
@@ -279,10 +279,10 @@ const TOOL_METADATA: Array<
     false,
     "never",
   ),
-  legacyTool("get_site_spec", "Read the host-managed SiteSpec for the current project.", true, true, "none", false, "never", 10_000, 32_000),
-  legacyTool("get_page_spec", "Read one page from the host-managed SiteSpec.", true, true, "none", false, "never", 10_000, 16_000),
-  legacyTool("find_site_node", "Find SiteSpec nodes by id, label, route, or text hint.", true, true, "none", false, "never", 10_000, 16_000),
-  legacyTool(
+  defineTool("get_site_spec", "Read the host-managed SiteSpec for the current project.", true, true, "none", false, "never", 10_000, 32_000),
+  defineTool("get_page_spec", "Read one page from the host-managed SiteSpec.", true, true, "none", false, "never", 10_000, 16_000),
+  defineTool("find_site_node", "Find SiteSpec nodes by id, label, route, or text hint.", true, true, "none", false, "never", 10_000, 16_000),
+  defineTool(
     "update_design_tokens",
     "Update controlled design token CSS variables and synchronize SiteSpec metadata.",
     false,
@@ -293,8 +293,8 @@ const TOOL_METADATA: Array<
     30_000,
     12_000,
   ),
-  legacyTool("resolve_node_source", "Resolve a SiteSpec node id to source file and line metadata.", true, true, "none", false, "never", 10_000, 8_000),
-  legacyTool(
+  defineTool("resolve_node_source", "Resolve a SiteSpec node id to source file and line metadata.", true, true, "none", false, "never", 10_000, 8_000),
+  defineTool(
     "refresh_site_index",
     "Ask the host to safely rebuild the SiteSpec and source map from project files.",
     false,
@@ -307,7 +307,7 @@ const TOOL_METADATA: Array<
   ),
 ];
 
-function legacyTool(
+function defineTool(
   name: CoreToolName,
   description: string,
   readOnly: boolean,

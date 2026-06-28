@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    ai_web_builder_lib::run()
+    nocodebuilder_lib::run()
 }

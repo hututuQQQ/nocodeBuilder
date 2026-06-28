@@ -730,13 +730,13 @@ mod tests {
 
     #[test]
     fn initial_build_requires_spec_mode_and_active_spec() {
-        assert!(validate_conversation_shape("initial_build", "chat", None, &Vec::new(),).is_err());
-        assert!(validate_conversation_shape("initial_build", "spec", None, &Vec::new(),).is_err());
+        assert!(validate_conversation_shape("initial_build", "chat", None, &[],).is_err());
+        assert!(validate_conversation_shape("initial_build", "spec", None, &[],).is_err());
         assert!(validate_conversation_shape(
             "initial_build",
             "spec",
             Some("spec-1"),
-            &vec!["spec-1".to_string()],
+            &["spec-1".to_string()],
         )
         .is_ok());
     }
@@ -747,16 +747,13 @@ mod tests {
             "iteration",
             "chat",
             Some("spec-1"),
-            &vec!["spec-1".to_string()],
+            &["spec-1".to_string()],
         )
         .is_err());
-        assert!(validate_conversation_shape(
-            "iteration",
-            "chat",
-            None,
-            &vec!["spec-1".to_string()],
-        )
-        .is_ok());
+        assert!(
+            validate_conversation_shape("iteration", "chat", None, &["spec-1".to_string()],)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -765,17 +762,17 @@ mod tests {
             "iteration",
             "spec",
             Some("spec-1"),
-            &vec!["spec-1".to_string(), "spec-1".to_string()],
+            &["spec-1".to_string(), "spec-1".to_string()],
         )
         .is_err());
         assert!(validate_historical_specs_preserved(
-            &vec!["spec-1".to_string(), "spec-2".to_string()],
-            &vec!["spec-2".to_string()],
+            &["spec-1".to_string(), "spec-2".to_string()],
+            &["spec-2".to_string()],
         )
         .is_err());
         assert!(validate_historical_specs_preserved(
-            &vec!["spec-1".to_string()],
-            &vec!["spec-1".to_string(), "spec-2".to_string()],
+            &["spec-1".to_string()],
+            &["spec-1".to_string(), "spec-2".to_string()],
         )
         .is_ok());
     }

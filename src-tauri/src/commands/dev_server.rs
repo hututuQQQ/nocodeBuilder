@@ -12,7 +12,7 @@ use crate::projects::resolve_project_dir;
 
 use super::{
     command_whitelist::preferred_dev_command,
-    events::{emit_status, spawn_output_reader},
+    events::{emit_status, spawn_output_reader, OutputReaderOptions},
     process::{kill_process_tree, spawn_child},
     time::current_timestamp,
     types::DevServerInfo,
@@ -96,31 +96,31 @@ pub fn start_dev_server(
     );
 
     if let Some(stdout) = stdout {
-        spawn_output_reader(
-            app.clone(),
-            project_id.clone(),
-            command_label.clone(),
-            "stdout",
-            stdout,
-            None,
-            Some(url_sender.clone()),
-            Some(url_state.clone()),
-            None,
-        );
+        spawn_output_reader(OutputReaderOptions {
+            app: app.clone(),
+            project_id: project_id.clone(),
+            command: command_label.clone(),
+            stream: "stdout",
+            reader: stdout,
+            output: None,
+            url_sender: Some(url_sender.clone()),
+            url_state: Some(url_state.clone()),
+            redactions: None,
+        });
     }
 
     if let Some(stderr) = stderr {
-        spawn_output_reader(
-            app.clone(),
-            project_id.clone(),
-            command_label.clone(),
-            "stderr",
-            stderr,
-            None,
-            Some(url_sender),
-            Some(url_state.clone()),
-            None,
-        );
+        spawn_output_reader(OutputReaderOptions {
+            app: app.clone(),
+            project_id: project_id.clone(),
+            command: command_label.clone(),
+            stream: "stderr",
+            reader: stderr,
+            output: None,
+            url_sender: Some(url_sender),
+            url_state: Some(url_state.clone()),
+            redactions: None,
+        });
     }
 
     spawn_dev_server_watcher(
@@ -173,7 +173,7 @@ pub fn stop_dev_server(
     project_id: String,
 ) -> Result<(), String> {
     let server = {
-        let mut servers = lock_servers(&registry)?;
+        let mut servers = lock_servers(registry)?;
         servers.remove(&project_id)
     };
 
@@ -195,7 +195,7 @@ pub fn stop_dev_server(
 
 pub fn stop_all_dev_servers(app: AppHandle, registry: &DevServerRegistry) -> Result<(), String> {
     let servers = {
-        let mut servers = lock_servers(&registry)?;
+        let mut servers = lock_servers(registry)?;
         servers.drain().collect::<Vec<_>>()
     };
 

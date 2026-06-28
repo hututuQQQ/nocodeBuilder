@@ -77,7 +77,7 @@ export function DatabasePanel() {
   const currentProject = useAppStore((state) => state.currentProject);
   const [config, setConfig] = useState<ProjectSupabaseConfig | null>(null);
   const [urlDraft, setUrlDraft] = useState("");
-  const [anonKeyDraft, setAnonKeyDraft] = useState("");
+  const [publishableKeyDraft, setPublishableKeyDraft] = useState("");
   const [secretKeyDraft, setSecretKeyDraft] = useState("");
   const [dbUrlDraft, setDbUrlDraft] = useState("");
   const [schemaDraft, setSchemaDraft] = useState("public");
@@ -133,7 +133,7 @@ export function DatabasePanel() {
         if (!isActive) return;
         setConfig(storedConfig);
         setUrlDraft(storedConfig?.url ?? "");
-        setAnonKeyDraft(storedConfig?.anonKey ?? "");
+        setPublishableKeyDraft(storedConfig?.publishableKey ?? "");
         setSecretKeyDraft(storedConfig?.secretKey ?? "");
         setDbUrlDraft(storedConfig?.dbUrl ?? "");
         setSchemaDraft(storedConfig?.schema ?? "public");
@@ -214,7 +214,7 @@ export function DatabasePanel() {
     event.preventDefault();
     if (!currentProject) return;
 
-    const validationError = validateConfigDraft(urlDraft, anonKeyDraft, secretKeyDraft, t);
+    const validationError = validateConfigDraft(urlDraft, publishableKeyDraft, secretKeyDraft, t);
     if (validationError) {
       setNotice({ tone: "error", message: validationError });
       return;
@@ -226,7 +226,7 @@ export function DatabasePanel() {
       const draftConfig: ProjectSupabaseConfig = {
         provider: "supabase",
         url: urlDraft.trim().replace(/\/+$/, ""),
-        anonKey: anonKeyDraft.trim(),
+        publishableKey: publishableKeyDraft.trim(),
         secretKey: secretKeyDraft.trim(),
         dbUrl: dbUrlDraft.trim(),
         schema: schemaDraft.trim() || "public",
@@ -239,7 +239,7 @@ export function DatabasePanel() {
         client.testDatabaseConnection(),
       ]);
       const nextConfig = await saveProjectSupabaseConfig(currentProject.id, {
-        anonKey: anonKeyDraft,
+        publishableKey: publishableKeyDraft,
         dbUrl: dbUrlDraft,
         schema: schemaDraft,
         secretKey: secretKeyDraft,
@@ -525,11 +525,11 @@ export function DatabasePanel() {
       ) : !config ? (
         <div className="min-h-0 flex-1 overflow-y-auto">
           <SupabaseConfigForm
-            anonKeyDraft={anonKeyDraft}
+            publishableKeyDraft={publishableKeyDraft}
             dbUrlDraft={dbUrlDraft}
             isTesting={isTesting}
             notice={notice}
-            onAnonKeyChange={setAnonKeyDraft}
+            onPublishableKeyChange={setPublishableKeyDraft}
             onDbUrlChange={setDbUrlDraft}
             onSchemaChange={setSchemaDraft}
             onSecretKeyChange={setSecretKeyDraft}
@@ -686,7 +686,7 @@ export function DatabasePanel() {
               </div>
               <button aria-label={t("common.close")} className="grid size-8 place-items-center rounded border border-zinc-800 text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-200" onClick={() => setIsConfigOpen(false)} type="button"><X size={14} aria-hidden="true" /></button>
             </div>
-            <SupabaseConfigForm anonKeyDraft={anonKeyDraft} compact dbUrlDraft={dbUrlDraft} isTesting={isTesting} notice={notice} onAnonKeyChange={setAnonKeyDraft} onDbUrlChange={setDbUrlDraft} onSchemaChange={setSchemaDraft} onSecretKeyChange={setSecretKeyDraft} onSubmit={handleSaveConfig} onUrlChange={setUrlDraft} projectName={currentProject.name} schemaDraft={schemaDraft} secretKeyDraft={secretKeyDraft} urlDraft={urlDraft} />
+            <SupabaseConfigForm publishableKeyDraft={publishableKeyDraft} compact dbUrlDraft={dbUrlDraft} isTesting={isTesting} notice={notice} onPublishableKeyChange={setPublishableKeyDraft} onDbUrlChange={setDbUrlDraft} onSchemaChange={setSchemaDraft} onSecretKeyChange={setSecretKeyDraft} onSubmit={handleSaveConfig} onUrlChange={setUrlDraft} projectName={currentProject.name} schemaDraft={schemaDraft} secretKeyDraft={secretKeyDraft} urlDraft={urlDraft} />
           </div>
         </div>
       ) : null}
@@ -729,13 +729,13 @@ export function DatabasePanel() {
   );
 }
 
-function SupabaseConfigForm({ anonKeyDraft, compact = false, dbUrlDraft, isTesting, notice, onAnonKeyChange, onDbUrlChange, onSchemaChange, onSecretKeyChange, onSubmit, onUrlChange, projectName, schemaDraft, secretKeyDraft, urlDraft }: {
-  anonKeyDraft: string;
+function SupabaseConfigForm({ publishableKeyDraft, compact = false, dbUrlDraft, isTesting, notice, onPublishableKeyChange, onDbUrlChange, onSchemaChange, onSecretKeyChange, onSubmit, onUrlChange, projectName, schemaDraft, secretKeyDraft, urlDraft }: {
+  publishableKeyDraft: string;
   compact?: boolean;
   dbUrlDraft: string;
   isTesting: boolean;
   notice: Notice | null;
-  onAnonKeyChange: (value: string) => void;
+  onPublishableKeyChange: (value: string) => void;
   onDbUrlChange: (value: string) => void;
   onSchemaChange: (value: string) => void;
   onSecretKeyChange: (value: string) => void;
@@ -752,8 +752,8 @@ function SupabaseConfigForm({ anonKeyDraft, compact = false, dbUrlDraft, isTesti
     <form className={compact ? "" : "mx-auto w-full max-w-[520px] p-5"} onSubmit={onSubmit}>
       {!compact ? <div className="mb-5"><h3 className="text-sm font-semibold text-zinc-100">{t("database.connectSupabase")}</h3><p className="mt-1 text-xs leading-5 text-zinc-500">{t("database.connectionDescription", { project: projectName })}</p></div> : null}
       <label className="mb-3 block"><span className="mb-2 block text-xs font-medium text-zinc-400">{t("database.projectUrl")}</span><input className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/10" onChange={(event) => onUrlChange(event.currentTarget.value)} placeholder="https://your-project.supabase.co" value={urlDraft} /></label>
-      <label className="mb-3 block"><span className="mb-2 block text-xs font-medium text-zinc-400">{t("database.anonKey")}</span><input className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/10" onChange={(event) => onAnonKeyChange(event.currentTarget.value)} placeholder="sb_publishable_... or legacy anon key" type="password" value={anonKeyDraft} /></label>
-      <label className="mb-3 block"><span className="mb-2 block text-xs font-medium text-zinc-400">{t("database.secretKey")}</span><input className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/10" onChange={(event) => onSecretKeyChange(event.currentTarget.value)} placeholder="sb_secret_... or service_role key" type="password" value={secretKeyDraft} /></label>
+      <label className="mb-3 block"><span className="mb-2 block text-xs font-medium text-zinc-400">{t("database.publishableKey")}</span><input className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/10" onChange={(event) => onPublishableKeyChange(event.currentTarget.value)} placeholder="sb_publishable_..." type="password" value={publishableKeyDraft} /></label>
+      <label className="mb-3 block"><span className="mb-2 block text-xs font-medium text-zinc-400">{t("database.secretKey")}</span><input className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/10" onChange={(event) => onSecretKeyChange(event.currentTarget.value)} placeholder="sb_secret_..." type="password" value={secretKeyDraft} /></label>
       <label className="mb-3 block"><span className="mb-2 block text-xs font-medium text-zinc-400">{t("database.dbUrl")}</span><input className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/10" onChange={(event) => onDbUrlChange(event.currentTarget.value)} placeholder="postgresql://postgres.project-ref:...@...pooler.supabase.com:5432/postgres?sslmode=require" type="password" value={dbUrlDraft} /><span className="mt-2 block text-[11px] leading-5 text-zinc-500">{t("database.dbUrlHint")}</span></label>
       <label className="mb-3 block"><span className="mb-2 block text-xs font-medium text-zinc-400">{t("database.schema")}</span><input className="h-10 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/10" onChange={(event) => onSchemaChange(event.currentTarget.value)} placeholder="public" value={schemaDraft} /></label>
       {notice ? <NoticeBar notice={notice} /> : null}
@@ -982,9 +982,9 @@ function EmptyDatabaseState({ loading = false, message, title }: { loading?: boo
   );
 }
 
-function validateConfigDraft(url: string, anonKey: string, secretKey: string, t: TranslateFunction) {
+function validateConfigDraft(url: string, publishableKey: string, secretKey: string, t: TranslateFunction) {
   if (!url.trim()) return t("database.enterUrl");
-  if (!anonKey.trim()) return t("database.enterAnon");
+  if (!publishableKey.trim()) return t("database.enterPublishable");
   if (!secretKey.trim()) return t("database.enterSecret");
   try {
     const parsedUrl = new URL(url.trim());
