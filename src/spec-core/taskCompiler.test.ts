@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { DevelopmentSpec, SpecRevision, SpecTask } from "./types";
 import {
   compileAllowedPathsForSpecTask,
+  compileSpecTaskManifest,
   compileSpecTaskContract,
 } from "./taskCompiler";
 
@@ -245,6 +246,28 @@ describe("compileSpecTaskContract", () => {
     expect(paths).toEqual(
       expect.arrayContaining(["lib/foo.ts", "package.json", "next.config.*"]),
     );
+  });
+
+  it("filters placeholder expected files from contracts and manifests", () => {
+    const task = createTask({
+      expectedFiles: ["data/posts/.gitkeep", "data/posts/seed.json"],
+    });
+    const revision = createRevision({ tasks: [task] });
+    const spec = createSpec(revision);
+    const contract = compileSpecTaskContract({ revision, spec, task });
+    const manifest = compileSpecTaskManifest({
+      contract,
+      conversationId: spec.conversationId,
+      revision,
+      spec,
+      task,
+    });
+
+    expect(contract.source?.expectedFiles).toEqual(["data/posts/seed.json"]);
+    expect(contract.scope.allowedPaths).toContain("data/posts/seed.json");
+    expect(contract.scope.allowedPaths).not.toContain("data/posts/.gitkeep");
+    expect(manifest.spec?.expectedFiles).toEqual(["data/posts/seed.json"]);
+    expect(manifest.runtimeContract.expectedFiles).toEqual(["data/posts/seed.json"]);
   });
 
   it("filters forbidden paths from compiled allowed paths", () => {

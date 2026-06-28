@@ -277,6 +277,12 @@ describe("project prompts", () => {
     expect(systemContent).toContain(
       "If workingState.currentBlocker.suggestedAction exists, treat it as the highest-priority next step",
     );
+    expect(systemContent).toContain(
+      "follow its rescue-attempt wording",
+    );
+    expect(systemContent).not.toContain(
+      "this is the final automatic rescue",
+    );
   });
 
   it("hides backend schema guidance and preview tools when not relevant", () => {
